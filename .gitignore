@@ -1,0 +1,52 @@
+# ─── Secrets — ne jamais commiter ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+config.json
+*.pem
+*.key
+
+# ─── Environnements virtuels ─────────────────────────────────────────────────
+.venv*/
+venv*/
+env/
+ENV/
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─── libmpv (binaire distribué hors dépôt, cf. claude.md) ────────────────────
+# L'empreinte libmpv-2.dll.sha256 est versionnée, la DLL non.
+mpv*.dll
+libmpv*.dll
+libmpv*.dylib
+libmpv*.so*
+libmpv-2.dll.bak-*
+
+# ─── Contexte de travail local (non publié) ──────────────────────────────────
+claude.md
+CLAUDE.md
+
+# ─── Éditeurs et OS ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─── Sorties locales ─────────────────────────────────────────────────────────
+*.log
+clips/
+.scannerwork/
