@@ -116,8 +116,16 @@ jobs:
         if: matrix.target == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmpv2 libegl1 libxkbcommon-x11-0 \
+          sudo apt-get install -y libegl1 libxkbcommon-x11-0 \
             libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+          # Le paquet a été renommé avec la version d'API : libmpv1 jusqu'à
+          # Ubuntu 22.04, libmpv2 à partir de 24.04. Le runner est épinglé sur
+          # 22.04 pour que le binaire produit tourne sur les glibc plus
+          # anciennes ; on accepte les deux pour survivre à un changement de
+          # runner.
+          sudo apt-get install -y libmpv2 \
+            || sudo apt-get install -y libmpv1 \
+            || { echo "::error::aucun paquet libmpv sur ce runner"; exit 1; }
 
       - name: Dépendances système (macOS)
         if: matrix.target == 'macos'
@@ -176,33 +184,59 @@ jobs:
         if: matrix.target == 'macos'
         run: |
           APP="dist/ZLink.app"
+          # Un .app produit par PyInstaller 6 n'a pas de dossier _internal : les
+          # binaires vont dans Contents/Frameworks, les données dans
+          # Contents/Resources, et les deux sont liés symboliquement l'un vers
+          # l'autre. On cherche le fichier plutôt que de parier sur sa place.
+          DYLIB=$(find "$APP" -name 'libmpv.2.dylib' -type f -print -quit)
+          if [ -z "$DYLIB" ]; then
+            echo "::error::libmpv.2.dylib introuvable dans le paquet"
+            find "$APP" -maxdepth 3 | head -40
+            exit 1
+          fi
+          echo "libmpv trouvée : $DYLIB"
           dylibbundler -cd -b -of \
-            -x "$APP/Contents/MacOS/_internal/libmpv.2.dylib" \
+            -x "$DYLIB" \
             -d "$APP/Contents/Frameworks" \
             -p "@executable_path/../Frameworks/"
-          otool -L "$APP/Contents/MacOS/_internal/libmpv.2.dylib" | head -20
+          otool -L "$DYLIB" | head -20
 
       - name: Contrôle du paquet
         shell: bash
         run: |
           if [ "${{ matrix.target }}" = "macos" ]; then
-            cd dist/ZLink.app/Contents/MacOS
+            RACINE="dist/ZLink.app"
           else
-            cd dist/ZLink
+            RACINE="dist/ZLink"
           fi
-          test -f assets/sounds/milestone.wav || test -f _internal/assets/sounds/milestone.wav \
-            || { echo "::error::sons absents du paquet"; exit 1; }
-          if [ "${{ matrix.target }}" = "windows" ]; then
-            ./streamlink.exe --version || { echo "::error::streamlink embarqué inopérant"; exit 1; }
-          else
-            ./streamlink --version || { echo "::error::streamlink embarqué inopérant"; exit 1; }
-          fi
-          # libmpv doit voyager avec l'application sur les plateformes où elle
-          # ne peut pas être supposée présente.
+          # Les dispositions diffèrent d'une plateforme à l'autre (onedir avec
+          # _internal, .app avec Frameworks/Resources) : on cherche, on ne
+          # suppose pas. Un fichier absent doit dire lequel, pas où on l'a cru.
+          verifie() { # verifie <motif> <libellé>
+            if ! find "$RACINE" -name "$1" -print -quit | grep -q .; then
+              echo "::error::$2 absent du paquet ($1)"
+              find "$RACINE" -maxdepth 3 | head -40
+              exit 1
+            fi
+            echo "  ok : $1"
+          }
+          verifie 'milestone.wav' 'sons'
           case "${{ matrix.target }}" in
-            windows) test -f _internal/libmpv-2.dll  || { echo "::error::libmpv absente du paquet"; exit 1; } ;;
-            macos)   test -f _internal/libmpv.2.dylib || { echo "::error::libmpv absente du paquet"; exit 1; } ;;
+            windows) verifie 'libmpv-2.dll'   'libmpv' ;;
+            macos)   verifie 'libmpv.2.dylib' 'libmpv' ;;
           esac
+          # streamlink est un exécutable à part, toujours posé à côté du
+          # programme principal.
+          if [ "${{ matrix.target }}" = "macos" ]; then
+            BIN="$RACINE/Contents/MacOS"
+          else
+            BIN="$RACINE"
+          fi
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            "$BIN/streamlink.exe" --version || { echo "::error::streamlink embarqué inopérant"; exit 1; }
+          else
+            "$BIN/streamlink" --version || { echo "::error::streamlink embarqué inopérant"; exit 1; }
+          fi
 
       # ── macOS : signature, notarisation, agrafage ────────────────────
       # Sans certificat configuré, on saute tout : la construction reste utile
@@ -233,7 +267,11 @@ jobs:
           # Signer d'ABORD tout ce qui est imbriqué, du plus profond vers la
           # racine : Apple déconseille --deep, qui applique les mêmes droits à
           # des binaires qui n'en ont pas besoin et rate certains cas.
-          find "$APP" \( -name '*.dylib' -o -name '*.so' -o -name '*.framework' \) \
+          # -type f : PyInstaller lie symboliquement les binaires entre
+          # Contents/Frameworks et Contents/Resources. Signer à travers un lien
+          # signerait deux fois la même cible, et codesign refuse certains liens.
+          find "$APP" \( -type f -name '*.dylib' -o -type f -name '*.so' \
+                        -o -type d -name '*.framework' \) \
             -print0 | xargs -0 -I{} codesign --force --timestamp --options runtime \
             --entitlements packaging/entitlements.plist \
             --sign "$MAC_SIGN_IDENTITY" {}

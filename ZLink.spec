@@ -15,6 +15,7 @@ import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 donnees = [("assets", "assets")]
+binaires_extra: list[tuple[str, str]] = []
 
 import os
 
@@ -28,10 +29,14 @@ if sys.platform.startswith("win"):
         donnees.append(("libmpv-2.dll.sha256", "."))
 elif sys.platform == "darwin":
     # Déposée par le workflow depuis Homebrew. Ses propres dépendances (ffmpeg
-    # et consorts) sont rapatriées après coup par dylibbundler : les embarquer
-    # ici sans réécrire leurs chemins de chargement ne servirait à rien.
+    # et consorts) sont rapatriées après coup par dylibbundler.
+    #
+    # Déclarée en BINAIRE et non en donnée : dans un .app, PyInstaller range les
+    # données sous Contents/Resources et les binaires sous Contents/Frameworks.
+    # Du code scellé comme ressource n'est pas signé comme du code, ce que la
+    # notarisation refuse.
     if os.path.exists("libmpv.2.dylib"):
-        donnees.append(("libmpv.2.dylib", "."))
+        binaires_extra.append(("libmpv.2.dylib", "."))
 
 qta_datas, qta_binaires, qta_imports = collect_all("qtawesome")
 donnees += qta_datas
@@ -39,7 +44,7 @@ donnees += qta_datas
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=qta_binaires,
+    binaries=qta_binaires + binaires_extra,
     datas=donnees,
     # streamlink est lancé comme un PROCESSUS séparé, mais ses plugins sont
     # chargés dynamiquement : sans cette collecte, l'exécutable streamlink
