@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """Persistance de la sélection de streamers pour la grille."""
 
 from __future__ import annotations
@@ -75,6 +79,35 @@ class SelectionStore:
     def clear(self) -> None:
         self._selected.clear()
         self.save()
+
+    # -- dispositions nommées --------------------------------------------
+
+    def presets(self) -> dict[str, list[str]]:
+        """Dispositions enregistrées : nom → liste de logins."""
+        from core import config_store
+        raw = config_store.load().get("grid_presets")
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): [str(x) for x in v]
+                for k, v in raw.items() if isinstance(v, list)}
+
+    def save_preset(self, nom: str, logins: list[str]) -> bool:
+        """Enregistre la sélection sous un nom. Écrase un homonyme."""
+        from core import config_store
+        nom = (nom or "").strip()[:40]
+        if not nom:
+            return False
+        presets = self.presets()
+        presets[nom] = [str(lg) for lg in logins if lg]
+        return config_store.save_merge({"grid_presets": presets})
+
+    def delete_preset(self, nom: str) -> bool:
+        from core import config_store
+        presets = self.presets()
+        if nom not in presets:
+            return False
+        presets.pop(nom)
+        return config_store.save_merge({"grid_presets": presets})
 
     def get_selected(self) -> list[str]:
         """Retourne les logins sélectionnés dans l'ordre de sélection."""

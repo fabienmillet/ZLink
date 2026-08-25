@@ -1,13 +1,19 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """Clients HTTP async pour les APIs ZEvent et communautaire."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from weakref import WeakKeyDictionary
 
 import httpx
 
@@ -19,6 +25,45 @@ ZEVENT_URL = "https://zevent.fr/api/"
 GDOC_URL = "https://api.ppr.evenmorestats.fr"
 GDOC_EVENT_ID = "019f5bd1-fe07-7d78-a326-a02198a9d50f"   # ZEvent 2026 (3 → 7 sept.)
 _TIMEOUT = httpx.Timeout(10.0)
+
+# Un client HTTP par boucle d'evenements, partage par toutes les requetes qui
+# s'y executent. Chaque appel ouvrait le sien : 32 clients en 71 s, donc autant
+# de poignees de main TLS vers les memes deux hotes, et aucune connexion
+# reutilisee. Le client est lie a sa boucle (ses transports le sont), d'ou la
+# table par boucle plutot qu'un singleton de module ; la cle est faible pour ne
+# pas retenir une boucle fermee.
+_LOOP_CLIENTS: "WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+    WeakKeyDictionary()
+)
+
+
+def _client() -> httpx.AsyncClient:
+    """Client de la boucle courante, cree a la demande."""
+    loop = asyncio.get_running_loop()
+    client = _LOOP_CLIENTS.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(timeout=_TIMEOUT)
+        _LOOP_CLIENTS[loop] = client
+    return client
+
+
+async def close_loop_client() -> None:
+    """Ferme le client de la boucle courante. A appeler avant de la fermer.
+
+    Sans cela, les sockets du pool survivent a la boucle et httpx signale des
+    transports non fermes.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    client = _LOOP_CLIENTS.pop(loop, None)
+    if client is not None and not client.is_closed:
+        try:
+            await client.aclose()
+        except Exception as exc:
+            logger.debug("Fermeture du client HTTP : %s", exc)
+
 _UTC2 = timezone(timedelta(hours=2))
 _CENTS_PER_EURO = 100.0
 
@@ -33,7 +78,7 @@ class StreamerInfo:
     display: str
     online: bool
     game: str
-    location: str          # "LAN" | "Online" | ""
+    location: str          # "LAN" | "Ankama" | "Villa" | "Online" | ""
     viewers: int
     donation: float
     donation_formatted: str
@@ -51,7 +96,7 @@ class Participation:
     participation_id: str
     twitch_login: str
     display: str
-    location: str          # "LAN" | "Online" | ""
+    location: str          # "LAN" | "Ankama" | "Villa" | "Online" | ""
     live: bool
     game: str
     viewers: int
@@ -80,6 +125,11 @@ class EventItem:
     start_ts: float = 0.0  # timestamp Unix secondes UTC
     end_ts: float = 0.0    # timestamp Unix secondes UTC
     names: dict[str, str] = field(default_factory=dict)  # streamer_id → nom (invités inclus)
+    # Les invités d'un show (artistes, groupes) ne figurent pas dans la liste des
+    # streamers ZEvent : leur login et leur avatar ne sont disponibles QUE dans la
+    # charge du show, on les conserve donc ici plutôt que de les jeter.
+    logins: dict[str, str] = field(default_factory=dict)        # streamer_id → login Twitch
+    profile_urls: dict[str, str] = field(default_factory=dict)  # streamer_id → URL avatar
 
 
 @dataclass
@@ -140,6 +190,28 @@ def _safe_login(raw: Any) -> str:
         logger.warning("Login Twitch rejeté (format inattendu) : %r", login[:40])
         return ""
     return login
+
+
+# L'API distingue quatre lieux. Les écraser en « LAN / Online » perdait
+# l'information des sites satellites, que le panel ne pouvait donc plus filtrer.
+_LOCATION_LABELS = {
+    "lan":           "LAN",
+    "remote_ankama": "Ankama",
+    "remote_villa":  "Villa",
+    "remote":        "Online",
+}
+
+
+def _location_label(raw_loc: str) -> str:
+    """Libellé d'affichage du lieu de participation."""
+    if not raw_loc:
+        return ""
+    known = _LOCATION_LABELS.get(raw_loc)
+    if known:
+        return known
+    # Un nouveau site apparu en cours d'édition reste lisible plutôt qu'ignoré.
+    logger.info("Lieu de participation inconnu : %r", raw_loc[:40])
+    return raw_loc.replace("remote_", "").replace("_", " ").title()
 
 
 def _safe_https_url(raw: Any, allowed_hosts: tuple[str, ...] = ()) -> str:
@@ -225,10 +297,9 @@ def _parse_streamer_entry(s: dict[str, Any]) -> StreamerInfo:
 async def fetch_zevent_data() -> tuple[GlobalStats, list[StreamerInfo]]:
     """Charge les données live depuis zevent.fr/api/. Ne lève jamais."""
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(ZEVENT_URL)
-            r.raise_for_status()
-            data = r.json()
+        r = await _client().get(ZEVENT_URL)
+        r.raise_for_status()
+        data = r.json()
     except Exception as exc:
         logger.error("fetch_zevent_data: %s", exc)
         return GlobalStats(0.0, "0 €", 0, "offline"), []
@@ -269,7 +340,7 @@ def _parse_participation(p: dict[str, Any]) -> Participation:
         participation_id=str(p.get("participation_id") or "").strip(),
         twitch_login=_safe_login(twitch.get("login")).lower(),
         display=str(p.get("name") or first.get("name") or ""),
-        location="LAN" if raw_loc == "lan" else ("Online" if raw_loc else ""),
+        location=_location_label(raw_loc),
         live=live,
         game=game if live and game.lower() != "offline" else "",
         viewers=int(state.get("viewers") or 0) if live else 0,
@@ -285,10 +356,9 @@ async def fetch_participations() -> list[Participation]:
     quelques minutes) et la cagnotte par streamer.
     """
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(f"{GDOC_URL}/events/{GDOC_EVENT_ID}/participations")
-            r.raise_for_status()
-            data = r.json()
+        r = await _client().get(f"{GDOC_URL}/events/{GDOC_EVENT_ID}/participations")
+        r.raise_for_status()
+        data = r.json()
     except Exception as exc:
         logger.error("fetch_participations: %s", exc)
         return []
@@ -314,15 +384,20 @@ async def fetch_gdoc_streamers() -> dict[str, str]:
 # API 4 — programme (shows de l'édition)
 # ---------------------------------------------------------------------------
 
-def _parse_participants(parts_raw: Any) -> tuple[list[str], list[str], dict[str, str]]:
-    """Extrait (host_ids, participant_ids, {id: nom}) depuis 'participants'.
+def _parse_participants(
+    parts_raw: Any,
+) -> tuple[list[str], list[str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Extrait (host_ids, participant_ids, {id: nom}, {id: login}, {id: avatar}).
 
-    Format 2026 : liste de dicts {streamer_id, streamer_name, role: host|guest}.
+    Format 2026 : liste de dicts {streamer_id, streamer_name, role: host|guest,
+    profile_url, socials.twitch.login}.
     Les formats historiques (dict host/participant, liste d'UUIDs) restent gérés.
     """
     host_ids: list[str] = []
     participant_ids: list[str] = []
     names: dict[str, str] = {}
+    logins: dict[str, str] = {}
+    avatars: dict[str, str] = {}
 
     if isinstance(parts_raw, dict):
         host_ids = [str(h) for h in (parts_raw.get("host") or [])]
@@ -338,23 +413,32 @@ def _parse_participants(parts_raw: Any) -> tuple[list[str], list[str], dict[str,
             name = str(entry.get("streamer_name") or entry.get("name") or "")
             if name:
                 names[sid] = name
+            socials = entry.get("socials")
+            twitch = socials.get("twitch") if isinstance(socials, dict) else None
+            if isinstance(twitch, dict):
+                # _safe_login : ce login sert de nom de fichier pour le cache avatars.
+                login = _safe_login(twitch.get("login"))
+                if login:
+                    logins[sid] = login
+            avatar = _safe_https_url(entry.get("profile_url"))
+            if avatar:
+                avatars[sid] = avatar
             if str(entry.get("role") or "").lower() == "host":
                 host_ids.append(sid)
             else:
                 participant_ids.append(sid)
 
-    return host_ids, participant_ids, names
+    return host_ids, participant_ids, names, logins, avatars
 
 
 async def fetch_events(day: str) -> list[EventItem]:
     """Charge les événements d'un jour (YYYY-MM-DD). Ne lève jamais."""
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(
-                f"{GDOC_URL}/events/{GDOC_EVENT_ID}/shows", params={"day": day}
-            )
-            r.raise_for_status()
-            data = r.json()
+        r = await _client().get(
+            f"{GDOC_URL}/events/{GDOC_EVENT_ID}/shows", params={"day": day}
+        )
+        r.raise_for_status()
+        data = r.json()
     except Exception as exc:
         logger.error("fetch_events(%s): %s", day, exc)
         return []
@@ -367,7 +451,8 @@ async def fetch_events(day: str) -> list[EventItem]:
                          or ev.get("startAt") or ev.get("start") or "")
             end_raw = (schedule.get("end") or ev.get("end_at")
                        or ev.get("endAt") or ev.get("end") or "")
-            host_uuids, participant_uuids, names = _parse_participants(ev.get("participants") or {})
+            (host_uuids, participant_uuids, names, ev_logins,
+             ev_avatars) = _parse_participants(ev.get("participants") or {})
             events.append(EventItem(
                 id=str(ev.get("id") or ""),
                 name=str(ev.get("name") or ev.get("title") or ""),
@@ -380,6 +465,8 @@ async def fetch_events(day: str) -> list[EventItem]:
                 start_ts=_to_unix_ts(start_raw),
                 end_ts=_to_unix_ts(end_raw),
                 names=names,
+                logins=ev_logins,
+                profile_urls=ev_avatars,
             ))
     except Exception as exc:
         logger.error("fetch_events(%s) (parse): %s", day, exc)
@@ -400,10 +487,10 @@ async def fetch_donation_goals(participation_id: str) -> list[DonationGoal]:
     if not participation_id:
         return []
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            r = await client.get(f"{GDOC_URL}/participations/{participation_id}/donation_goals")
-            r.raise_for_status()
-            data = r.json()
+        r = await _client().get(
+            f"{GDOC_URL}/participations/{participation_id}/donation_goals")
+        r.raise_for_status()
+        data = r.json()
     except Exception as exc:
         logger.error("fetch_donation_goals(%s): %s", participation_id, exc)
         return []

@@ -1,12 +1,15 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """DataManager — polling QTimer-based des APIs ZEvent."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import pathlib
 import threading
-import urllib.request
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Coroutine, TypeVar
 
@@ -32,9 +35,15 @@ def _run(coro: Coroutine[Any, Any, _T]) -> _T:
             pending = asyncio.all_tasks(loop)
             if pending:
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            # Le client HTTP partage par cette boucle doit etre ferme AVANT
+            # elle : ses sockets lui survivraient sinon.
+            loop.run_until_complete(_close_loop_client())
+        except Exception:
+            logger.debug("Nettoyage de boucle incomplet", exc_info=True)
         finally:
             loop.close()
 
+from core.api_client import close_loop_client as _close_loop_client
 from core.api_client import (
     DonationGoal,
     EventItem,
@@ -50,12 +59,38 @@ from core.api_client import (
 )
 from core.history_store import HistoryStore
 
+from core import alerts as _alerts
+from core import avatar_cache
+
 logger = logging.getLogger(__name__)
 
 # ZEvent 2026 : 3 sept. 18:00 UTC → 7 sept. 00:00 UTC (schedule de l'API events)
-_EVENT_DAYS = ["2026-09-03", "2026-09-04", "2026-09-05", "2026-09-06"]
+# L'édition 2026 court du jeudi 3 au lundi 7 septembre. Il en manquait un :
+# le 7 n'était jamais interrogé, son programme n'existait donc pas pour l'app.
+_EVENT_DAYS = ["2026-09-03", "2026-09-04", "2026-09-05",
+               "2026-09-06", "2026-09-07"]
 
-_AVATAR_MAX_BYTES = 2 * 1024 * 1024   # plafond de lecture pour un avatar
+# Alertes de dons. Le seuil porte sur l'écart entre DEUX SONDAGES, pas sur un
+# don unique : l'API ne publie qu'un cumul par streamer.
+_DONATION_ALERT_EUR: float = 1000.0
+# Un « bombardement » — le streamer demande à son chat d'envoyer des pièces, et
+# des milliers d'euros arrivent en dons de 1 ou 2 € — se reconnaît à sa DURÉE :
+# le seuil est franchi plusieurs relevés d'affilée, là où un don unique fait un
+# pic puis retombe. C'est la seule distinction possible depuis un cumul.
+_DONATION_FLOOD_POLLS: int = 3
+
+# Objectif « imminent » : à portée de quelques dons. Les deux critères sont
+# alternatifs — 500 € restants sur un objectif de 50 000 € ne fait que 1 %, et
+# 98 % d'un petit objectif ne fait que quelques dizaines d'euros.
+_GOAL_IMMINENT_EUR: float = 500.0
+_GOAL_IMMINENT_PCT: float = 98.0
+
+# Entrée dans les premières audiences du ZEvent. Trois places : au-delà, le
+# classement bouge trop pour que l'entrée signifie quoi que ce soit.
+_TOP_ENTRY_N: int = 3
+_TOP_ENTRY_COOLDOWN_S: float = 900.0
+_DONATION_ALERT_COOLDOWN_S: float = 300.0   # une chaîne ne monopolise pas
+_DONATION_ALERTS_PER_HOUR: int = 12
 
 _STREAMER_POLL_MS = 30_000    # 30 s — zevent.fr/api/ + participations
 _EVENTS_POLL_MS  = 600_000   # 10 min
@@ -131,6 +166,12 @@ class DataManager(QObject):
     goals_updated          = pyqtSignal(list)    # list[GoalWithStreamer]
     goals_raw_updated      = pyqtSignal(dict)    # dict[login, list[DonationGoal]] — cache brut
     goal_accomplished      = pyqtSignal(str, str) # (login, goal_name) — nouvel objectif accompli
+    favorite_live          = pyqtSignal(str, str) # (login, display) — un favori vient de passer en direct
+    programme_added        = pyqtSignal(str, str) # (nom, quand) — nouveau show au programme
+    milestone_reached      = pyqtSignal(float, str) # (montant, libellé) — palier de cagnotte franchi
+    goal_imminent          = pyqtSignal(str, str, str, float, str) # (login, display, objectif, reste €, url de don)
+    top_stream_entered     = pyqtSignal(str, str, int, int) # (login, display, viewers, rang) — entrée dans le top
+    big_donation           = pyqtSignal(str, str, float, str) # (login, display, montant, nature) — nature : "don" ou "bombardement"
 
     # signaux internes pour le cross-thread (worker → main thread)
     _sig_streamers_ready   = pyqtSignal(object, object, list)  # participations, stats, streamers
@@ -167,6 +208,29 @@ class DataManager(QObject):
 
         self._timer_goals = QTimer(self)
         self._timer_goals.setInterval(_GOALS_POLL_MS)
+        self._goals_running = False
+        # Suivi des transitions, pour ne notifier que ce qui CHANGE.
+        self._online_logins: set[str] = set()
+        self._live_init_done = False
+        self._known_events: set[str] = set()
+        self._events_init_done = False
+        self._last_milestone: float | None = None
+        self._prev_donations: dict[str, float] = {}
+        self._donations_init_done = False
+        # Clé (login, nature) : un pic et un bombardement sont deux événements.
+        self._donation_alert_at: dict[tuple[str, str], float] = {}
+        self._donation_streak: dict[str, int] = {}
+        self._donation_run: dict[str, float] = {}
+        self._imminent_announced: set[tuple[str, str]] = set()
+        self._imminent_init_done = False
+        self._prev_top: set[str] = set()
+        self._top_init_done = False
+        self._top_alert_at: dict[str, float] = {}
+        self._donation_alert_times: list[float] = []
+        # Lu au démarrage puis rafraîchi par reload_config : interroger le
+        # disque à chaque sondage pour trois nombres serait absurde.
+        from core import config_store as _cfg
+        self._alert_cfg: dict = _cfg.load()
         self._timer_goals.timeout.connect(self._start_goals_prefetch)
 
         # connexions internes cross-thread (queued automatiquement si thread différent)
@@ -204,8 +268,16 @@ class DataManager(QObject):
     # -- queries --------------------------------------------------------------
 
     def reload_config(self, config: dict) -> None:
-        """Point d'entrée de rechargement à chaud (aucun réglage réseau à ce jour)."""
-        return
+        """Rechargement à chaud : seuls les seuils d'alerte sont concernés."""
+        self._alert_cfg = dict(config or {})
+
+    def participant_logins(self) -> set[str]:
+        """Logins de TOUS les participants, en ligne ou non, en minuscules.
+
+        Sert à distinguer un raid entre participants du ZEvent d'un raid venu
+        de n'importe où — un ami, un petit streamer de passage.
+        """
+        return {s.twitch_login.lower() for s in self._streamers if s.twitch_login}
 
     def get_streamers_live(self) -> list[StreamerInfo]:
         return [s for s in self._streamers if s.online]
@@ -302,12 +374,18 @@ class DataManager(QObject):
             s.gdoc_id = self._gdoc_map.get(key)
             s.participation_id = self._participation_map.get(key)
 
+        self._detect_favorites_live(streamers)
+        self._detect_big_donations(streamers)
+        self._detect_top_entry(streamers)
+
         self._streamers = streamers
         self._stats = stats
         self._uuid_to_name = {p.streamer_id: p.display for p in self._participations}
         self._uuid_to_name.update({s.gdoc_id: s.display for s in streamers if s.gdoc_id})
 
         self.streamers_updated.emit(self._streamers)
+        if _alerts.enabled("milestone"):
+            self._detect_milestone(self._stats.donation_total)
         self.global_stats_updated.emit(self._stats)
         self._history.add_point(self._stats.donation_total, self._stats.viewers_total)
         self.history_updated.emit(self._history)
@@ -342,48 +420,34 @@ class DataManager(QObject):
         ).start()
 
     def _avatars_prefetch_worker(self, entries: list[tuple[str, str]]) -> None:
-        """Télécharge les avatars manquants en parallèle (10 workers max)."""
-        cache_dir = pathlib.Path.home() / ".zlink" / "avatars"
+        """Télécharge les avatars manquants en parallèle (10 workers max).
+
+        Le téléchargement lui-même vit dans core.avatar_cache : la mosaïque et
+        le panel réclament les mêmes images, et deux implémentations séparées
+        tiraient la même URL deux fois.
+        """
+        cache_dir = avatar_cache.CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         missing = [
             (login, url)
             for login, url in entries
-            if not (cache_dir / f"{login}.png").exists()
+            if not avatar_cache.path_for(login).exists()
         ]
         if not missing:
             return
 
         logger.debug("Avatar prefetch : %d à télécharger", len(missing))
 
-        def _one(item: tuple[str, str]) -> None:
-            login, url = item
-            dest = cache_dir / f"{login}.png"
-            # Le login vient d'une API tierce : vérifier qu'il n'a pas fait sortir
-            # du cache (pathlib ne normalise pas ".."), et que l'URL est https
-            # (urlopen accepte sinon file:// et ftp://).
-            if not dest.resolve().parent == cache_dir.resolve():
-                logger.error("Avatar %r: chemin hors du cache, ignoré", login[:40])
-                return
-            if not url.lower().startswith("https://"):
-                logger.error("Avatar %s: URL non https, ignorée", login)
-                return
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "ZLink/1.0"})
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    payload = resp.read(_AVATAR_MAX_BYTES + 1)
-                if len(payload) > _AVATAR_MAX_BYTES:
-                    logger.error("Avatar %s: réponse > %d octets, ignorée",
-                                 login, _AVATAR_MAX_BYTES)
-                    return
-                dest.write_bytes(payload)
-            except Exception as exc:
-                logger.debug("Avatar prefetch %s: %s", login, exc)
+        # thread_name_prefix seulement pour le diagnostic ; l'essentiel est que
+        # ce pool soit fermé : ses threads sont NON-DAEMON et Python les joint à
+        # la sortie via un hook atexit. Un téléchargement lent bloquait donc
+        # l'arrêt de l'application pendant tout son timeout.
+        with ThreadPoolExecutor(max_workers=10, thread_name_prefix="avatars") as pool:
+            done = sum(pool.map(lambda it: avatar_cache.download(*it), missing))
 
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            pool.map(_one, missing)
-
-        logger.info("Avatar prefetch terminé : %d photos téléchargées", len(missing))
+        logger.info("Avatar prefetch terminé : %d/%d photos disponibles",
+                    done, len(missing))
 
     def _poll_events(self) -> None:
         """Déclenche le poll events en background."""
@@ -403,6 +467,211 @@ class DataManager(QObject):
             logger.error("_poll_events: %s", exc)
             self._polling_events = False
 
+    def _detect_top_entry(self, streamers: list[StreamerInfo]) -> None:
+        """Signale l'entrée d'une chaîne dans les toutes premières audiences.
+
+        Surveiller la progression des trois cents participants produirait un
+        flux continu — tout le monde monte et descend en permanence. Entrer
+        dans le TOP 3, en revanche, est rare et veut dire quelque chose : un
+        show vient de commencer, un raid a atterri, il se passe quelque chose
+        d'assez gros pour déplacer l'audience du ZEvent.
+
+        Le filtre « pas déjà à l'écran » n'est pas appliqué ici : le gestionnaire
+        de données ignore ce que la grille affiche. C'est l'appelant qui écarte
+        les chaînes déjà visibles — une alerte pour ce qu'on regarde déjà
+        n'apprendrait rien.
+        """
+        if not _alerts.enabled("top_entry"):
+            return
+        live = sorted(
+            [s for s in streamers if s.online and s.twitch_login and s.viewers > 0],
+            key=lambda s: -s.viewers,
+        )[:_TOP_ENTRY_N]
+        actuels = [s.twitch_login for s in live]
+        now = time.monotonic()
+        if self._top_init_done:
+            for rang, s in enumerate(live, 1):
+                if s.twitch_login in self._prev_top:
+                    continue
+                # Une chaîne qui oscille autour de la troisième place ne doit
+                # pas se signaler à chaque sondage.
+                if now - self._top_alert_at.get(s.twitch_login, 0.0) < _TOP_ENTRY_COOLDOWN_S:
+                    continue
+                self._top_alert_at[s.twitch_login] = now
+                logger.info("Entrée dans le top %d : %s (%d viewers, rang %d)",
+                            _TOP_ENTRY_N, s.twitch_login, s.viewers, rang)
+                self.top_stream_entered.emit(
+                    s.twitch_login, s.display or s.twitch_login, s.viewers, rang)
+        self._prev_top = set(actuels)
+        self._top_init_done = True
+
+    def _detect_big_donations(self, streamers: list[StreamerInfo]) -> None:
+        """Signale une montée notable de la cagnotte d'une chaîne.
+
+        Ce qu'on mesure est l'écart entre deux sondages, pas un don unique :
+        l'API ne donne qu'un cumul par streamer, et trente secondes peuvent
+        agréger un gros don ou vingt petits. Le message dit donc « vient de
+        recevoir », ce qui reste vrai dans les deux cas.
+
+        Trois garde-fous, pour la même raison que partout ailleurs : le premier
+        relevé ne déclenche rien, une chaîne ne peut pas monopoliser les
+        alertes, et le nombre d'alertes par heure est plafonné — un ZEvent
+        distribue des dons en continu sur trois cents chaînes.
+        """
+        if not _alerts.enabled("donation"):
+            return
+        hw = self._donation_alert_config()
+        seuil = float(hw.get("threshold", _DONATION_ALERT_EUR))
+        cooldown = float(hw.get("cooldown_s", _DONATION_ALERT_COOLDOWN_S))
+        par_heure = max(1, int(hw.get("per_hour", _DONATION_ALERTS_PER_HOUR)))
+        now = time.monotonic()
+
+        candidats: list[tuple[float, StreamerInfo, str]] = []
+        for s in streamers:
+            login = s.twitch_login
+            if not login:
+                continue
+            try:
+                courant = float(s.donation or 0.0)
+            except (TypeError, ValueError):
+                continue
+            avant = self._prev_donations.get(login)
+            self._prev_donations[login] = courant
+            if avant is None or not self._donations_init_done:
+                continue
+            delta = courant - avant
+            if delta < seuil:
+                # La série s'interrompt : ce qui suivra sera un nouvel épisode.
+                self._donation_streak.pop(login, None)
+                self._donation_run.pop(login, None)
+                continue
+            serie = self._donation_streak.get(login, 0) + 1
+            self._donation_streak[login] = serie
+            cumul = self._donation_run.get(login, 0.0) + delta
+            self._donation_run[login] = cumul
+
+            nature = "bombardement" if serie >= _DONATION_FLOOD_POLLS else "don"
+            # Le cooldown vaut par NATURE : un bombardement qui s'installe après
+            # un premier pic mérite d'être annoncé, c'est un autre événement.
+            if now - self._donation_alert_at.get((login, nature), 0.0) < cooldown:
+                continue
+            montant = cumul if nature == "bombardement" else delta
+            candidats.append((montant, s, nature))
+
+        self._donations_init_done = True
+        if not candidats:
+            return
+
+        # Plafond horaire, comme pour HypeWatcher : on garde les plus gros.
+        self._donation_alert_times = [
+            t for t in self._donation_alert_times if now - t < 3600.0]
+        place = max(0, par_heure - len(self._donation_alert_times))
+        if place == 0:
+            logger.debug("Alertes de dons : plafond horaire atteint, %d ignorée(s)",
+                         len(candidats))
+            return
+        candidats.sort(key=lambda c: -c[0])
+        for montant, s, nature in candidats[:place]:
+            self._donation_alert_at[(s.twitch_login, nature)] = now
+            self._donation_alert_times.append(now)
+            logger.info("Dons — %s sur %s : +%.0f €",
+                        nature, s.twitch_login, montant)
+            self.big_donation.emit(
+                s.twitch_login, s.display or s.twitch_login, montant, nature)
+
+    def _donation_alert_config(self) -> dict:
+        """Réglages des alertes de dons, tenus à jour par reload_config."""
+        raw = self._alert_cfg.get("donations")
+        return raw if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _milestone_step(total: float) -> float:
+        """Pas entre deux paliers, resserré en début d'édition.
+
+        Un pas fixe conviendrait mal aux deux bouts : à 250 000 € le premier
+        million produirait quarante annonces, et à un million les premières
+        heures n'en produiraient aucune. Le pas suit donc l'ordre de grandeur.
+        """
+        if total < 1_000_000:
+            return 250_000.0
+        if total < 5_000_000:
+            return 500_000.0
+        return 1_000_000.0
+
+    @staticmethod
+    def _fmt_milestone(amount: float) -> str:
+        """1000000 → « 1 M€ », 1500000 → « 1,5 M€ », 500000 → « 500 k€ »."""
+        if amount >= 1_000_000:
+            millions = amount / 1_000_000
+            texte = f"{millions:.1f}".rstrip("0").rstrip(".").replace(".", ",")
+            return f"{texte} M€"
+        return f"{amount / 1000:.0f} k€"
+
+    def _detect_milestone(self, total: float) -> None:
+        """Signale le franchissement d'un palier rond de cagnotte.
+
+        Le premier relevé ne déclenche rien : au lancement, la cagnotte a déjà
+        franchi tous les paliers de la journée, et les annoncer d'un coup
+        n'apprendrait rien. On ne signale que ce qui se produit sous les yeux.
+        """
+        try:
+            total = float(total or 0.0)
+        except (TypeError, ValueError):
+            return
+        if total <= 0:
+            return
+        step = self._milestone_step(total)
+        current = int(total // step) * step
+        if self._last_milestone is not None and current > self._last_milestone:
+            # Un sondage peut sauter plusieurs paliers d'un coup : on n'annonce
+            # que le plus haut, sinon trois messages se chassent l'un l'autre.
+            logger.info("Palier de cagnotte franchi : %s", self._fmt_milestone(current))
+            self.milestone_reached.emit(current, self._fmt_milestone(current))
+        if self._last_milestone is None or current > self._last_milestone:
+            self._last_milestone = current
+
+    def _detect_favorites_live(self, streamers: list[StreamerInfo]) -> None:
+        """Signale les favoris qui viennent de passer en direct.
+
+        Le premier sondage est ignoré : sans ce garde-fou, tous les favoris déjà
+        en ligne au lancement produiraient une notification, alors qu'il ne
+        s'est rien passé.
+        """
+        if not _alerts.enabled("favorite_live"):
+            return
+        online = {s.twitch_login for s in streamers if s.online and s.twitch_login}
+        if self._live_init_done:
+            from core import favorites
+            favs = favorites.get()
+            if favs:
+                for s in streamers:
+                    if (s.online and s.twitch_login
+                            and s.twitch_login not in self._online_logins
+                            and s.twitch_login.lower() in favs):
+                        logger.info("Favori en direct : %s", s.twitch_login)
+                        self.favorite_live.emit(
+                            s.twitch_login, s.display or s.twitch_login)
+        self._online_logins = online
+        self._live_init_done = True
+
+    @staticmethod
+    def _event_key(ev: EventItem) -> str:
+        """Identité stable d'un show, même sans id fourni par l'API."""
+        return str(getattr(ev, "id", "") or
+                   f"{ev.day}_{ev.start_local}_{ev.name}")
+
+    def _detect_new_events(self, all_events: list) -> None:
+        """Signale les shows ajoutés au programme depuis le sondage précédent."""
+        keys = {self._event_key(ev) for ev in all_events}
+        if self._events_init_done:
+            for ev in all_events:
+                if self._event_key(ev) not in self._known_events:
+                    when = " ".join(x for x in (ev.day, ev.start_local) if x)
+                    logger.info("Nouveau au programme : %s (%s)", ev.name, when)
+                    self.programme_added.emit(ev.name or "Événement", when)
+        self._known_events = keys
+        self._events_init_done = True
+
     def _apply_events(self, results: list) -> None:
         """Applique les résultats events sur le main thread Qt."""
         self._polling_events = False
@@ -415,6 +684,7 @@ class DataManager(QObject):
             all_events.extend(day_events)
 
         if all_events:
+            self._detect_new_events(all_events)
             self.events_updated.emit(all_events)
             logger.info(
                 "Events: %d au total sur %d jours",
@@ -454,7 +724,17 @@ class DataManager(QObject):
         return results
 
     def _start_goals_prefetch(self) -> None:
-        """Lance le prefetch des goals en background (ne bloque pas l'UI)."""
+        """Lance le prefetch des goals en background (ne bloque pas l'UI).
+
+        Garde de recouvrement : ce prefetch interroge l'API une fois par
+        streamer suivi. Sur une connexion lente il dépasse sa période, et sans
+        garde le timer empilait des passes concurrentes qui multipliaient les
+        requêtes tout en se disputant le même cache.
+        """
+        if self._goals_running:
+            logger.debug("_start_goals_prefetch : passe précédente en cours, ignorée")
+            return
+        self._goals_running = True
         threading.Thread(target=self._goals_worker, daemon=True).start()
 
     def _goals_worker(self) -> None:
@@ -464,6 +744,10 @@ class DataManager(QObject):
         except Exception as exc:
             logger.error("_goals_worker: %s", exc)
             return
+        finally:
+            # Dans le finally : une exception laissait le drapeau levé pour
+            # toujours, et plus aucun objectif n'était rafraîchi ensuite.
+            self._goals_running = False
         goals = self._get_near_completion_goals()
         self._sig_goals_ready.emit(goals)
 
@@ -472,6 +756,49 @@ class DataManager(QObject):
         self.goals_updated.emit(goals)
         self.goals_raw_updated.emit(dict(self._goals_cache))
         self._check_newly_accomplished()
+        self._check_imminent_goals()
+
+    def _check_imminent_goals(self) -> None:
+        """Signale les objectifs sur le point de tomber.
+
+        Le bandeau dit déjà « X est à 92 % de son objectif », mais 92 % peut
+        rester 92 % pendant deux heures. Ce qui mérite qu'on bascule, c'est le
+        dernier palier : quelques centaines d'euros, quelques minutes.
+
+        On repart des objectifs ENRICHIS : _goals_cache ne contient que des
+        DonationGoal bruts, sans pourcentage — celui-ci se calcule à partir de
+        la cagnotte du streamer, ce que fait déjà _get_near_completion_goals.
+
+        Chaque objectif n'est annoncé qu'une fois : sinon il reviendrait à
+        chaque sondage tant qu'il n'est pas atteint.
+        """
+        if not _alerts.enabled("goal_imminent"):
+            return
+        for g in self._get_near_completion_goals():
+            reste = g.amount_target * max(0.0, 100.0 - g.pct) / 100.0
+            if reste > _GOAL_IMMINENT_EUR and g.pct < _GOAL_IMMINENT_PCT:
+                continue
+            cle = (g.streamer_login, g.goal_name)
+            if cle in self._imminent_announced:
+                continue
+            self._imminent_announced.add(cle)
+            # Comme ailleurs, le premier passage ne parle pas : au lancement,
+            # plusieurs objectifs sont déjà tout près du but.
+            if not self._imminent_init_done:
+                continue
+            logger.info("Objectif imminent : %s — %s (reste %.0f €)",
+                        g.streamer_login, g.goal_name, reste)
+            # L'URL voyage avec l'alerte : sans elle, proposer de donner
+            # obligerait le destinataire à retrouver le streamer lui-même.
+            url = ""
+            for st in self._streamers:
+                if st.twitch_login == g.streamer_login:
+                    url = getattr(st, "donation_url", "") or ""
+                    break
+            self.goal_imminent.emit(
+                g.streamer_login, g.streamer_display or g.streamer_login,
+                g.goal_name, reste, url)
+        self._imminent_init_done = True
 
     def _check_newly_accomplished(self) -> None:
         """Détecte les objectifs nouvellement accomplis et émet goal_accomplished."""
@@ -482,14 +809,31 @@ class DataManager(QObject):
         }
         if self._goals_init_done:
             for login, name in current - self._accomplished_goals:
-                self.goal_accomplished.emit(login, name)
+                if _alerts.enabled("goal_done"):
+                    self.goal_accomplished.emit(login, name)
         self._accomplished_goals = current
         self._goals_init_done = True
 
     async def _prefetch_top_goals(self, n: int = 20) -> None:
-        """Fetch les goals des top N streamers par cagnotte, en parallèle."""
+        """Objectifs des N plus grosses cagnottes, PLUS tous les favoris.
+
+        Les favoris s'ajoutent inconditionnellement au top : sans eux, un
+        streamer suivi mais hors des vingt premières cagnottes n'avait jamais
+        ses objectifs chargés. Son objectif accompli n'était donc jamais
+        détecté, ni signalé dans le fil d'événements — précisément le cas où
+        l'utilisateur attend une notification.
+        """
         import asyncio as _asyncio
-        top = sorted(self._streamers, key=lambda s: -s.donation)[:n]
+        from core import favorites
+        ranked = sorted(self._streamers, key=lambda s: -s.donation)
+        top = ranked[:n]
+        favs = favorites.get()
+        if favs:
+            already = {s.twitch_login for s in top}
+            top = top + [
+                s for s in ranked[n:]
+                if s.twitch_login not in already and s.twitch_login.lower() in favs
+            ]
         entries = [
             (s.twitch_login,
              s.participation_id or self._participation_map.get(s.twitch_login.lower()))

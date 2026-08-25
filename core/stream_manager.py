@@ -1,8 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """StreamManager — gestion des instances Streamlink + MPV."""
 
 from __future__ import annotations
 
 import logging
+import time
 import os
 import pathlib
 import re
@@ -18,15 +23,23 @@ logger = logging.getLogger(__name__)
 
 # Qualités streamlink
 QUALITY_FULLSCREEN = "best"
-QUALITY_GRID = "360p,worst"
+# Twitch nomme ses rendus 160p30 / 360p30 / 480p30 / 720p60 / 1080p60 et
+# streamlink exige une correspondance EXACTE : « 360p », « 480p » et « 720p »
+# n'existent pas et retombaient silencieusement sur « worst », c'est-à-dire
+# 284x160. Les deux derniers paliers donnaient donc la même image.
+# Durée pendant laquelle un nouveau palier doit se confirmer avant qu'on
+# relance la grille.
+_QUALITY_DEBOUNCE_S = 45.0
+
+QUALITY_GRID = "360p30,160p30,worst"
 
 # Qualité adaptative : chaque palier est (nombre max de flux, qualité). Le premier
 # palier dont le seuil couvre le nombre de flux actifs gagne ; au-delà du dernier,
 # on retombe sur QUALITY_GRID. Budget visé : ~50 Mbps et VCN < 50 %.
 _DEFAULT_ADAPTIVE_TIERS: list[tuple[int, str]] = [
-    (1, "1080p60,1080p,best"),
-    (4, "720p60,720p,480p"),
-    (9, "480p,360p,worst"),
+    (1, "1080p60,best"),
+    (4, "720p60,480p30,360p30"),
+    (9, "480p30,360p30,160p30"),
 ]
 
 
@@ -87,6 +100,23 @@ logger.info("streamlink exe: %s", _STREAMLINK)
 # ("best", "360p,worst"). Tout ce qui commence par "-" serait interprété comme
 # une option par streamlink (--plugin-dirs exécute du Python arbitraire).
 _QUALITY_RE = re.compile(r"^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$")
+
+
+# Anciens sélecteurs, écrits avant qu'on découvre que Twitch nomme ses rendus
+# « 360p30 » et non « 360p » : ils retombaient tous sur « worst », soit 284x160.
+# Une config existante est donc migrée au chargement.
+_LEGACY_QUALITY = {
+    "360p,worst":            "360p30,160p30,worst",
+    "480p,360p,worst":       "480p30,360p30,160p30",
+    "720p,480p,worst":       "720p60,480p30,360p30",
+    "1080p60,1080p,best":    "1080p60,best",
+    "720p60,720p,480p":      "720p60,480p30,360p30",
+}
+
+
+def migrate_quality(value: str) -> str:
+    """Traduit un sélecteur hérité vers un rendu qui existe réellement."""
+    return _LEGACY_QUALITY.get((value or "").strip(), value)
 
 
 def safe_quality(raw: object, default: str) -> str:
@@ -171,6 +201,8 @@ class StreamManager(QObject):
         self._resolving: bool = False
         self._quality_fullscreen: str = QUALITY_FULLSCREEN
         self._grid_quality: str = QUALITY_GRID
+        self._pending_quality: str | None = None
+        self._pending_since: float = 0.0
         self._adaptive: bool = True
         self._adaptive_tiers: list[tuple[int, str]] = list(_DEFAULT_ADAPTIVE_TIERS)
         self._active_grid_count: int = 0
@@ -188,7 +220,8 @@ class StreamManager(QObject):
         if self._adaptive:
             self._grid_quality = self.quality_for_count(self._active_grid_count or 1)
         else:
-            self._grid_quality = safe_quality(config.get("grid_quality"), QUALITY_GRID)
+            self._grid_quality = safe_quality(
+                migrate_quality(config.get("grid_quality") or ""), QUALITY_GRID)
         self._quality_fullscreen = safe_quality(
             config.get("fullscreen_quality"), QUALITY_FULLSCREEN
         )
@@ -224,12 +257,26 @@ class StreamManager(QObject):
             return
         target = self.quality_for_count(self._active_grid_count)
         if target == self._grid_quality:
+            self._pending_quality = None
+            return
+        # Anti-rebond : changer de palier relance TOUTES les cellules (arrêt,
+        # résolution streamlink, rechargement mpv — une dizaine de secondes).
+        # Pendant un event, un streamer qui oscille autour du seuil déclencherait
+        # cette tempête à chaque sondage. On exige que le nouveau palier tienne.
+        now = time.monotonic()
+        if target != self._pending_quality:
+            self._pending_quality = target
+            self._pending_since = now
+            logger.debug("Qualité adaptative : %s en attente de confirmation", target)
+            return
+        if now - self._pending_since < _QUALITY_DEBOUNCE_S:
             return
         logger.info(
             "Qualité adaptative : %d flux → %s (était %s)",
             self._active_grid_count, target, self._grid_quality,
         )
         self._grid_quality = target
+        self._pending_quality = None
         self.grid_quality_changed.emit(target)
 
     def resolve_grid_quality(self, count: int) -> str:

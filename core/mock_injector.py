@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """MockInjector — simule des données live ZEvent pour tester l'UI hors-event.
 
 Utilisation :
@@ -106,6 +110,11 @@ class MockInjector(QObject):
         self._t_goals.timeout.connect(self._tick_goal)
 
     # ── public ──────────────────────────────────────────────────────────────
+
+    @property
+    def streamers(self) -> list[StreamerInfo]:
+        """Copie de la liste des streamers simulés."""
+        return list(self._streamers)
 
     def start(self) -> None:
         """Lance l'injection et envoie un premier batch immédiat."""
