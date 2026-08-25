@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """BigScreenWidget — tableau de bord plein écran style ZEvent live."""
 
 from __future__ import annotations
@@ -6,6 +10,8 @@ import logging
 import math
 import pathlib
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import (
@@ -14,6 +20,7 @@ from PyQt6.QtCore import (
     QPointF,
     QPropertyAnimation,
     QRect,
+    QObject,
     QRectF,
     QSize,
     Qt,
@@ -119,13 +126,36 @@ def _initials_pixmap(login: str, display: str, size: int) -> QPixmap:
 
 
 def _grayscale_pixmap(px: QPixmap, size: int) -> QPixmap:
-    """Retourne un QPixmap en niveaux de gris à 30% d'opacité."""
-    img = px.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
-    gray_px = QPixmap.fromImage(img)
+    """Retourne un QPixmap en niveaux de gris, alpha préservé."""
+    if size <= 0:
+        return QPixmap()
+    src = px.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    # Format_Grayscale8 DÉTRUIT le canal alpha : le fond transparent des logos
+    # détourés devenait du noir pur, indiscernable du fond de la mosaïque. On
+    # restitue donc l'alpha d'origine par composition DestinationIn.
+    gray = src.convertToFormat(
+        QImage.Format.Format_Grayscale8
+    ).convertToFormat(QImage.Format.Format_ARGB32)
+    mask = QPainter(gray)
+    mask.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    mask.drawImage(0, 0, src)
+    mask.end()
+
     result = QPixmap(size, size)
     result.fill(Qt.GlobalColor.transparent)
     painter = QPainter(result)
-    painter.setOpacity(0.30)
+    # 0.30 ici, cumulé au 0.55 du rendu, donnait 0.165 d'opacité effective :
+    # les avatars sombres se confondaient avec le fond et passaient pour
+    # « manquants ». On remonte, le rendu module le reste.
+    painter.setOpacity(0.55)
+    gray_px = QPixmap.fromImage(gray)
+    if gray_px.size() != result.size():
+        # Sans mise à l'échelle, une source plus petite laisserait le reste vide.
+        gray_px = gray_px.scaled(
+            size, size,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
     painter.drawPixmap(0, 0, gray_px)
     painter.end()
     return result
@@ -167,50 +197,129 @@ def _initials_square_pixmap(login: str, display: str, size: int) -> QPixmap:
     return px
 
 
+from core import avatar_cache as _avatar_disk
+
 logger = logging.getLogger(__name__)
 
-_AVATAR_MAX_BYTES = 2 * 1024 * 1024   # plafond de lecture pour un avatar
-
-
 def _download_avatar(login: str, url: str) -> None:
-    """Télécharge l'avatar depuis `url` et le stocke dans le cache disque.
+    """Délègue au cache partagé — voir core/avatar_cache.
 
-    `login` et `url` viennent d'APIs tierces : le premier sert de nom de fichier,
-    la seconde était passée à urlretrieve, qui accepte file:// et ftp://.
+    Cette fonction avait sa propre copie du téléchargement, concurrente de
+    celle de data_manager : les deux tiraient la même image en parallèle.
     """
-    if not url:
-        return
-    import urllib.request
-    cache_path = _AVATAR_CACHE_DIR / f"{login}.png"
-    if cache_path.resolve().parent != _AVATAR_CACHE_DIR.resolve():
-        logger.error("Avatar %r: chemin hors du cache, ignoré", login[:40])
-        return
-    if not url.lower().startswith("https://"):
-        logger.error("Avatar %s: URL non https, ignorée", login)
-        return
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ZLink/1.0"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            payload = resp.read(_AVATAR_MAX_BYTES + 1)
-        if len(payload) > _AVATAR_MAX_BYTES:
-            logger.error("Avatar %s: réponse > %d octets, ignorée", login, _AVATAR_MAX_BYTES)
-            return
-        cache_path.write_bytes(payload)
-    except Exception as exc:
-        logger.debug("Avatar %s: téléchargement échoué — %s", login, exc)
+    _avatar_disk.download(login, url)
 
 
 # ---------------------------------------------------------------------------
 # AvatarPixmapCache — chargement async centralisé
 # ---------------------------------------------------------------------------
 
+# Pool borné pour le chargement des avatars. La version précédente créait un
+# thread PAR CLÉ, depuis paintEvent : 367 threads en 1,9 s au démarrage, et
+# jusqu'à 301 threads vivants en permanence quand des avatars sont
+# introuvables (relance par threading.Timer sans fin).
+_AVATAR_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="avatar")
+
+
+#: Vrai une fois le pool fermé. Un rafraîchissement Qt déjà en file d'attente
+#: peut encore demander un avatar APRÈS la fermeture : submit() lève alors
+#: RuntimeError et la trace remonte jusqu'à l'utilisateur, pendant qu'on quitte.
+_POOL_CLOSED = False
+
+
+def shutdown_avatar_pool() -> None:
+    """Ferme le pool sans attendre les téléchargements en cours.
+
+    Ses threads sont NON-DAEMON : sans cet appel, l'interpréteur les joint à la
+    sortie et un téléchargement lent retarderait la fermeture.
+    """
+    global _POOL_CLOSED
+    _POOL_CLOSED = True
+    _AVATAR_POOL.shutdown(wait=False, cancel_futures=True)
+
+
+def _submit_avatar(fn, *args) -> bool:
+    """Programme un chargement. Faux si le pool est fermé — on quitte."""
+    if _POOL_CLOSED:
+        return False
+    try:
+        _AVATAR_POOL.submit(fn, *args)
+        return True
+    except RuntimeError:
+        # Course : la fermeture a eu lieu entre le test et l'envoi.
+        return False
+
+
+class _GuiDispatcher(QObject):
+    """Rejoue un appelable sur le thread GUI.
+
+    QTimer.singleShot(0, cb) appelé depuis un thread Python ordinaire crée le
+    timer sur CE thread, qui n'a pas de boucle d'événements : le callback n'est
+    jamais exécuté. Le pixmap arrivait donc bien en cache mémoire, mais aucun
+    label n'en était informé — d'où les avatars restés en initiales.
+    Un signal en connexion queued, lui, est délivré sur le thread d'affinité de
+    l'objet, ici celui où le dispatcher a été construit (le thread GUI).
+    """
+
+    _call = pyqtSignal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._call.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+    @staticmethod
+    def _run(fn: object) -> None:
+        try:
+            fn()  # type: ignore[operator]
+        except RuntimeError:
+            pass  # widget détruit entre-temps
+        except Exception:
+            # PyQt appelle qFatal() sur une exception non rattrapée dans un
+            # slot : sans ce filet, un callback fautif abat l'application.
+            logger.exception("Callback avatar en échec")
+
+    def post(self, fn: object) -> None:
+        self._call.emit(fn)
+
+
+_gui_dispatcher: "_GuiDispatcher | None" = None
+
+
+def _ensure_dispatcher() -> None:
+    """Construit le dispatcher. À n'appeler QUE depuis le thread GUI."""
+    global _gui_dispatcher
+    if _gui_dispatcher is None:
+        _gui_dispatcher = _GuiDispatcher()
+
+
+def _post_to_gui(fn: object) -> None:
+    """Fait exécuter `fn` sur le thread GUI, depuis n'importe quel thread."""
+    d = _gui_dispatcher
+    if d is not None:
+        d.post(fn)
+    else:
+        # Surtout pas de QTimer.singleShot ici : depuis un thread sans boucle
+        # d'événements il ne se déclenche jamais, ce qui est précisément le bug
+        # que le dispatcher corrige. Mieux vaut le signaler que le taire.
+        logger.error("Dispatcher GUI absent — callback avatar abandonné")
+
+
 class _AvatarPixmapCache:
     """Charge les pixmaps ronds depuis le cache disque en background."""
 
     def __init__(self) -> None:
+        # Placeholders « initiales » mémorisés : ils étaient recréés à CHAQUE
+        # appel, donc leur identité changeait, donc le gris dérivé n'était
+        # jamais mis en cache et _grayscale_pixmap repartait de zéro à chaque
+        # image — 20 des 23 ms par frame de la mosaïque.
+        self._placeholders: dict[str, QPixmap] = {}
         self._cache: dict[str, QPixmap] = {}               # key → pixmap couleur
         self._gray: dict[str, QPixmap] = {}                # key → pixmap gris
-        self._loading: dict[str, str] = {}                 # key → profile_url tenté
+        # key -> (profile_url tente, instant avant lequel on ne retente pas).
+        # Une expiration DATEE remplace le threading.Timer par cle : avec 300
+        # avatars introuvables, ces minuteries faisaient a elles seules 300
+        # threads vivants en permanence.
+        self._loading: dict[str, tuple[str, float]] = {}
         self._pending: dict[str, list] = {}                # key → liste de callbacks en attente
 
     def get(self, login: str, display: str, size: int,
@@ -226,18 +335,27 @@ class _AvatarPixmapCache:
         key = f"{login}@{size}"
         if key in self._cache:
             return self._cache[key]
-        # Enregistrer le callback quelle que soit la situation
         if callback is not None:
-            self._pending.setdefault(key, []).append(callback)
-        current_url = self._loading.get(key)  # None = jamais tenté, "" = tenté sans URL
-        if current_url is None or (current_url == "" and profile_url):
-            self._loading[key] = profile_url
-            threading.Thread(
-                target=self._load,
-                args=(login, display, size, key, profile_url),
-                daemon=True,
-            ).start()
-        return _initials_pixmap(login, display, size)
+            lst = self._pending.setdefault(key, [])
+            # Dédoublonnage : paintEvent réenregistre self.update à chaque frame
+            # tant que l'avatar n'est pas résolu. Sans cela _pending enfle de
+            # milliers d'entrées et leur réveil simultané fige le thread GUI.
+            if callback not in lst:
+                lst.append(callback)
+            if key in self._cache:
+                # Le chargement s'est terminé pendant l'enregistrement : notre
+                # callback vient d'atterrir dans une liste déjà vidée et ne
+                # serait jamais rappelé.
+                for cb in self._pending.pop(key, []):
+                    _post_to_gui(cb)
+                return self._cache[key]
+        entry = self._loading.get(key)   # None = jamais tenté
+        now = time.monotonic()
+        if entry is None or (entry[0] == "" and profile_url) or now >= entry[1]:
+            self._loading[key] = (profile_url, float("inf"))
+            _ensure_dispatcher()
+            _submit_avatar(self._load, login, display, size, key, profile_url)
+        return self._placeholder(f"{login}@{size}", login, display, size, False)
 
     def get_gray(self, login: str, display: str, size: int,
                  callback: "None | callable" = None,
@@ -246,8 +364,32 @@ class _AvatarPixmapCache:
         gkey = f"{login}@{size}:gray"
         if gkey in self._gray:
             return self._gray[gkey]
-        self._gray[gkey] = _grayscale_pixmap(color, size)
-        return self._gray[gkey]
+        if color is self._placeholders.get(f"{login}@{size}"):
+            cached = self._gray.get(gkey + ":ph")
+            if cached is not None:
+                return cached
+        gray = _grayscale_pixmap(color, size)
+        # On compare l'IDENTITÉ, pas la présence de la clé : si le chargement
+        # s'est terminé pendant le calcul du gris, la clé est présente alors que
+        # `color` est encore le placeholder — tester la présence figerait les
+        # initiales pour toujours.
+        if self._cache.get(f"{login}@{size}") is color:
+            self._gray[gkey] = gray
+        elif color is self._placeholders.get(f"{login}@{size}"):
+            # Gris du placeholder : mémorisé sous une clé distincte, purgée
+            # par _load() quand le vrai avatar arrive.
+            self._gray[gkey + ":ph"] = gray
+        return gray
+
+    def _placeholder(self, key: str, login: str, display: str,
+                     size: int, square: bool) -> QPixmap:
+        """Pixmap d'initiales stable pour une clé donnée."""
+        px = self._placeholders.get(key)
+        if px is None:
+            px = (_initials_square_pixmap(login, display, size) if square
+                  else _initials_pixmap(login, display, size))
+            self._placeholders[key] = px
+        return px
 
     def _load(self, login: str, display: str, size: int,
               key: str, profile_url: str = "") -> None:
@@ -257,13 +399,18 @@ class _AvatarPixmapCache:
             px = _load_avatar_pixmap(login, size)
         if px is None:
             # Retry: 5s si l'URL a échoué, 2s si pas d'URL (le fichier peut arriver via bg)
+            # Echec : on autorise une nouvelle tentative apres un delai, sans
+            # creer de thread — la date d'expiration est relue par get()/get_sq().
             delay = 5.0 if profile_url else 2.0
-            threading.Timer(delay, lambda: self._loading.pop(key, None)).start()
+            if self._loading.get(key, ("", 0.0))[0] == profile_url:
+                self._loading[key] = (profile_url, time.monotonic() + delay)
             return
         self._cache[key] = px
         self._gray.pop(f"{login}@{size}:gray", None)  # invalide le gris
+        self._gray.pop(f"{login}@{size}:gray:ph", None)
+        self._placeholders.pop(f"{login}@{size}", None)
         for cb in self._pending.pop(key, []):
-            QTimer.singleShot(0, cb)
+            _post_to_gui(cb)
 
     def get_sq(self, login: str, display: str, size: int,
                callback: "None | callable" = None,
@@ -273,16 +420,20 @@ class _AvatarPixmapCache:
         if key in self._cache:
             return self._cache[key]
         if callback is not None:
-            self._pending.setdefault(key, []).append(callback)
-        current_url = self._loading.get(key)
-        if current_url is None or (current_url == "" and profile_url):
-            self._loading[key] = profile_url
-            threading.Thread(
-                target=self._load_sq,
-                args=(login, display, size, key, profile_url),
-                daemon=True,
-            ).start()
-        return _initials_square_pixmap(login, display, size)
+            lst = self._pending.setdefault(key, [])
+            if callback not in lst:  # cf. get() : anti-tempête de callbacks
+                lst.append(callback)
+            if key in self._cache:   # cf. get() : course enregistrement/drain
+                for cb in self._pending.pop(key, []):
+                    _post_to_gui(cb)
+                return self._cache[key]
+        entry = self._loading.get(key)
+        now = time.monotonic()
+        if entry is None or (entry[0] == "" and profile_url) or now >= entry[1]:
+            self._loading[key] = (profile_url, float("inf"))
+            _ensure_dispatcher()
+            _submit_avatar(self._load_sq, login, display, size, key, profile_url)
+        return self._placeholder(f"{login}@{size}sq", login, display, size, True)
 
     def get_gray_sq(self, login: str, display: str, size: int,
                     callback: "None | callable" = None,
@@ -291,8 +442,17 @@ class _AvatarPixmapCache:
         gkey = f"{login}@{size}sq:gray"
         if gkey in self._gray:
             return self._gray[gkey]
-        self._gray[gkey] = _grayscale_pixmap(color, size)
-        return self._gray[gkey]
+        if color is self._placeholders.get(f"{login}@{size}sq"):
+            cached = self._gray.get(gkey + ":ph")
+            if cached is not None:
+                return cached
+        gray = _grayscale_pixmap(color, size)
+        # Même course que dans get_gray : voir le commentaire là-bas.
+        if self._cache.get(f"{login}@{size}sq") is color:
+            self._gray[gkey] = gray
+        elif color is self._placeholders.get(f"{login}@{size}sq"):
+            self._gray[gkey + ":ph"] = gray
+        return gray
 
     def _load_sq(self, login: str, display: str, size: int,
                  key: str, profile_url: str = "") -> None:
@@ -301,13 +461,18 @@ class _AvatarPixmapCache:
             _download_avatar(login, profile_url)
             px = _load_square_avatar_pixmap(login, size)
         if px is None:
+            # Echec : on autorise une nouvelle tentative apres un delai, sans
+            # creer de thread — la date d'expiration est relue par get()/get_sq().
             delay = 5.0 if profile_url else 2.0
-            threading.Timer(delay, lambda: self._loading.pop(key, None)).start()
+            if self._loading.get(key, ("", 0.0))[0] == profile_url:
+                self._loading[key] = (profile_url, time.monotonic() + delay)
             return
         self._cache[key] = px
         self._gray.pop(f"{login}@{size}sq:gray", None)
+        self._gray.pop(f"{login}@{size}sq:gray:ph", None)
+        self._placeholders.pop(f"{login}@{size}sq", None)
         for cb in self._pending.pop(key, []):
-            QTimer.singleShot(0, cb)
+            _post_to_gui(cb)
 
 
 _avatar_cache = _AvatarPixmapCache()
@@ -371,10 +536,20 @@ class _TickerWidget(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(16)  # ~60fps
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        # Démarré par showEvent : inutile de tourner tant que le
+        # widget n'est pas affiché.
 
         import time
         self._last_ms = int(time.monotonic() * 1000)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        # 62 réveils par seconde pour un widget invisible.
+        super().hideEvent(event)
+        self._timer.stop()
 
     def set_streamers(self, streamers: list[StreamerInfo]) -> None:
         # Uniquement les streamers en live, tri alphabétique
@@ -493,16 +668,104 @@ class _BgAvatarsWidget(QWidget):
         super().__init__(parent)
         self._streamers: list[StreamerInfo] = []
         self._offset: float = 0.0
+        self._prewarm_idx: int = 0
+        self._prewarm_cell: int = 0
+        self._prewarm_gen: int = 0
 
         self._timer = QTimer(self)
         self._timer.setInterval(self._FPS_INTERVAL)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        # Démarré par showEvent : inutile de tourner tant que le
+        # widget n'est pas affiché.
+
+    _PREWARM_BATCH = 24   # avatars demandés par salve
 
     def set_streamers(self, streamers: list[StreamerInfo]) -> None:
         # tri alphabétique uniquement — pas de regroupement par état live
         self._streamers = sorted(streamers, key=lambda s: s.twitch_login.lower())
+        # _prewarm_cell n'est PAS remis à zéro : la taille de cellule n'a pas
+        # changé, seule la liste. La réinitialiser forcerait un balayage complet
+        # à chaque rafraîchissement périodique.
+        self._prewarm_idx = 0
+        self._restart_prewarm()
         self.update()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        # Qt ne délivre pas resizeEvent à un widget caché : la vraie taille
+        # n'est connue qu'ici.
+        super().showEvent(event)
+        self._timer.start()
+        self._restart_prewarm()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        # Le Big Screen est construit puis masqué : son timer à 30 fps tournait
+        # pendant toute la vie de l'application sans rien afficher.
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def _restart_prewarm(self) -> None:
+        """Invalide les chaînes de préchargement en cours et en lance une seule.
+
+        Sans jeton de génération, chaque set_streamers et chaque resize
+        démarrait une chaîne supplémentaire sans arrêter les précédentes : elles
+        s'empilaient et multipliaient le débit de threads que _PREWARM_BATCH
+        cherche justement à contenir.
+        """
+        self._prewarm_gen += 1
+        self._prewarm(self._prewarm_gen)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        # Les pixmaps sont mis en cache par taille de cellule. Si la fenêtre
+        # change de largeur après le préchargement (cas normal : les données
+        # arrivent avant que la fenêtre ait sa taille finale), les clés
+        # préchauffées ne sont plus celles demandées au rendu et chaque
+        # cellule repart en chargement à la demande — d'où les rangées de
+        # lettres. On relance donc le préchargement à la nouvelle taille.
+        super().resizeEvent(event)
+        if self.width() // self._COLS != self._prewarm_cell:
+            self._prewarm_idx = 0
+            self._restart_prewarm()
+
+    def _prewarm(self, gen: int = 0) -> None:
+        """Précharge les avatars par petites salves.
+
+        Sans cela, une cellule ne demande son avatar qu'au moment d'être peinte
+        et affiche ses initiales le temps du chargement : la mosaïque montrait
+        des rangées de lettres au fur et à mesure du défilement. Les salves
+        évitent de lancer un thread par streamer d'un seul coup.
+        """
+        if gen != self._prewarm_gen:
+            return  # chaîne périmée, une plus récente a pris le relais
+        if not self.isVisible():
+            # Le Big Screen est construit puis caché : tant qu'il l'est, sa
+            # taille est celle par défaut et préchauffer remplirait le cache de
+            # pixmaps à une taille jamais affichée. showEvent réamorcera.
+            return
+        w = self.width()
+        cell_w = w // self._COLS if w else 0
+        if cell_w <= 0:
+            # Pas encore dimensionné : on retente au prochain tour.
+            QTimer.singleShot(200, lambda g=gen: self._prewarm(g))
+            return
+        # Après le calcul de cell_w : sinon un resize survenu alors que la liste
+        # est vide perdrait la nouvelle taille.
+        if not self._streamers:
+            return
+        if cell_w != self._prewarm_cell:
+            # Nouvelle taille de cellule : on repart du début.
+            self._prewarm_cell = cell_w
+            self._prewarm_idx = 0
+        batch = self._streamers[self._prewarm_idx:self._prewarm_idx + self._PREWARM_BATCH]
+        if not batch:
+            return
+        for s in batch:
+            purl = getattr(s, "profile_url", "")
+            if s.online:
+                _avatar_cache.get_sq(s.twitch_login, s.display, cell_w, None, purl)
+            else:
+                _avatar_cache.get_gray_sq(s.twitch_login, s.display, cell_w, None, purl)
+        self._prewarm_idx += len(batch)
+        QTimer.singleShot(200, lambda g=gen: self._prewarm(g))
 
     def _tick(self) -> None:
         if not self._streamers:
@@ -536,6 +799,11 @@ class _BgAvatarsWidget(QWidget):
 
         # Cellules carrées qui couvrent toute la largeur, images qui se touchent
         cell_w = w // self._COLS
+        if cell_w <= 0:
+            # 0 < w < _COLS : les transformations d'image renverraient un
+            # pixmap nul, mis en cache comme un succès et jamais réparé.
+            painter.end()
+            return
         cell_h = cell_w + self._GAP
         n_rows = math.ceil(n / self._COLS)
 
@@ -575,7 +843,10 @@ class _BgAvatarsWidget(QWidget):
         painter.setOpacity(1.0)
         for cx, cy, px in online:
             painter.drawPixmap(cx, cy, px)
-        painter.setOpacity(0.35)
+        # 0.35 sur un fond quasi noir rendait les avatars hors ligne
+        # indiscernables du vide : on remonte juste assez pour les lire sans
+        # qu'ils concurrencent les streamers en live.
+        painter.setOpacity(0.85)
         for cx, cy, px in offline:
             painter.drawPixmap(cx, cy, px)
         painter.setOpacity(1.0)
@@ -919,11 +1190,13 @@ class _GoalRow(QWidget):
         info.setContentsMargins(0, 0, 0, 0)
 
         streamer_lbl = QLabel(g.streamer_display)
+        streamer_lbl.setTextFormat(Qt.TextFormat.PlainText)
         streamer_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         streamer_lbl.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         info.addWidget(streamer_lbl)
 
         goal_lbl = QLabel(g.goal_name)
+        goal_lbl.setTextFormat(Qt.TextFormat.PlainText)
         goal_lbl.setFont(QFont("Segoe UI", 10))
         goal_lbl.setStyleSheet("color: #aaaaaa; background: transparent; border: none;")
         goal_lbl.setWordWrap(True)

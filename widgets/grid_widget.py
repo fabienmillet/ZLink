@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """Widget grille 5×5 réutilisable — miniatures de streams.
 
 Utilisé dans :
@@ -13,20 +17,37 @@ import random
 
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QPropertyAnimation, QRectF, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPen
+from PyQt6.QtCore import (Qt, QPoint, QPropertyAnimation, QRectF, QSize, QTimer,
+                          pyqtSignal, QMimeData)
+from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPen, QDrag
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+import time
+
+from core import favorites
+from core.stream_manager import QUALITY_GRID
 from widgets.mpv_widget import MpvWidget
+
+try:
+    import qtawesome as qta
+    _QTA_OK = True
+except Exception:  # noqa: BLE001
+    # Pas seulement ImportError : qtawesome charge des polices et peut
+    # échouer autrement. Un except trop étroit laissait _QTA_OK non
+    # défini, et le démarrage plantait par NameError une fois sur six.
+    qta = None  # type: ignore[assignment]
+    _QTA_OK = False
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +55,15 @@ logger = logging.getLogger(__name__)
 # Stylesheets
 # ---------------------------------------------------------------------------
 
+# La LARGEUR de bordure est identique dans tous les états, seule la couleur
+# change. Une largeur variable modifiait le rectangle de contenu, donc
+# déplaçait et redimensionnait la fenêtre X11 native de mpv à chaque
+# changement d'état — six fois en 1,3 s pendant une alerte hype, d'où les
+# sautes d'image et les zones noires quand un flux s'interrompt.
 CELL_NORMAL = """
 QFrame#streamCell {
     background-color: #0a0a0a;
-    border: 1px solid #222222;
+    border: 2px solid #222222;
 }
 QFrame#streamCell:hover {
     background-color: #1a1a1a;
@@ -57,14 +83,14 @@ QFrame#streamCell:hover {
 CELL_OFFLINE = """
 QFrame#streamCell {
     background-color: #0a0a0a;
-    border: 1px solid #222222;
+    border: 2px solid #1e1e1e;
 }
 """
 
 CELL_EMPTY = """
 QFrame#streamCell {
     background-color: #0a0a0a;
-    border: 1px solid #1a1a1a;
+    border: 2px solid #141414;
 }
 """
 
@@ -79,8 +105,12 @@ _TOAST_H = 44
 class _HypeToast(QWidget):
     """Notification flottante affichée sur la GridWidget (top-right, 4 s)."""
 
+    clip_requested = pyqtSignal(str)     # login
+    replay_requested = pyqtSignal(str)   # login
+
     def __init__(
         self, label: str, score: float, color: str, parent: QWidget,
+        login: str = "", can_clip: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -107,8 +137,54 @@ class _HypeToast(QWidget):
         lbl.setFont(QFont("Segoe UI", 11))
         lbl.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         h.addWidget(lbl, stretch=1)
+
+        # Le bouton doit être sur l'alerte elle-même : le moment est déjà en
+        # train de passer, et aller chercher la cellule dans la grille prend
+        # plus de temps qu'il n'en reste dans le tampon.
+        self._login = login
+        if can_clip and login:
+            keep = QPushButton()
+            keep.setFixedSize(24, 24)
+            keep.setCursor(Qt.CursorShape.PointingHandCursor)
+            keep.setToolTip("Garder ce moment")
+            if _QTA_OK:
+                keep.setIcon(qta.icon("mdi6.content-save-outline", color=color))
+                keep.setIconSize(QSize(15, 15))
+            else:
+                keep.setText("\u25cf")
+            keep.setStyleSheet(
+                "QPushButton { background: transparent; border: none; }"
+                "QPushButton:hover { background: #262626; border-radius: 4px; }"
+            )
+            keep.clicked.connect(self._on_keep)
+            h.addWidget(keep)
+
+            replay = QPushButton()
+            replay.setFixedSize(24, 24)
+            replay.setCursor(Qt.CursorShape.PointingHandCursor)
+            replay.setToolTip("Revoir ce moment")
+            if _QTA_OK:
+                replay.setIcon(qta.icon("mdi6.replay", color=color))
+                replay.setIconSize(QSize(15, 15))
+            else:
+                replay.setText("\u21ba")
+            replay.setStyleSheet(
+                "QPushButton { background: transparent; border: none; }"
+                "QPushButton:hover { background: #262626; border-radius: 4px; }"
+            )
+            replay.clicked.connect(self._on_replay)
+            h.addWidget(replay)
         self.move(parent.width() - _TOAST_W - 12, 12)
         QTimer.singleShot(4000, self._start_fade)
+
+    def _on_keep(self) -> None:
+        self.clip_requested.emit(self._login)
+        # Retour visuel : le toast s'efface, le clip est parti.
+        self._start_fade()
+
+    def _on_replay(self) -> None:
+        self.replay_requested.emit(self._login)
+        self._start_fade()
 
     def _start_fade(self) -> None:
         eff = QGraphicsOpacityEffect(self)
@@ -316,7 +392,12 @@ class StreamCell(QFrame):
     """Cellule individuelle de la grille 5×5."""
 
     clicked            = pyqtSignal(str)  # twitch_login
-    audio_pin_requested = pyqtSignal(str)  # login à épingler (toggle)
+    audio_pin_requested = pyqtSignal(str)
+    clip_requested      = pyqtSignal(str)  # login dont on veut garder le moment
+    replay_requested    = pyqtSignal(str)  # login dont on veut revoir le moment
+    # Le flux s'est arrêté de lui-même (fin de live, coupure) : la cellule
+    # demande sa libération pour qu'un autre streamer prenne la place.
+    stream_ended = pyqtSignal(str)  # login de la cellule libérée
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -329,6 +410,9 @@ class StreamCell(QFrame):
         self._is_online: bool = False
         self._streaming_login: str = ""  # login du stream actuellement lancé
         self._audio_pinned: bool = False
+        self._mix_muted: bool = False     # coupure demandée depuis la console
+        self._clip_secs: int = 0      # 0 = clips désactivés sur cette cellule
+        self._pulse_gen: int = 0      # jeton d'annulation des pulsations
 
         self._build()
         self.set_empty()
@@ -368,9 +452,18 @@ class StreamCell(QFrame):
         h.addWidget(self._name_lbl)
         h.addStretch()
 
-        self._pin_lbl = QLabel("🔊")
-        self._pin_lbl.setFont(QFont("Segoe UI", 8))
-        self._pin_lbl.setStyleSheet("color: #00ff87; background: transparent;")
+        # U+1F50A ne rend AUCUN glyphe hors Windows : l'indicateur d'épinglage
+        # occupait zéro pixel et rien ne signalait la cellule sonore.
+        self._pin_lbl = QLabel()
+        self._pin_lbl.setFixedSize(14, 14)
+        if _QTA_OK:
+            self._pin_lbl.setPixmap(
+                qta.icon("mdi6.volume-high", color="#00ff87").pixmap(14, 14)
+            )
+        else:
+            self._pin_lbl.setText("\u25cf")   # puce pleine, présente partout
+            self._pin_lbl.setFont(QFont("Segoe UI", 9))
+        self._pin_lbl.setStyleSheet("color: #00ff87; background: transparent; border: none;")
         self._pin_lbl.hide()
         h.addWidget(self._pin_lbl)
         h.addSpacing(4)
@@ -405,6 +498,7 @@ class StreamCell(QFrame):
         was_online = self._is_online
         self._twitch_login = twitch_login
         self._is_online = online
+        self._viewers = viewers or 0
 
         if online:
             self._name_lbl.setText(twitch_login)
@@ -427,7 +521,12 @@ class StreamCell(QFrame):
     def _ensure_mpv(self) -> MpvWidget:
         """Crée l'instance MpvWidget à la demande (lazy init)."""
         if self._mpv is None:
-            self._mpv = MpvWidget(self._video_stack, grid_mode=True)
+            # clip_buffer_secs=0 : pas de tampon arrière tant que les clips
+            # depuis la grille ne sont pas demandés (voir set_clip_buffer).
+            self._mpv = MpvWidget(self._video_stack, grid_mode=True,
+                                  clip_buffer_secs=self._clip_secs)
+            if self._clip_secs:
+                self._mpv.set_clip_buffer(self._clip_secs)
             self._mpv.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding,
             )
@@ -438,6 +537,7 @@ class StreamCell(QFrame):
             self._mpv.repaint()
             # Hide the overlay as soon as MPV reports actual playback.
             self._mpv.playback_started.connect(self._overlay.hide_overlay)
+            self._mpv.playback_ended.connect(self._on_playback_ended)
             # Re-appliquer l'état pin audio (évite un MPV muted sur une cellule épinglée)
             if self._audio_pinned:
                 self._mpv.set_mute(False)
@@ -448,14 +548,51 @@ class StreamCell(QFrame):
     def update_info(self, streamer: object) -> None:
         """Met à jour viewers/name sans toucher au stream MPV en cours."""
         viewers = int(getattr(streamer, "viewers", 0))
+        self._viewers = viewers   # sert au classement de la grille
         self._viewers_lbl.setText(_format_viewers(viewers))
+
+    def set_clip_buffer(self, secs: int) -> None:
+        """Active (secs > 0) ou coupe (0) la conservation des dernières secondes."""
+        secs = max(0, int(secs))
+        if secs == self._clip_secs:
+            return
+        self._clip_secs = secs
+        if self._mpv is not None:
+            self._mpv.set_clip_buffer(secs)
+
+    def save_clip(self, secs: int, directory: str) -> str | None:
+        """Écrit les dernières secondes de CETTE cellule. None si indisponible."""
+        if self._mpv is None or not self._clip_secs:
+            return None
+        return self._mpv.save_clip(secs, directory)
+
+    def set_volume(self, volume: int) -> None:
+        """Volume de cette cellule, 0-100. Sans effet si elle n'est pas épinglée."""
+        if self._mpv is not None and self._audio_pinned:
+            self._mpv.set_volume(volume)
+
+    def set_mix_muted(self, muted: bool) -> None:
+        """Coupe cette cellule depuis la console, sans toucher à son volume."""
+        self._mix_muted = bool(muted)
+        self._apply_audio_state()
 
     def set_audio_pinned(self, pinned: bool) -> None:
         """Active ou désactive l'épinglement audio sur cette cellule."""
         self._audio_pinned = pinned
         self._pin_lbl.setVisible(pinned)
-        if self._mpv is not None:
-            self._mpv.set_mute(not pinned)
+        self._apply_audio_state()
+
+    def _apply_audio_state(self) -> None:
+        """Une seule vérité pour le silence : épinglage ET coupure console.
+
+        Couper depuis la console en descendant le volume à zéro paraissait
+        suffire, mais le volume est réécrit dès que la console se reconstruit —
+        le silence se levait tout seul. La coupure passe donc par le mute de
+        mpv, indépendant du volume, et le volume garde sa propre valeur.
+        """
+        if self._mpv is None:
+            return
+        self._mpv.set_mute(not self._audio_pinned or self._mix_muted)
 
     def set_streamer(self, streamer: object) -> None:
         """Assigne un nouveau streamer (réinitialise _streaming_login)."""
@@ -470,6 +607,11 @@ class StreamCell(QFrame):
     def set_empty(self) -> None:
         self._twitch_login = ""
         self._is_online = False
+        self._viewers = 0   # relayé au HypeWatcher comme 3e signal
+        self._press_pos = None      # amorce du glisser-déposer
+        self._dragging = False
+        self._end_retried = False   # une reprise autorisée par flux
+        self.setAcceptDrops(True)
         self._is_active = False
         self._streaming_login = ""
         if self._mpv is not None:
@@ -498,12 +640,53 @@ class StreamCell(QFrame):
         """True si un stream MPV est actuellement en lecture."""
         return bool(self._streaming_login) and self._streaming_login == self._twitch_login
 
-    def start_stream(self, quality: str = "360p,worst") -> None:
+    def start_stream(self, quality: str = QUALITY_GRID) -> None:
         """Lance la lecture MPV si le streamer est live et pas déjà en cours."""
         if self._twitch_login and self._is_online and self._twitch_login != self._streaming_login:
             self._streaming_login = self._twitch_login
+            self._end_retried = False
             self._overlay.show_overlay(self._twitch_login)
             QTimer.singleShot(200, lambda: self._ensure_mpv().play_stream(self._twitch_login, quality))
+
+    _END_RETRY_MS = 4000   # une seule reprise avant d'abandonner la cellule
+
+    def _on_playback_ended(self) -> None:
+        """mpv est repassé au repos : coupure passagère, ou live terminé.
+
+        On retente une fois — un flux Twitch hoquette régulièrement — puis on
+        libère la cellule si ça ne repart pas.
+        """
+        if not self._twitch_login or not self._streaming_login:
+            return
+        if not self._end_retried:
+            self._end_retried = True
+            login = self._twitch_login
+            logger.info("Cellule %s : flux interrompu, nouvelle tentative", login)
+            self._streaming_login = ""
+            QTimer.singleShot(
+                self._END_RETRY_MS,
+                lambda lg=login: self._retry_stream(lg),
+            )
+            return
+        logger.info("Cellule %s : flux terminé, libération", self._twitch_login)
+        self.stream_ended.emit(self._twitch_login)
+
+    def _retry_stream(self, login: str) -> None:
+        """Relance si la cellule affiche toujours le même streamer.
+
+        En reprenant la qualité courante de la grille : sans elle, la cellule
+        repartait sur le défaut codé en dur et une cellule qui hoquette dans une
+        grille de quatre flux retombait silencieusement en 160p sans jamais
+        remonter.
+        """
+        if self._twitch_login != login or not self._is_online:
+            return
+        grid = self._grid()
+        quality = getattr(grid, "_grid_quality", None)
+        if quality:
+            self.start_stream(quality)
+        else:
+            self.start_stream()
 
     def stop_stream(self) -> None:
         """Arrête la lecture MPV et réinitialise l'état de streaming."""
@@ -512,19 +695,42 @@ class StreamCell(QFrame):
             self._mpv.stop()
         self._overlay.hide_overlay()
 
-    def pulse_hype(self, color: str = "#ff6b00", pulses: int = 3) -> None:
-        """Anime le contour de la cellule pour signaler un moment fort."""
-        if pulses <= 0:
+    _PULSE_HALF_MS = 220        # moitié d'un cycle allumé/éteint
+
+    def pulse_hype(self, color: str = "#ff6b00", pulses: int = 3,
+                   seconds: float | None = None) -> None:
+        """Anime le contour de la cellule. `seconds` prime sur `pulses`.
+
+        Un jeton de génération accompagne la chaîne de minuteries : une
+        nouvelle pulsation annule la précédente. Sans lui, deux animations
+        lancées coup sur coup — une alerte de chat puis un objectif atteint —
+        s'entrelaçaient, et le contour clignotait à contretemps bien après la
+        fin des deux.
+        """
+        if seconds is not None:
+            pulses = max(1, round(seconds * 1000 / (2 * self._PULSE_HALF_MS)))
+        self._pulse_gen += 1
+        self._pulse_on(color, pulses, self._pulse_gen)
+
+    def _pulse_on(self, color: str, left: int, gen: int) -> None:
+        if gen != self._pulse_gen:
+            return
+        if left <= 0:
             self._refresh_style()
             return
+        # 2px comme tous les autres états : la géométrie ne bouge pas.
         self.setStyleSheet(
-            f"QFrame#streamCell {{ background-color: #120500; border: 3px solid {color}; }}"
+            f"QFrame#streamCell {{ background-color: #120500; border: 2px solid {color}; }}"
         )
-        QTimer.singleShot(220, lambda: self._pulse_off(color, pulses))
+        QTimer.singleShot(self._PULSE_HALF_MS,
+                          lambda: self._pulse_off(color, left, gen))
 
-    def _pulse_off(self, color: str, pulses: int) -> None:
+    def _pulse_off(self, color: str, left: int, gen: int) -> None:
+        if gen != self._pulse_gen:
+            return
         self._refresh_style()
-        QTimer.singleShot(220, lambda: self.pulse_hype(color, pulses - 1))
+        QTimer.singleShot(self._PULSE_HALF_MS,
+                          lambda: self._pulse_on(color, left - 1, gen))
 
     # -- internal --------------------------------------------------------------
 
@@ -538,26 +744,175 @@ class StreamCell(QFrame):
         else:
             self.setStyleSheet(CELL_NORMAL)
 
+    # -- glisser-déposer -------------------------------------------------------
+
+    _MIME = "application/x-zlink-cell"
+
+    def _grid(self) -> object | None:
+        """Le GridWidget parent, s'il expose le déplacement manuel."""
+        w = self.parent()
+        while w is not None and not hasattr(w, "move_cell"):
+            w = w.parent()
+        return w
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            # On mémorise l'appui sans rien émettre : le clic ne part qu'au
+            # relâchement, sinon amorcer un glissement basculerait aussi en
+            # plein écran.
+            self._press_pos = event.pos()
+            self._dragging = False
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        grid = self._grid()
+        if (
+            not (event.buttons() & Qt.MouseButton.LeftButton)
+            or self._press_pos is None
+            or self._dragging
+            or not self._twitch_login
+            or grid is None
+            or not getattr(grid, "is_draggable", lambda: False)()
+        ):
+            super().mouseMoveEvent(event)
+            return
+        if ((event.pos() - self._press_pos).manhattanLength()
+                < QApplication.startDragDistance()):
+            super().mouseMoveEvent(event)
+            return
+        self._dragging = True
+        self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+        mime = QMimeData()
+        mime.setData(self._MIME, self._twitch_login.encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pm = self.grab().scaled(
+            160, 90, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        drag.setPixmap(pm)
+        # Sans point d'accroche, la vignette colle son coin supérieur gauche au
+        # curseur : elle masque la case visée et on ne sait plus ce qu'on
+        # désigne. On la place sous le point réellement saisi, à l'échelle de la
+        # réduction.
+        if self.width() > 0 and self.height() > 0:
+            drag.setHotSpot(QPoint(
+                int(self._press_pos.x() * pm.width() / self.width()),
+                int(self._press_pos.y() * pm.height() / self.height()),
+            ))
+        drag.exec(Qt.DropAction.MoveAction)
+        self.setCursor(QCursor(
+            Qt.CursorShape.OpenHandCursor if self._is_online
+            else Qt.CursorShape.ArrowCursor
+        ))
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if (
             event.button() == Qt.MouseButton.LeftButton
+            and not self._dragging
             and self._twitch_login
             and self._is_online
         ):
             self.clicked.emit(self._twitch_login)
-        super().mousePressEvent(event)
+        self._press_pos = None
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+    def _set_drop_target(self, on: bool) -> None:
+        """Souligne la cellule survolée pendant un glissement.
+
+        Sans ce retour, rien n'indiquait où la cellule allait atterrir : on
+        déplaçait à l'aveugle. La LARGEUR de bordure reste à 2px comme partout,
+        pour ne pas déplacer la fenêtre X11 de mpv (cf. CELL_NORMAL).
+        """
+        if on:
+            self.setStyleSheet(
+                "QFrame#streamCell { background-color: #0a1a12; "
+                "border: 2px dashed #00ff87; }"
+            )
+        else:
+            self._refresh_style()
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasFormat(self._MIME):
+            src = bytes(event.mimeData().data(self._MIME)).decode("utf-8")
+            if src != self._twitch_login:
+                self._set_drop_target(True)
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasFormat(self._MIME):
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:  # type: ignore[override]
+        self._set_drop_target(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        self._set_drop_target(False)
+        if not event.mimeData().hasFormat(self._MIME):
+            return
+        source = bytes(event.mimeData().data(self._MIME)).decode("utf-8")
+        grid = self._grid()
+        if grid is not None and source and source != self._twitch_login:
+            grid.move_cell(source, self._twitch_login)  # type: ignore[attr-defined]
+        event.acceptProposedAction()
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
         if not self._twitch_login or not self._is_online:
             return
         from PyQt6.QtWidgets import QMenu
+        from core.ui_theme import MENU_QSS
         menu = QMenu(self)
+        # Sans style explicite, le menu prend la palette du bureau : sous un
+        # thème sombre, le fond devenait noir et le texte le restait — les
+        # entrées n'affichaient plus que leur icône.
+        menu.setStyleSheet(MENU_QSS)
+        # Pas d'emoji dans le libellé : U+1F507/U+1F50A ne rendent aucun glyphe
+        # hors Windows, l'entrée apparaîtrait amputée de son icône.
         if self._audio_pinned:
-            act = menu.addAction("🔇 Couper l'audio")
+            act = menu.addAction("Couper l'audio")
         else:
-            act = menu.addAction("🔊 Épingler l'audio")
+            act = menu.addAction("Épingler l'audio")
+        if _QTA_OK:
+            act.setIcon(qta.icon(
+                "mdi6.volume-off" if self._audio_pinned else "mdi6.volume-high",
+                color="#e0e0e0",
+            ))
         act.triggered.connect(lambda: self.audio_pin_requested.emit(self._twitch_login))
+
+        fav = favorites.is_favorite(self._twitch_login)
+        fav_act = menu.addAction("Retirer des favoris" if fav else "Mettre en favori")
+        if _QTA_OK:
+            fav_act.setIcon(qta.icon(
+                "mdi6.star-off" if fav else "mdi6.star",
+                color="#f5c518",
+            ))
+        fav_act.triggered.connect(self._toggle_favorite)
+
+        if self._clip_secs:
+            menu.addSeparator()
+            clip_act = menu.addAction(
+                f"Garder les {self._clip_secs} dernières secondes")
+            if _QTA_OK:
+                clip_act.setIcon(qta.icon("mdi6.content-save-outline",
+                                          color="#e0e0e0"))
+            clip_act.triggered.connect(
+                lambda: self.clip_requested.emit(self._twitch_login))
+            replay_act = menu.addAction(
+                f"Revoir les {self._clip_secs} dernières secondes")
+            if _QTA_OK:
+                replay_act.setIcon(qta.icon("mdi6.replay", color="#ff6b00"))
+            replay_act.triggered.connect(
+                lambda: self.replay_requested.emit(self._twitch_login))
         menu.exec(event.globalPos())
+
+    def _toggle_favorite(self) -> None:
+        favorites.toggle(self._twitch_login)
+        self._refresh_style()
+        grid = self._grid()
+        if grid is not None:
+            grid._reposition_cells()  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +948,10 @@ class _GoalAchievedToast(QWidget):
         vl.addLayout(top)
 
         name_lbl = QLabel()
+        # Le nom d'un objectif est écrit par le streamer : sans ce format, une
+        # balise y serait rendue, et une « image » distante déclencherait une
+        # requête depuis la machine de l'utilisateur.
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         name_lbl.setFont(QFont("Segoe UI", 9))
         name_lbl.setStyleSheet("color: #aaaaaa; background: transparent; border: none;")
         fm = QFontMetrics(name_lbl.font())
@@ -624,6 +983,12 @@ class GridWidget(QWidget):
 
     stream_selected = pyqtSignal(str)  # twitch_login
     active_streams_changed = pyqtSignal(int)  # nombre de flux joués (qualité adaptative)
+    #: Chaînes dont l'audio est épinglé, dans l'ordre de la grille.
+    audio_pins_changed = pyqtSignal(list)
+    #: (login, chemin|"") — un clip vient d'être demandé ; chemin vide = échec.
+    clip_saved = pyqtSignal(str, str)
+    #: (login, chemin, secondes) — rejouer ce moment en grand.
+    replay_requested = pyqtSignal(str, str, int)
 
     MAX_CELLS: int = 25
 
@@ -637,11 +1002,25 @@ class GridWidget(QWidget):
         self._cell_map: dict[str, StreamCell] = {}
         self._first_load: bool = True
         self._max_active_streams: int = self.MAX_CELLS
-        self._grid_quality: str = "360p,worst"
+        self._grid_quality: str = QUALITY_GRID
         self._last_streamers: list = []
         self._last_selected: list[str] = []
         self._insertion_order: list[str] = []
-        self._audio_pinned_login: str = ""
+        self._applied_order: list[str] = []
+        self._last_reorder: float = 0.0
+        # Flux dont mpv a constaté la fin, alors que l'API les annonce encore en
+        # direct. On les écarte de la grille le temps que l'API se mette à jour,
+        # sinon le replacement les réinstallerait aussitôt dans leur cellule.
+        self._ended: dict[str, float] = {}
+        # "viewers" : la grille se réordonne seule. "manual" : l'ordre est celui
+        # que l'utilisateur a posé au glisser-déposer et rien ne le bouge.
+        self._sort_mode: str = "viewers"
+        # Épinglage MULTIPLE : la liste affichée en plein écran n'aurait aucun
+        # sens avec une seule entrée possible, et suivre deux commentaires à la
+        # fois est un usage courant en régie.
+        self._audio_pinned_logins: set[str] = set()
+        self._clip_secs: int = 60
+        self._clip_dir: str = ""
         self._last_active_count: int = -1
         # Renseigné par main.py : count → qualité (mode adaptatif). Sans lui, la
         # grille garde la qualité fixe reçue via restart_all_streams().
@@ -656,8 +1035,138 @@ class GridWidget(QWidget):
             cell = StreamCell(self)
             cell.clicked.connect(self._on_cell_clicked)
             cell.audio_pin_requested.connect(self._on_audio_pin_requested)
+            cell.clip_requested.connect(self.save_clip)
+            cell.replay_requested.connect(self.request_replay)
+            cell.stream_ended.connect(self._on_stream_ended)
             cell.hide()
             self._cells.append(cell)
+
+    # Réordonner déplace les fenêtres X11 natives de mpv : à faire rarement,
+    # sinon la vidéo saute à chaque rafraîchissement des viewers.
+    _REORDER_MIN_INTERVAL_S = 20.0
+    # Au-delà, on retente : le streamer a pu relancer son direct.
+    _ENDED_COOLDOWN_S = 300.0
+
+    #: Dispositions acceptées, cf. set_sort_mode().
+    SORT_MODES = ("viewers", "manual", "favorites")
+
+    def is_draggable(self) -> bool:
+        """Vrai si l'utilisateur peut réordonner la grille à la souris."""
+        return self._sort_mode in ("manual", "favorites")
+
+    def set_sort_mode(self, mode: str) -> None:
+        """Choisit la disposition de la grille.
+
+        - « viewers »   : tri automatique par audience, favoris en tête.
+        - « manual »    : ordre entièrement libre, au glisser-déposer. Les
+          favoris n'y sont PAS remontés — sans quoi ils annuleraient une partie
+          des déplacements et le mode ne serait plus vraiment manuel.
+        - « favorites » : favoris en tête, le reste au glisser-déposer.
+        """
+        mode = mode if mode in self.SORT_MODES else "viewers"
+        if mode == self._sort_mode:
+            return
+        self._sort_mode = mode
+        # Le curseur « main ouverte » est la seule indication qu'une cellule est
+        # saisissable : sans lui, rien ne le laisse deviner.
+        shape = (Qt.CursorShape.OpenHandCursor if self.is_draggable()
+                 else Qt.CursorShape.PointingHandCursor)
+        for c in self._cells:
+            if c.twitch_login and c.is_online:
+                c.setCursor(QCursor(shape))
+        # Un changement de mode doit s'appliquer tout de suite : sans cela
+        # l'hystérésis anti-clignotement retenait le nouveau classement.
+        self._last_reorder = 0.0
+        self._reposition_cells()
+
+    def _on_stream_ended(self, login: str) -> None:
+        """Libère la cellule d'un flux terminé et laisse la place à un autre.
+
+        L'API met souvent plusieurs minutes à basculer un streamer en
+        « offline » : sans ça, la cellule restait noire tout ce temps alors que
+        d'autres streamers en direct attendaient une place.
+        """
+        for cell in self._cells:
+            if cell.twitch_login == login:
+                cell.stop_stream()
+                cell.set_empty()
+                break
+        self._ended[login] = time.monotonic()
+        self._applied_order = [lg for lg in self._applied_order if lg != login]
+        self._insertion_order = [lg for lg in self._insertion_order if lg != login]
+        self._cell_map.pop(login, None)
+        # On rejoue le placement : un streamer live hors grille peut monter.
+        if self._last_streamers:
+            self.update_streamers(self._last_streamers, self._last_selected)
+        else:
+            self._reposition_cells()
+
+    def _ordered_for_display(self, active: list["StreamCell"]) -> list["StreamCell"]:
+        """Classe les cellules par viewers décroissants, avec hystérésis.
+
+        Le nouvel ordre n'est adopté que s'il diffère de celui appliqué ET
+        qu'un délai minimal s'est écoulé : deux streams aux audiences proches
+        échangeraient sinon leur place à chaque sondage.
+        """
+        # Les favoris passent devant dans les deux modes : c'est tout l'intérêt
+        # de les marquer.
+        def _fav_first(cells: list["StreamCell"]) -> list["StreamCell"]:
+            favs = favorites.get()
+            return sorted(cells, key=lambda c: c.twitch_login.lower() not in favs)
+
+        if self._sort_mode in ("manual", "favorites"):
+            # L'ordre voulu par l'utilisateur d'abord ; les cellules qu'il n'a
+            # jamais placées (nouvelles arrivées) viennent ensuite.
+            rank = {lg: i for i, lg in enumerate(self._applied_order)}
+            ordered = sorted(active, key=lambda c: rank.get(c.twitch_login, 10_000))
+            if self._sort_mode == "favorites":
+                ordered = _fav_first(ordered)
+            self._applied_order = [c.twitch_login for c in ordered]
+            return ordered
+
+        by_viewers = _fav_first(
+            sorted(active, key=lambda c: -getattr(c, "_viewers", 0))
+        )
+        wanted = [c.twitch_login for c in by_viewers]
+        if wanted == self._applied_order:
+            return by_viewers
+
+        now = time.monotonic()
+        settled = set(self._applied_order) == set(wanted)
+        if settled and (now - self._last_reorder) < self._REORDER_MIN_INTERVAL_S:
+            # Mêmes streams, seul le classement bouge : on attend.
+            order = {lg: i for i, lg in enumerate(self._applied_order)}
+            return sorted(active, key=lambda c: order.get(c.twitch_login, 1_000))
+
+        self._applied_order = wanted
+        self._last_reorder = now
+        return by_viewers
+
+    def move_cell(self, login: str, target: str) -> None:
+        """Place `login` dans la case occupée par `target`.
+
+        `target` vide = déplacement en fin de grille.
+
+        L'index de destination est relevé AVANT le retrait de la cellule
+        déplacée, et c'est tout l'enjeu : en le calculant après, chaque cellule
+        située à droite de la source remontait d'un cran, et le dépôt atterrissait
+        systématiquement une case trop à gauche dès qu'on glissait vers la
+        droite. Vers la gauche, le retrait ne décalait rien et la position était
+        juste — d'où un défaut qui ne se voyait que dans un sens.
+        """
+        order = list(self._applied_order)
+        if login not in order:
+            order.append(login)
+        if target and target in order and target != login:
+            dst = order.index(target)
+            order.remove(login)
+            order.insert(dst, login)
+        else:
+            order.remove(login)
+            order.append(login)
+        self._applied_order = order
+        self._last_reorder = time.monotonic()
+        self._reposition_cells()
 
     def _reposition_cells(self) -> None:
         """Recalcule et applique la géométrie de chaque cellule active.
@@ -669,6 +1178,7 @@ class GridWidget(QWidget):
         - AUCUNE cellule noire : les cellules vides sont masquées
         """
         active = [c for c in self._cells if c.twitch_login]
+        active = self._ordered_for_display(active)
         n = len(active)
 
         # Maj visibilité
@@ -727,7 +1237,16 @@ class GridWidget(QWidget):
         self._quality_provider = provider
 
     def restart_all_streams(self, quality: str) -> None:
-        """Relancer tous les streams actifs avec la nouvelle qualité."""
+        """Relancer tous les streams actifs avec la nouvelle qualité.
+
+        Sans effet si la qualité demandée est déjà celle en place : une relance
+        coupe et recharge CHAQUE cellule (résolution streamlink comprise, une
+        dizaine de secondes de noir), coût inacceptable pour un changement qui
+        n'en est pas un.
+        """
+        if quality == self._grid_quality:
+            logger.debug("GridWidget: qualité déjà %s — relance inutile", quality)
+            return
         self._grid_quality = quality
         logger.info("GridWidget: relance tous les streams actifs avec qualité %s", quality)
         for cell in self._cells:
@@ -800,6 +1319,18 @@ class GridWidget(QWidget):
             )
         except Exception:
             return
+
+        # Écarter les flux dont on a constaté la fin, tant que le délai court
+        # et que l'API n'a pas confirmé leur passage hors ligne.
+        now_m = time.monotonic()
+        self._ended = {
+            lg: t for lg, t in self._ended.items()
+            if now_m - t < self._ENDED_COOLDOWN_S
+        }
+        still_live = {s.twitch_login for s in live}  # type: ignore[union-attr]
+        # Un streamer passé offline puis revenu n'a plus à être écarté.
+        self._ended = {lg: t for lg, t in self._ended.items() if lg in still_live}
+        live = [s for s in live if s.twitch_login not in self._ended]  # type: ignore[union-attr]
 
         # Décider qui est dans la grille (par viewers) → pour le cut
         kept_logins = {s.twitch_login for s in live[: self._max_active_streams]}  # type: ignore[union-attr]
@@ -884,25 +1415,116 @@ class GridWidget(QWidget):
         self.set_active(twitch_login)
         self.stream_selected.emit(twitch_login)
 
-    def _on_audio_pin_requested(self, login: str) -> None:
-        """Toggle l'épinglement audio sur une cellule."""
-        if self._audio_pinned_login == login:
-            self._audio_pinned_login = ""  # unpin
+    def set_clip_config(self, cfg: dict) -> None:
+        """Applique la configuration des clips à toutes les cellules."""
+        clips = (cfg or {}).get("clips") or {}
+        enabled = bool(clips.get("grid_enabled", True))
+        self._clip_secs = max(10, int(clips.get("duration_secs", 60) or 60))
+        self._clip_dir = str(clips.get("directory") or "")
+        for cell in self._cells:
+            cell.set_clip_buffer(self._clip_secs if enabled else 0)
+        logger.info("Clips depuis la grille : %s (%d s)",
+                    "activés" if enabled else "désactivés", self._clip_secs)
+
+    def save_clip(self, login: str) -> str | None:
+        """Écrit le moment en cours de `login`. Émet clip_saved dans tous les cas."""
+        cell = self._cell_map.get(login)
+        path = cell.save_clip(self._clip_secs, self._clip_dir) if cell else None
+        if path:
+            logger.info("Clip de %s : %s", login, path)
         else:
-            self._audio_pinned_login = login
+            logger.warning("Clip de %s impossible (cellule absente ou tampon coupé)",
+                           login)
+        self.clip_saved.emit(login, path or "")
+        return path
+
+    def request_replay(self, login: str) -> None:
+        """Extrait le moment de `login` dans un fichier temporaire et le signale.
+
+        Le fichier va dans le répertoire temporaire du système, pas dans le
+        dossier des clips : un replay est jetable, il n'a pas à se mêler aux
+        moments qu'on a choisi de garder.
+        """
+        import tempfile
+        cell = self._cell_map.get(login)
+        if cell is None:
+            return
+        path = cell.save_clip(self._clip_secs, tempfile.gettempdir())
+        if path:
+            self.replay_requested.emit(login, path, self._clip_secs)
+        else:
+            logger.warning("Replay de %s impossible (tampon coupé ?)", login)
+
+    def _on_audio_pin_requested(self, login: str) -> None:
+        """Ajoute ou retire une chaîne des audios épinglés."""
+        if not login:
+            return
+        if login in self._audio_pinned_logins:
+            self._audio_pinned_logins.discard(login)
+        else:
+            self._audio_pinned_logins.add(login)
         self._apply_audio_pin()
 
+    def pinned_audio_logins(self) -> list[str]:
+        """Chaînes épinglées, dans l'ordre où elles apparaissent dans la grille."""
+        seen = [c.twitch_login for c in self._ordered_for_display(
+            [c for c in self._cells if c.twitch_login])]
+        return [lg for lg in seen if lg in self._audio_pinned_logins]
+
     def _apply_audio_pin(self) -> None:
-        """Synchronise l'état mute/unmute de toutes les cellules selon le pin actif."""
+        """Synchronise mute/unmute sur toutes les cellules et signale la liste."""
+        present = {c.twitch_login for c in self._cells if c.twitch_login}
+        # Une chaîne qui a quitté la grille ne peut plus être entendue : garder
+        # son épingle afficherait une entrée sans son dans la liste.
+        stale = self._audio_pinned_logins - present
+        if stale:
+            self._audio_pinned_logins -= stale
         for cell in self._cells:
-            pinned = bool(self._audio_pinned_login) and cell.twitch_login == self._audio_pinned_login
-            cell.set_audio_pinned(pinned)
+            cell.set_audio_pinned(cell.twitch_login in self._audio_pinned_logins)
+        self.audio_pins_changed.emit(self.pinned_audio_logins())
+
+    def unpin_audio(self, login: str) -> None:
+        """Retire une chaîne des audios épinglés. Sans effet si absente."""
+        if login in self._audio_pinned_logins:
+            self._audio_pinned_logins.discard(login)
+            self._apply_audio_pin()
+
+    def set_cell_volume(self, login: str, volume: int) -> None:
+        """Règle le volume d'une cellule épinglée (console de mixage)."""
+        cell = self._cell_map.get(login)
+        if cell is not None:
+            cell.set_volume(volume)
+
+    def set_cell_muted(self, login: str, muted: bool) -> None:
+        """Coupe ou rétablit une cellule depuis la console."""
+        cell = self._cell_map.get(login)
+        if cell is not None:
+            cell.set_mix_muted(muted)
+
+    def pulse_cell(self, login: str, color: str = "#f5c518",
+                   seconds: float = 6.0) -> None:
+        """Fait pulser la cellule d'une chaîne, si elle est affichée."""
+        cell = self._cell_map.get(login)
+        if cell is not None:
+            cell.pulse_hype(color, seconds=seconds)
+
+    def pulse_all(self, color: str = "#f5c518", pulses: int = 4) -> None:
+        """Fait pulser TOUTES les cellules occupées.
+
+        Un palier de cagnotte n'appartient à personne en particulier : le
+        signaler sur une seule cellule serait trompeur.
+        """
+        for cell in self._cells:
+            if cell.twitch_login:
+                cell.pulse_hype(color, pulses=pulses)
 
     def goal_achieved_flash(self, login: str, goal_name: str) -> None:
         """Pulse la cellule en vert et affiche un toast quand un objectif est accompli."""
         cell = self._cell_map.get(login)
         if cell is not None:
-            cell.pulse_hype("#00ff87", pulses=5)
+            # Dix secondes : un objectif atteint doit rester visible le temps
+            # qu'on lève les yeux vers la grille, pas le temps d'un battement.
+            cell.pulse_hype("#00ff87", seconds=10.0)
         toast = _GoalAchievedToast(login, goal_name, self)
         toast.show()
         toast.raise_()
@@ -917,7 +1539,13 @@ class GridWidget(QWidget):
         self, cell_idx: int, label: str, score: float, color: str = "#ff6b00",
     ) -> None:
         """Affiche un toast éphémère en haut à droite de la grille."""
-        toast = _HypeToast(label, score, color, self)
+        login = ""
+        if 0 <= cell_idx < len(self._cells):
+            login = self._cells[cell_idx].twitch_login
+        toast = _HypeToast(label, score, color, self, login,
+                           can_clip=bool(self._clip_secs and login))
+        toast.clip_requested.connect(self.save_clip)
+        toast.replay_requested.connect(self.request_replay)
         toast.show()
         toast.raise_()
 
