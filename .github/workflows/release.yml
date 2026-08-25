@@ -130,7 +130,9 @@ jobs:
       - name: Dépendances système (macOS)
         if: matrix.target == 'macos'
         run: |
-          brew install mpv dylibbundler
+          # dylibbundler n'est plus nécessaire : PyInstaller rapatrie lui-même
+          # les dépendances de libmpv (voir l'étape de vérification plus bas).
+          brew install mpv
           # Copiée à la racine : le .spec l'y attend, et l'application la
           # cherchera par ce nom dans son propre paquet. Sans elle, une machine
           # sans Homebrew n'aurait aucun lecteur vidéo.
@@ -180,7 +182,13 @@ jobs:
       # qu'elle charge par des chemins absolus vers /opt/homebrew. Sur une
       # machine sans Homebrew, elle ne se chargerait pas. dylibbundler les
       # rapatrie dans le paquet et réécrit ces chemins.
-      - name: Rapatrier les dépendances de libmpv (macOS)
+      # Depuis que libmpv est déclarée en binaire dans le .spec, PyInstaller
+      # suit lui-même ses dépendances — ffmpeg, x264, harfbuzz et le reste —
+      # les copie dans Contents/Frameworks et réécrit leurs chemins en @rpath.
+      # dylibbundler n'a donc plus rien à rapatrier : il tentait de recopier
+      # chaque fichier sur lui-même et s'arrêtait en erreur. Reste à VÉRIFIER
+      # que plus rien ne pointe hors du paquet.
+      - name: Vérifier l'autonomie de libmpv (macOS)
         if: matrix.target == 'macos'
         run: |
           APP="dist/ZLink.app"
@@ -195,11 +203,19 @@ jobs:
             exit 1
           fi
           echo "libmpv trouvée : $DYLIB"
-          dylibbundler -cd -b -of \
-            -x "$DYLIB" \
-            -d "$APP/Contents/Frameworks" \
-            -p "@executable_path/../Frameworks/"
-          otool -L "$DYLIB" | head -20
+          otool -L "$DYLIB"
+          # Une référence à un préfixe Homebrew est une bibliothèque absente de
+          # toute machine sans Homebrew : l'application s'y lancerait sans
+          # vidéo, et seulement chez l'utilisateur final. On préfère l'échec ici.
+          FUITES=$(find "$APP" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 \
+            | xargs -0 otool -L 2>/dev/null \
+            | grep -E '^[[:space:]]+(/opt/homebrew|/usr/local)/' | sort -u || true)
+          if [ -n "$FUITES" ]; then
+            echo "::error::des bibliothèques pointent encore hors du paquet"
+            echo "$FUITES"
+            exit 1
+          fi
+          echo "Aucune dépendance Homebrew résiduelle."
 
       - name: Contrôle du paquet
         shell: bash
