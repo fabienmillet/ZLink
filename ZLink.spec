@@ -59,6 +59,47 @@ _VERSION = re.search(
     pathlib.Path("core/version.py").read_text(encoding="utf-8"),
 ).group(1)
 
+# Métadonnées de l'exécutable Windows.
+#
+# Sans ce bloc, ZLink.exe ne porte ni éditeur, ni description, ni version : dans
+# les propriétés du fichier et le gestionnaire de tâches, il est anonyme. Un
+# binaire anonyme, non signé et fraîchement apparu coche plusieurs cases des
+# moteurs heuristiques. Ça n'est pas un remède, mais ça retire un signal.
+_MORCEAUX = _VERSION.split("-")[0].split(".")
+_QUADRUPLET = tuple(int(x) for x in (_MORCEAUX + ["0", "0", "0", "0"])[:4])
+
+INFOS_VERSION = None
+if sys.platform.startswith("win"):
+    # 040C = français (France), 04B0 = page de codes Unicode. Le contenu reste
+    # en ASCII : PyInstaller relit ce fichier, et une surprise d'encodage sous
+    # Windows casserait la construction pour un gain nul.
+    _texte = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={_QUADRUPLET},
+    prodvers={_QUADRUPLET},
+    mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([StringTable('040C04B0', [
+      StringStruct('CompanyName', 'Fabien MILLET'),
+      StringStruct('FileDescription', 'ZLink - Multiscreen app for ZEvent'),
+      StringStruct('FileVersion', '{_VERSION}'),
+      StringStruct('InternalName', 'ZLink'),
+      StringStruct('LegalCopyright',
+                   'Copyright (C) 2026 Fabien MILLET - GNU GPL v3 or later'),
+      StringStruct('OriginalFilename', 'ZLink.exe'),
+      StringStruct('ProductName', 'ZLink'),
+      StringStruct('ProductVersion', '{_VERSION}'),
+    ])]),
+    VarFileInfo([VarStruct('Translation', [0x040C, 1200])])
+  ]
+)
+"""
+    _fichier = pathlib.Path("build") / "version_info.txt"
+    _fichier.parent.mkdir(parents=True, exist_ok=True)
+    _fichier.write_text(_texte, encoding="utf-8")
+    INFOS_VERSION = str(_fichier)
+
 qta_datas, qta_binaires, qta_imports = collect_all("qtawesome")
 donnees += qta_datas
 
@@ -111,6 +152,7 @@ exe = EXE(
     upx=False,
     console=False,
     icon=ICONE,
+    version=INFOS_VERSION,
 )
 
 exe_sl = EXE(
