@@ -21,7 +21,11 @@
 # programme développeur Apple (99 $/an).
 #   - MAC_CERT_P12       : certificat « Developer ID Application » (.p12) en base64
 #   - MAC_CERT_PASSWORD  : mot de passe de ce .p12
-#   - MAC_SIGN_IDENTITY  : nom de l'identité, ex. « Developer ID Application: … (TEAMID) »
+#   - MAC_SIGN_IDENTITY  : nom de l'identité, ex. « Developer ID Application: … (TEAMID) ».
+#                         Sert d'interrupteur : sa seule présence active la
+#                         signature. L'empreinte réellement utilisée est lue
+#                         dans le trousseau, pour ne pas dépendre d'un espace
+#                         ou d'un retour à la ligne dans le secret.
 #   - MAC_API_KEY_P8     : clé App Store Connect (.p8) en base64
 #   - MAC_API_KEY_ID     : identifiant de cette clé
 #   - MAC_API_ISSUER_ID  : identifiant de l'émetteur
@@ -266,13 +270,35 @@ jobs:
         run: |
           echo "$MAC_CERT_P12" | base64 --decode > certificat.p12
           security create-keychain -p motdepasse build.keychain
-          security default-keychain -s build.keychain
           security unlock-keychain -p motdepasse build.keychain
+          # Sans réglage, un trousseau se reverrouille de lui-même au bout de
+          # quelques minutes : la signature échouerait en cours de route.
+          security set-keychain-settings -lut 3600 build.keychain
           security import certificat.p12 -k build.keychain \
-            -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+            -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k motdepasse build.keychain
+            -s -k motdepasse build.keychain >/dev/null
+          # codesign ne consulte PAS le trousseau « par défaut » mais la LISTE
+          # DE RECHERCHE, que « default-keychain » ne touche pas. Sans cette
+          # ligne, le certificat est bien importé et reste introuvable :
+          # « no identity found », autant de fois qu'il y a de binaires.
+          security list-keychains -d user -s build.keychain \
+            $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s build.keychain
           rm -f certificat.p12
+          # On signera par EMPREINTE et non par nom : insensible à un espace ou
+          # un retour à la ligne parasite dans le secret, et on vérifie ici que
+          # l'identité est réellement utilisable plutôt que de le découvrir au
+          # premier codesign.
+          EMPREINTE=$(security find-identity -v -p codesigning build.keychain \
+            | awk '/Developer ID Application/ {print $2; exit}')
+          if [ -z "$EMPREINTE" ]; then
+            echo "::error::aucune identité « Developer ID Application » utilisable"
+            security find-identity -v -p codesigning build.keychain || true
+            exit 1
+          fi
+          echo "SIGN_HASH=$EMPREINTE" >> "$GITHUB_ENV"
+          echo "Identité de signature : $EMPREINTE"
 
       - name: Signer (macOS)
         if: matrix.target == 'macos' && env.MAC_SIGN_IDENTITY != ''
@@ -290,14 +316,14 @@ jobs:
                         -o -type d -name '*.framework' \) \
             -print0 | xargs -0 -I{} codesign --force --timestamp --options runtime \
             --entitlements packaging/entitlements.plist \
-            --sign "$MAC_SIGN_IDENTITY" {}
+            --sign "$SIGN_HASH" {}
           # streamlink est un second exécutable : il se signe comme le premier.
           codesign --force --timestamp --options runtime \
             --entitlements packaging/entitlements.plist \
-            --sign "$MAC_SIGN_IDENTITY" "$APP/Contents/MacOS/streamlink" || true
+            --sign "$SIGN_HASH" "$APP/Contents/MacOS/streamlink" || true
           codesign --force --timestamp --options runtime \
             --entitlements packaging/entitlements.plist \
-            --sign "$MAC_SIGN_IDENTITY" "$APP"
+            --sign "$SIGN_HASH" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Notariser (macOS)
