@@ -163,18 +163,35 @@ jobs:
           sha256sum libmpv-2.dll > libmpv-2.dll.sha256
 
       - name: Dépendances Python
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
-
-      # Grave le commit dans le paquet. Sans ce fichier, l'application se
-      # croirait lancée depuis les sources et s'annoncerait « -dev ».
-      - name: Marquer la construction
         shell: bash
         run: |
-          printf '# Généré à la construction — ne pas versionner.\nCOMMIT = "%s"\n' \
-            "$GITHUB_SHA" > core/build_info.py
-          cat core/build_info.py
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ "${{ matrix.target }}" != "windows" ]; then
+            pip install pyinstaller
+            exit 0
+          fi
+          # Windows : recompiler le bootloader de PyInstaller.
+          #
+          # Celui livré sur PyPI est identique octet pour octet dans des
+          # milliers d'échantillons malveillants — PyInstaller est très employé
+          # pour distribuer du maliciel Python. Plusieurs moteurs le signalent
+          # donc tel quel, et l'application hérite de détections génériques.
+          # Recompilé ici, il n'est dans aucune base.
+          #
+          # PYINSTALLER_COMPILE_BOOTLOADER est indispensable : le sdist contient
+          # déjà les binaires Windows, et « --no-binary » seul les réutiliserait
+          # sans rien recompiler (voir hatch_build.py, méthode run()).
+          PYINSTALLER_COMPILE_BOOTLOADER=1 \
+            pip install --no-binary pyinstaller --no-cache-dir pyinstaller
+
+      # Vérifier plutôt que supposer : un bootloader identique à celui de PyPI
+      # signifierait que la recompilation a été court-circuitée, et l'intérêt de
+      # l'étape précédente serait nul sans que rien ne le signale.
+      - name: Contrôler la recompilation du bootloader (Windows)
+        if: matrix.target == 'windows'
+        shell: bash
+        run: python scripts/check_bootloader.py
 
       # La recette vit dans ZLink.spec : elle embarque les sons, qtawesome, et
       # un second exécutable streamlink que l'application invoque en processus
