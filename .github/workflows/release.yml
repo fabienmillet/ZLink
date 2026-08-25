@@ -306,24 +306,39 @@ jobs:
           MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
         run: |
           APP="dist/ZLink.app"
+          signe() { codesign --force --timestamp --options runtime \
+            --entitlements packaging/entitlements.plist --sign "$SIGN_HASH" "$@"; }
+
           # Signer d'ABORD tout ce qui est imbriqué, du plus profond vers la
-          # racine : Apple déconseille --deep, qui applique les mêmes droits à
-          # des binaires qui n'en ont pas besoin et rate certains cas.
-          # -type f : PyInstaller lie symboliquement les binaires entre
-          # Contents/Frameworks et Contents/Resources. Signer à travers un lien
-          # signerait deux fois la même cible, et codesign refuse certains liens.
-          find "$APP" \( -type f -name '*.dylib' -o -type f -name '*.so' \
-                        -o -type d -name '*.framework' \) \
-            -print0 | xargs -0 -I{} codesign --force --timestamp --options runtime \
-            --entitlements packaging/entitlements.plist \
-            --sign "$SIGN_HASH" {}
-          # streamlink est un second exécutable : il se signe comme le premier.
-          codesign --force --timestamp --options runtime \
-            --entitlements packaging/entitlements.plist \
-            --sign "$SIGN_HASH" "$APP/Contents/MacOS/streamlink" || true
-          codesign --force --timestamp --options runtime \
-            --entitlements packaging/entitlements.plist \
-            --sign "$SIGN_HASH" "$APP"
+          # racine. Apple déconseille --deep, qui rate certains cas.
+          #
+          # Repérer les binaires par extension ne suffit pas : un paquet Qt
+          # contient des exécutables sans extension (Contents/MacOS/ZLink,
+          # streamlink, QtWebEngineProcess). On demande donc à « file » ce qui
+          # est du code, et on trie du plus profond au moins profond.
+          # -type f écarte les liens symboliques que PyInstaller pose entre
+          # Contents/Frameworks et Contents/Resources : les suivre signerait
+          # deux fois la même cible.
+          find "$APP" -type f -print0 \
+            | xargs -0 file --mime-type \
+            | grep 'application/x-mach-binary' \
+            | sed 's/: *application\/x-mach-binary$//' \
+            | awk -F/ '{print NF, $0}' | sort -rn | cut -d' ' -f2- \
+            > /tmp/machos.txt
+          echo "$(wc -l < /tmp/machos.txt) binaires Mach-O à signer"
+          while IFS= read -r f; do signe "$f"; done < /tmp/machos.txt
+
+          # Les .framework et les .app imbriqués (QtWebEngineProcess) sont des
+          # PAQUETS : signer leur exécutable ne scelle pas le paquet, et la
+          # notarisation refuse un paquet imbriqué non scellé.
+          find "$APP" \( -type d -name '*.framework' \) -print0 \
+            | xargs -0 -I{} sh -c 'codesign --force --timestamp --options runtime \
+                --entitlements packaging/entitlements.plist --sign "$1" "$2"' _ "$SIGN_HASH" {}
+          find "$APP" -mindepth 1 -type d -name '*.app' -print0 \
+            | xargs -0 -I{} sh -c 'codesign --force --timestamp --options runtime \
+                --entitlements packaging/entitlements.plist --sign "$1" "$2"' _ "$SIGN_HASH" {}
+
+          signe "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
 
       - name: Notariser (macOS)
@@ -334,12 +349,31 @@ jobs:
           MAC_API_KEY_P8: ${{ secrets.MAC_API_KEY_P8 }}
         run: |
           echo "$MAC_API_KEY_P8" | base64 --decode > cle_api.p8
+          IDENT=(--key cle_api.p8 --key-id "$MAC_API_KEY_ID" --issuer "$MAC_API_ISSUER_ID")
           # ditto, pas zip : l'archive envoyée à Apple doit conserver les liens
           # symboliques et les permissions du paquet, ce que zip écrase.
           ditto -c -k --keepParent dist/ZLink.app notarisation.zip
-          xcrun notarytool submit notarisation.zip \
-            --key cle_api.p8 --key-id "$MAC_API_KEY_ID" \
-            --issuer "$MAC_API_ISSUER_ID" --wait --timeout 30m
+
+          set +e
+          xcrun notarytool submit notarisation.zip "${IDENT[@]}" \
+            --wait --timeout 30m --output-format json > soumission.json
+          set -e
+          cat soumission.json
+
+          ID=$(/usr/bin/python3 -c "import json;print(json.load(open('soumission.json'))['id'])")
+          ETAT=$(/usr/bin/python3 -c "import json;print(json.load(open('soumission.json'))['status'])")
+          if [ "$ETAT" != "Accepted" ]; then
+            # Sans ce journal, un refus ne dit rien : « Invalid » et rien d'autre.
+            # Apple y détaille chaque binaire fautif et la raison.
+            echo "::error::notarisation refusée ($ETAT) — journal d'Apple ci-dessous"
+            xcrun notarytool log "$ID" "${IDENT[@]}" || true
+            rm -f cle_api.p8 notarisation.zip
+            exit 1
+          fi
+          # Le journal reste utile même en cas d'acceptation : il signale les
+          # avertissements qui deviendront des refus dans une version future.
+          xcrun notarytool log "$ID" "${IDENT[@]}" || true
+
           # Agrafer le ticket : l'application se lance alors même hors ligne.
           xcrun stapler staple dist/ZLink.app
           xcrun stapler validate dist/ZLink.app
