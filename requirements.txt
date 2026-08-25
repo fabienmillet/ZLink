@@ -6,3 +6,7 @@ streamlink>=8.4.0   # < 8.4.0 : CVE-2026-44353 (lecture de fichier local via man
 python-dotenv>=1.0.0
 qtawesome>=1.3.0
 pyqtgraph>=0.13.0
+# Vérification des signatures Ed25519 des releases (core/updater.py).
+# Sans elle, verify_signature() échouait à l'import et retournait False :
+# une mise à jour signée aurait été rejetée comme non vérifiable.
+pycryptodome>=3.20.0

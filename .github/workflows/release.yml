@@ -1,0 +1,336 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Publication d'une release ZLink.
+#
+# Deux déclencheurs :
+#   - push d'un tag « v* » (ex. v0.1.0) : construit ET publie ;
+#   - lancement manuel (workflow_dispatch) : construit, et ne publie que si
+#     l'on décoche « dry_run ». C'est le mode à utiliser pour valider la chaîne
+#     d'empaquetage sans couper de release.
+#
+# Prérequis côté dépôt, à faire UNE FOIS :
+#   - secret RELEASE_SIGNING_KEY : clé privée Ed25519 en hexadécimal (64 car.),
+#     produite par scripts/gen_release_key.py. NE JAMAIS la committer.
+#   - core/updater.py : RELEASE_PUBKEY_HEX renseignée avec la clé publique.
+#   - variables LIBMPV_URL et LIBMPV_SHA256 : archive libmpv pour Windows et son
+#     empreinte. Sans elles, la construction Windows échoue volontairement
+#     plutôt que de produire une application sans lecteur vidéo.
+#
+# Notarisation macOS — FACULTATIVE. Sans ces secrets, la construction se fait
+# quand même, mais l'application n'est pas signée : Gatekeeper la refusera sur
+# une autre machine que celle qui l'a produite. Elle exige une adhésion au
+# programme développeur Apple (99 $/an).
+#   - MAC_CERT_P12       : certificat « Developer ID Application » (.p12) en base64
+#   - MAC_CERT_PASSWORD  : mot de passe de ce .p12
+#   - MAC_SIGN_IDENTITY  : nom de l'identité, ex. « Developer ID Application: … (TEAMID) »
+#   - MAC_API_KEY_P8     : clé App Store Connect (.p8) en base64
+#   - MAC_API_KEY_ID     : identifiant de cette clé
+#   - MAC_API_ISSUER_ID  : identifiant de l'émetteur
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Construire sans publier"
+        type: boolean
+        default: true
+      tag:
+        description: "Tag de publication (défaut : v + core/version.py)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  # Détermine le tag et vérifie qu'il correspond au code. Publier un binaire
+  # qui s'annonce sous un autre numéro condamnerait le vérificateur de mise à
+  # jour à proposer indéfiniment la même version.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.calc.outputs.tag }}
+      publish: ${{ steps.calc.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: calc
+        shell: bash
+        run: |
+          CODE=$(python -c "import re,pathlib; \
+            print(re.search(r'__version__ = \"([^\"]+)\"', \
+            pathlib.Path('core/version.py').read_text()).group(1))")
+          echo "version dans le code : $CODE"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            if [ "${TAG#v}" != "$CODE" ]; then
+              echo "::error::Le tag ($TAG) ne correspond pas à __version__ ($CODE)"
+              exit 1
+            fi
+            PUBLISH=true
+          else
+            TAG="${{ inputs.tag }}"
+            [ -n "$TAG" ] || TAG="v$CODE"
+            PUBLISH=${{ inputs.dry_run == false }}
+          fi
+          echo "tag=$TAG"        >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "Tag : $TAG — publication : $PUBLISH"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux
+            artifact: ZLink-linux-x86_64.tar.gz
+          - os: windows-latest
+            target: windows
+            artifact: ZLink-windows-x86_64.zip
+          - os: macos-14
+            target: macos
+            artifact: ZLink-macos-arm64.zip
+    runs-on: ${{ matrix.os }}
+    env:
+      # Exposés au niveau du job : une condition « if » ne peut pas lire
+      # secrets.* directement, mais elle peut lire env.*.
+      MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+      MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
+      MAC_API_KEY_ID: ${{ secrets.MAC_API_KEY_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances système (Linux)
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpv2 libegl1 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+
+      - name: Dépendances système (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          brew install mpv dylibbundler
+          # Copiée à la racine : le .spec l'y attend, et l'application la
+          # cherchera par ce nom dans son propre paquet. Sans elle, une machine
+          # sans Homebrew n'aurait aucun lecteur vidéo.
+          cp "$(brew --prefix mpv)/lib/libmpv.2.dylib" libmpv.2.dylib
+          chmod u+w libmpv.2.dylib
+
+      # libmpv n'est pas distribuée par pip : sous Windows elle voyage avec
+      # l'application, et son empreinte est vérifiée au démarrage.
+      - name: libmpv (Windows)
+        if: matrix.target == 'windows'
+        shell: bash
+        env:
+          LIBMPV_URL: ${{ vars.LIBMPV_URL }}
+          LIBMPV_SHA256: ${{ vars.LIBMPV_SHA256 }}
+        run: |
+          if [ -z "$LIBMPV_URL" ] || [ -z "$LIBMPV_SHA256" ]; then
+            echo "::error::Variables LIBMPV_URL / LIBMPV_SHA256 absentes — voir l'en-tête du workflow"
+            exit 1
+          fi
+          curl -fsSL "$LIBMPV_URL" -o libmpv.7z
+          7z x libmpv.7z -olibmpv
+          find libmpv -name 'libmpv-2.dll' -exec cp {} libmpv-2.dll \;
+          echo "$LIBMPV_SHA256  libmpv-2.dll" | sha256sum -c -
+          sha256sum libmpv-2.dll > libmpv-2.dll.sha256
+
+      - name: Dépendances Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      # Grave le commit dans le paquet. Sans ce fichier, l'application se
+      # croirait lancée depuis les sources et s'annoncerait « -dev ».
+      - name: Marquer la construction
+        shell: bash
+        run: |
+          printf '# Généré à la construction — ne pas versionner.\nCOMMIT = "%s"\n' \
+            "$GITHUB_SHA" > core/build_info.py
+          cat core/build_info.py
+
+      # La recette vit dans ZLink.spec : elle embarque les sons, qtawesome, et
+      # un second exécutable streamlink que l'application invoque en processus
+      # séparé — sans lui, une machine sans streamlink installé n'a pas de vidéo.
+      - name: Construction
+        run: pyinstaller --noconfirm --clean ZLink.spec
+
+      # libmpv tire elle-même ffmpeg et une vingtaine d'autres bibliothèques,
+      # qu'elle charge par des chemins absolus vers /opt/homebrew. Sur une
+      # machine sans Homebrew, elle ne se chargerait pas. dylibbundler les
+      # rapatrie dans le paquet et réécrit ces chemins.
+      - name: Rapatrier les dépendances de libmpv (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          APP="dist/ZLink.app"
+          dylibbundler -cd -b -of \
+            -x "$APP/Contents/MacOS/_internal/libmpv.2.dylib" \
+            -d "$APP/Contents/Frameworks" \
+            -p "@executable_path/../Frameworks/"
+          otool -L "$APP/Contents/MacOS/_internal/libmpv.2.dylib" | head -20
+
+      - name: Contrôle du paquet
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "macos" ]; then
+            cd dist/ZLink.app/Contents/MacOS
+          else
+            cd dist/ZLink
+          fi
+          test -f assets/sounds/milestone.wav || test -f _internal/assets/sounds/milestone.wav \
+            || { echo "::error::sons absents du paquet"; exit 1; }
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            ./streamlink.exe --version || { echo "::error::streamlink embarqué inopérant"; exit 1; }
+          else
+            ./streamlink --version || { echo "::error::streamlink embarqué inopérant"; exit 1; }
+          fi
+          # libmpv doit voyager avec l'application sur les plateformes où elle
+          # ne peut pas être supposée présente.
+          case "${{ matrix.target }}" in
+            windows) test -f _internal/libmpv-2.dll  || { echo "::error::libmpv absente du paquet"; exit 1; } ;;
+            macos)   test -f _internal/libmpv.2.dylib || { echo "::error::libmpv absente du paquet"; exit 1; } ;;
+          esac
+
+      # ── macOS : signature, notarisation, agrafage ────────────────────
+      # Sans certificat configuré, on saute tout : la construction reste utile
+      # pour valider l'empaquetage, mais l'application sera refusée par
+      # Gatekeeper sur une autre machine que celle qui l'a produite.
+      - name: Certificat de signature (macOS)
+        if: matrix.target == 'macos' && env.MAC_CERT_P12 != ''
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          echo "$MAC_CERT_P12" | base64 --decode > certificat.p12
+          security create-keychain -p motdepasse build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p motdepasse build.keychain
+          security import certificat.p12 -k build.keychain \
+            -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k motdepasse build.keychain
+          rm -f certificat.p12
+
+      - name: Signer (macOS)
+        if: matrix.target == 'macos' && env.MAC_SIGN_IDENTITY != ''
+        env:
+          MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}
+        run: |
+          APP="dist/ZLink.app"
+          # Signer d'ABORD tout ce qui est imbriqué, du plus profond vers la
+          # racine : Apple déconseille --deep, qui applique les mêmes droits à
+          # des binaires qui n'en ont pas besoin et rate certains cas.
+          find "$APP" \( -name '*.dylib' -o -name '*.so' -o -name '*.framework' \) \
+            -print0 | xargs -0 -I{} codesign --force --timestamp --options runtime \
+            --entitlements packaging/entitlements.plist \
+            --sign "$MAC_SIGN_IDENTITY" {}
+          # streamlink est un second exécutable : il se signe comme le premier.
+          codesign --force --timestamp --options runtime \
+            --entitlements packaging/entitlements.plist \
+            --sign "$MAC_SIGN_IDENTITY" "$APP/Contents/MacOS/streamlink" || true
+          codesign --force --timestamp --options runtime \
+            --entitlements packaging/entitlements.plist \
+            --sign "$MAC_SIGN_IDENTITY" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+      - name: Notariser (macOS)
+        if: matrix.target == 'macos' && env.MAC_API_KEY_ID != ''
+        env:
+          MAC_API_KEY_ID: ${{ secrets.MAC_API_KEY_ID }}
+          MAC_API_ISSUER_ID: ${{ secrets.MAC_API_ISSUER_ID }}
+          MAC_API_KEY_P8: ${{ secrets.MAC_API_KEY_P8 }}
+        run: |
+          echo "$MAC_API_KEY_P8" | base64 --decode > cle_api.p8
+          # ditto, pas zip : l'archive envoyée à Apple doit conserver les liens
+          # symboliques et les permissions du paquet, ce que zip écrase.
+          ditto -c -k --keepParent dist/ZLink.app notarisation.zip
+          xcrun notarytool submit notarisation.zip \
+            --key cle_api.p8 --key-id "$MAC_API_KEY_ID" \
+            --issuer "$MAC_API_ISSUER_ID" --wait --timeout 30m
+          # Agrafer le ticket : l'application se lance alors même hors ligne.
+          xcrun stapler staple dist/ZLink.app
+          xcrun stapler validate dist/ZLink.app
+          rm -f cle_api.p8 notarisation.zip
+
+      - name: Empaqueter (Linux / macOS)
+        if: matrix.target != 'windows'
+        run: |
+          if [ "${{ matrix.target }}" = "macos" ]; then
+            # ditto conserve les liens symboliques et le bit exécutable, que
+            # zip écrase — une .app dézippée avec zip ne se lance pas.
+            ditto -c -k --keepParent dist/ZLink.app "${{ matrix.artifact }}"
+          else
+            cd dist && tar -czf "../${{ matrix.artifact }}" ZLink
+          fi
+
+      - name: Empaqueter (Windows)
+        if: matrix.target == 'windows'
+        run: Compress-Archive -Path dist/ZLink -DestinationPath ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ matrix.artifact }}
+
+  publish:
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Signer les artefacts
+        env:
+          SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::secret RELEASE_SIGNING_KEY absent — release refusée"
+            exit 1
+          fi
+          pip install pycryptodome
+          python scripts/sign_release.py artifacts/*
+
+      - name: Empreintes SHA-256
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publier la release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            Téléchargez l'archive correspondant à votre système, décompressez-la
+            et lancez `ZLink`.
+
+            **Vérifiez l'intégrité avant d'exécuter :** chaque artefact est
+            accompagné d'une signature `.sig` (Ed25519) et son empreinte figure
+            dans `SHA256SUMS`.
+
+            ZLink est distribué sous **GNU GPL v3 ou ultérieure**. Les sources
+            correspondant à cette version sont celles du tag ci-dessus.

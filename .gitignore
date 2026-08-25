@@ -50,3 +50,6 @@ Thumbs.db
 *.log
 clips/
 .scannerwork/
+
+# Écrit par la chaîne de publication, propre à une construction.
+core/build_info.py
