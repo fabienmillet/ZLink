@@ -439,8 +439,17 @@ jobs:
           body: |
             ## Installation
 
-            Téléchargez l'archive correspondant à votre système, décompressez-la
-            et lancez `ZLink`.
+            **Windows** — décompressez `ZLink-windows-x86_64.zip` où vous
+            voulez et lancez `ZLink.exe`. Aucune installation : le dossier est
+            autonome et se déplace, y compris sur une clé.
+
+            **macOS** — décompressez `ZLink-macos-arm64.zip` et glissez
+            `ZLink.app` dans Applications. L'application est signée et
+            notarisée par Apple.
+
+            **Linux** — décompressez l'archive et lancez `ZLink`. `mpv` doit
+            être installé sur le système (`dnf install mpv` /
+            `apt install libmpv2`).
 
             **Vérifiez l'intégrité avant d'exécuter :** chaque artefact est
             accompagné d'une signature `.sig` (Ed25519) et son empreinte figure
