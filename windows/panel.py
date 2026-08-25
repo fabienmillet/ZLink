@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """Fenêtre panel — stats, programme, donation goals, grille optionnelle."""
 
 from __future__ import annotations
@@ -5,22 +9,26 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import os
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
+import html as _html
 from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
     QRectF,
+    QSize,
     Qt,
     QTimer,
     QUrl,
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap, QRegion, QScreen
+from PyQt6.QtGui import QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap, QRegion, QScreen
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,11 +41,15 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSlider,
     QSpacerItem,
     QStackedWidget,
     QMenu,
@@ -51,7 +63,11 @@ import pyqtgraph as pg
 try:
     import qtawesome as qta
     _QTA_OK = True
-except ImportError:
+except Exception:  # noqa: BLE001
+    # Pas seulement ImportError : qtawesome charge des polices et peut
+    # échouer autrement. Un except trop étroit laissait _QTA_OK non
+    # défini, et le démarrage plantait par NameError une fois sur six.
+    qta = None  # type: ignore[assignment]
     _QTA_OK = False
 pg.setConfigOptions(background="#111111", foreground="#888888", antialias=True)
 
@@ -102,7 +118,6 @@ from core.api_client import (
     StreamerInfo,
     fetch_donation_goals,
 )
-from core.gemini_client import GeminiClient
 from core.history_store import HistoryStore
 from typing import TYPE_CHECKING
 from widgets.bigscreen_widget import BigScreenWidget
@@ -178,6 +193,31 @@ QFrame#eventRow {
 }
 
 /* Watch button */
+/* Bouton par défaut. Sans cette règle, tout bouton sans nom d'objet — ceux
+   des boîtes de dialogue Qt notamment — retombe sur le style natif et la
+   palette, et se retrouvait illisible sur fond sombre. */
+QPushButton {
+    background-color: #1e1e1e;
+    color: #e8e8e8;
+    border: 1px solid #333333;
+    border-radius: 4px;
+    padding: 4px 14px;
+}
+QPushButton:hover {
+    background-color: #2a2a2a;
+    border-color: #4a4a4a;
+    color: #ffffff;
+}
+QPushButton:pressed {
+    background-color: #151515;
+    color: #ffffff;
+}
+QPushButton:disabled {
+    background-color: #161616;
+    color: #4a4a4a;
+    border-color: #262626;
+}
+
 QPushButton#watchBtn {
     background-color: transparent;
     color: #00ff87;
@@ -265,6 +305,52 @@ def _bold_font(family: str, size: int) -> "QFont":
     f.setBold(True)
     return f
 
+
+_ICON_IDLE  = "#8a8a8a"
+_ICON_HOVER = "#ffffff"
+_ICON_DANGER = "#ff4444"
+_ICON_ON    = "#00ff87"
+
+
+def _mk_header_btn(
+    icon_name: str,
+    fallback: str,
+    tooltip: str,
+    *,
+    checkable: bool = False,
+    danger: bool = False,
+) -> "QPushButton":
+    """Bouton icône 32x32 du header (paramètres, big screen, quitter)."""
+    btn = QPushButton()
+    btn.setFixedSize(32, 32)
+    btn.setToolTip(tooltip)
+    btn.setCheckable(checkable)
+    hover = _ICON_DANGER if danger else _ICON_HOVER
+    if _QTA_OK:
+        # L'icône est un pixmap : la couleur des feuilles de style ne s'applique
+        # qu'au texte et la laisserait grise en survol comme à l'état coché.
+        # color_active couvre le survol, le branchement sur toggled l'état coché.
+        off = qta.icon(icon_name, color=_ICON_IDLE, color_active=hover)
+        btn.setIcon(off)
+        # 18px dans un bouton de 32 : l'icône respire au lieu d'en toucher les bords.
+        btn.setIconSize(QSize(18, 18))
+        if checkable:
+            on = qta.icon(icon_name, color=_ICON_ON, color_active=_ICON_ON)
+            btn.toggled.connect(
+                lambda checked, b=btn, on=on, off=off: b.setIcon(on if checked else off)
+            )
+    else:
+        btn.setText(fallback)
+    btn.setStyleSheet(
+        f"QPushButton {{ background: transparent; color: {_ICON_IDLE}; "
+        f"border: none; border-radius: 4px; font-size: 16px; }}"
+        f"QPushButton:hover {{ color: {hover}; "
+        f"background: {'#2a1a1a' if danger else '#1a1a1a'}; }}"
+        f"QPushButton:checked {{ color: {_ICON_ON}; }}"
+    )
+    btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    return btn
+
 # ---------------------------------------------------------------------------
 # Test data (initial state avant le premier poll)
 # ---------------------------------------------------------------------------
@@ -329,12 +415,57 @@ def _fmt_viewers(n: int) -> str:
     return str(n)
 
 
+from core import favorites
+from core.ui_theme import MENU_QSS
+from core.paths import CONFIG_PATH as _CFG_PATH
+from core.version import (
+    GITHUB_OWNER as _GH_OWNER,
+    GITHUB_REPO as _GH_REPO,
+    display_version as _display_version,
+)
+
+
+def _load_reminders() -> set[str]:
+    """Clés d'événements dont le rappel est actif, depuis config.json."""
+    try:
+        if not _CFG_PATH.exists():
+            return set()
+        raw = json.loads(_CFG_PATH.read_text(encoding="utf-8"))
+        return {str(k) for k in (raw.get("programme_reminders") or [])}
+    except Exception as exc:
+        logger.warning("Rappels illisibles — %s", exc)
+        return set()
+
+
+def _save_reminders(keys: set[str]) -> None:
+    """Écrit les rappels dans config.json (lecture-modification-écriture)."""
+    try:
+        cfg = {}
+        if _CFG_PATH.exists():
+            cfg = json.loads(_CFG_PATH.read_text(encoding="utf-8"))
+        cfg["programme_reminders"] = sorted(keys)
+        tmp = _CFG_PATH.with_name(f"{_CFG_PATH.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, _CFG_PATH)
+        os.chmod(_CFG_PATH, 0o600)
+    except Exception as exc:
+        logger.error("Sauvegarde des rappels impossible : %s", exc)
+
+
 def _clear_layout(layout) -> None:  # type: ignore[type-arg]
-    """Supprime tous les widgets d'un layout."""
+    """Supprime tous les widgets d'un layout.
+
+    setParent(None) est indispensable : deleteLater() ne fait que PROGRAMMER la
+    destruction. Retiré du layout mais toujours enfant de son parent, le widget
+    continuait de se peindre à sa dernière position — d'où des textes fantômes
+    superposés au contenu reconstruit.
+    """
     while layout.count():
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            w.setParent(None)
             w.deleteLater()
 
 
@@ -412,76 +543,161 @@ def _make_round_pixmap(pixmap: QPixmap, size: int = 40) -> QPixmap:
     return out
 
 
-# ── Bandeau Gemini ────────────────────────────────────────────────────────────
+# ── Bandeau d'actualité ──────────────────────────────────────────────────────
 
-class _AccueilGeminiBanner(QWidget):
-    """Bande 36px fond #0d0d0d — message statique avec transition fade 300ms."""
+class _AccueilBanner(QWidget):
+    """Bande supérieure : ce qui vient de se passer, en une phrase.
 
-    _ROTATE_MS = 30_000   # rotation automatique toutes les 30s
-    _FADE_MS   = 300      # durée fade in / fade out
+    Volontairement PAS des chiffres — la cagnotte, les viewers et le nombre de
+    directs ont déjà leurs tuiles juste en dessous, les répéter ici ne servait
+    à rien. Cette bande porte l'actualité : un objectif atteint, un favori qui
+    lance son direct, un ajout au programme, le prochain show.
 
-    # Templates fallback locaux
-    _TEMPLATES = [
-        "💚 {donation} récoltés pour la cause — merci à tous",
-        "🏆 {live_count} streamers en live simultanément ce soir",
-        "📡 {viewers} viewers connectés en ce moment",
-        "💚 {donation} et on continue — vous êtes incroyables",
-    ]
+    Les annonces arrivent en tête et sont montrées tout de suite ; entre deux,
+    la bande fait tourner ce qui reste d'actuel.
+    """
+
+    _H = 36
+    _ROTATE_MS = 7_000       # rotation entre deux messages
+    _FADE_MS = 260
+    _MAX_KEPT = 6            # annonces gardées dans la rotation
+
+    #: Teintes par nature d'annonce, alignées sur le fil d'événements.
+    _COLORS = {
+        "goal":  "#00ff87",
+        "live":  "#38bdf8",
+        "event": "#a855f7",
+        "next":  "#8a8a8a",
+        "idle":  "#6a6a6a",
+        "money": "#f5c518",
+    }
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(36)
-        self.setStyleSheet("background-color: #0d0d0d; border-bottom: 1px solid #1e1e1e;")
-        self._gemini = GeminiClient()
-        self._context: dict = {}
-        self._messages: list[str] = [_WAIT_MSG]
-        self._msg_index: int = 0
-        self._fading_out: bool = False
-        self._FONT = QFont(_FONT_MONO, 12)
+        self.setFixedHeight(self._H)
+        self.setStyleSheet(
+            "background-color: #0d0d0d; border-bottom: 1px solid #1e1e1e;")
 
-        # Label centrable
         self._label = QLabel()
-        # Messages générés par le LLM : texte brut, jamais de balisage interprété.
+        # Texte brut : ces phrases contiennent des noms venus d'APIs tierces.
         self._label.setTextFormat(Qt.TextFormat.PlainText)
-        self._label.setFont(self._FONT)
+        self._label.setFont(QFont(_FONT_MONO, 12))
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._label.setStyleSheet(
-            "color: #ffffff; background: transparent; border: none; padding: 0 12px;"
-        )
-        self._label.setText(self._messages[0])
-
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(12, 0, 12, 0)
         root.addWidget(self._label)
 
-        # Effet d'opacité
         self._opacity = QGraphicsOpacityEffect(self._label)
         self._opacity.setOpacity(1.0)
         self._label.setGraphicsEffect(self._opacity)
-
-        # Animation fade
         self._anim = QPropertyAnimation(self._opacity, b"opacity", self)
         self._anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self._anim.finished.connect(self._on_anim_finished)
+        self._fading_out = False
 
-        # Timer rotation
-        self._rotate_timer = QTimer(self)
-        self._rotate_timer.setInterval(self._ROTATE_MS)
-        self._rotate_timer.timeout.connect(self._start_fade_out)
-        self._rotate_timer.start()
+        # (nature, texte) — la première est celle qui s'affiche.
+        self._items: list[tuple[str, str]] = []
+        # Messages de fond, un par sujet. Une clé remplace le message précédent
+        # du même sujet : sans cela le bandeau accumulerait dix versions du
+        # même « à suivre » au fil des rafraîchissements.
+        self._ambient: dict[str, tuple[str, str]] = {}
+        self._index = 0
+        self._apply(("idle", "ZEvent 2026 — en attente des premières données"))
 
-        # Gemini refresh toutes les 5 min
-        self._last_ai_call: float = 0.0
-        self._gemini_timer = QTimer(self)
-        self._gemini_timer.setInterval(5 * 60 * 1000)
-        self._gemini_timer.timeout.connect(self._refresh_gemini)
-        self._gemini_timer.start()
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._ROTATE_MS)
+        self._timer.timeout.connect(self._rotate)
 
-        self._refresh_gemini()
+    # -- cycle de vie ----------------------------------------------------
 
-    # -- animation -----------------------------------------------------------
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # Ne pas animer une bande invisible : l'onglet peut être en arrière-plan.
+        if len(self._items) > 1:
+            self._timer.start()
 
-    def _start_fade_out(self) -> None:
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        self._timer.stop()
+        super().hideEvent(event)
+
+    # -- API -------------------------------------------------------------
+
+    def push(self, kind: str, text: str) -> None:
+        """Annonce un événement : affiché immédiatement, puis mis en rotation."""
+        text = (text or "").strip()
+        if not text:
+            return
+        entry = (kind if kind in self._COLORS else "event", text)
+        if entry in self._items:
+            self._items.remove(entry)
+        self._items.insert(0, entry)
+        del self._items[self._MAX_KEPT:]
+        self._index = 0
+        self._apply(entry)
+        self._restart_timer()
+
+    #: Ordre d'apparition des messages de fond dans la rotation.
+    _AMBIENT_ORDER = ("now", "next", "goal", "favs", "count", "info")
+
+    def set_ambient(self, key: str, kind: str, text: str) -> None:
+        """Pose ou retire un message de fond. Texte vide = retrait."""
+        text = (text or "").strip()
+        current = self._ambient.get(key)
+        if not text:
+            if current is None:
+                return
+            self._ambient.pop(key, None)
+        else:
+            entry = (kind if kind in self._COLORS else "next", text)
+            if entry == current:
+                return
+            self._ambient[key] = entry
+        if not self._items:
+            pool = self._pool()
+            self._apply(pool[min(self._index, len(pool) - 1)])
+        self._restart_timer()
+
+    def set_next_show(self, name: str, when: str) -> None:
+        """Prochain show au programme."""
+        self.set_ambient("next", "next",
+                         f"À suivre : {name} à {when}" if name and when else "")
+
+    def set_context(self, context: dict) -> None:
+        """Conservé pour l'appelant : cette bande n'affiche pas de chiffres."""
+        return
+
+    def trigger_refresh(self) -> None:
+        return
+
+    # -- interne ---------------------------------------------------------
+
+    def _pool(self) -> list[tuple[str, str]]:
+        pool = list(self._items)
+        for key in self._AMBIENT_ORDER:
+            entry = self._ambient.get(key)
+            if entry is not None:
+                pool.append(entry)
+        return pool or [("idle", "ZEvent 2026 — du 3 au 7 septembre")]
+
+    def _restart_timer(self) -> None:
+        if len(self._pool()) > 1 and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+
+    def _apply(self, entry: tuple[str, str]) -> None:
+        kind, text = entry
+        self._label.setStyleSheet(
+            f"color: {self._COLORS.get(kind, '#cccccc')}; background: transparent;"
+            " border: none;"
+        )
+        fm = QFontMetrics(self._label.font())
+        self._label.setText(
+            fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                          max(120, self.width() - 32)))
+        self._label.setToolTip(_infobulle(text))
+
+    def _rotate(self) -> None:
         if self._anim.state() == QPropertyAnimation.State.Running:
             return
         self._fading_out = True
@@ -492,97 +708,22 @@ class _AccueilGeminiBanner(QWidget):
         self._anim.start()
 
     def _on_anim_finished(self) -> None:
-        if self._fading_out:
-            # Swap message
-            self._msg_index = (self._msg_index + 1) % len(self._messages)
-            self._label.setText(self._messages[self._msg_index])
-            self._fading_out = False
-            self._anim.setDuration(self._FADE_MS)
-            self._anim.setStartValue(0.0)
-            self._anim.setEndValue(1.0)
-            self._anim.start()
-
-    def _show_text_now(self, text: str) -> None:
-        """Injecte un message urgent : fade out immédiat, puis affiche le texte."""
-        if text not in self._messages:
-            self._messages.insert(self._msg_index + 1, text)
-        self._start_fade_out()
-        self._rotate_timer.start()   # reset le timer de rotation
-
-    # -- fallback ------------------------------------------------------------
-
-    def _build_fallback_messages(self) -> list[str]:
-        ctx = self._context
-        msgs: list[str] = []
-        for tpl in self._TEMPLATES:
-            try:
-                msgs.append(tpl.format(**ctx))
-            except KeyError:
-                pass
-        return msgs or [_WAIT_MSG]
-
-    # -- public API ----------------------------------------------------------
-
-    def set_context(self, context: dict) -> None:
-        old_donation = float(self._context.get("_raw_donation", 0))
-        new_donation = float(context.get("_raw_donation", 0))
-        old_live = self._context.get("live_count", 0)
-        new_live = context.get("live_count", 0)
-        self._context = context
-
-        milestone_hit = int(new_donation) // 500_000 > int(old_donation) // 500_000
-        live_changed = new_live != old_live
-
-        # Mettre à jour les messages fallback avec les nouvelles données
-        self._messages = self._build_fallback_messages()
-        if self._msg_index >= len(self._messages):
-            self._msg_index = 0
-
-        if milestone_hit or live_changed:
-            self._refresh_gemini(urgent=True)
-
-    def trigger_refresh(self) -> None:
-        self._refresh_gemini(urgent=True)
-
-    # -- Gemini --------------------------------------------------------------
-
-    _AI_COOLDOWN_S: float = 600.0        # 10 min entre deux appels programmés
-    _AI_URGENT_COOLDOWN_S: float = 300.0   # 5 min entre deux appels urgents
-
-    def _refresh_gemini(self, urgent: bool = False) -> None:
-        import threading, time as _t
-        now = _t.time()
-        cooldown = self._AI_URGENT_COOLDOWN_S if urgent else self._AI_COOLDOWN_S
-        if now - self._last_ai_call < cooldown:
-            logger.debug("GeminiBanner: skip AI call (cooldown %.0fs)", cooldown - (now - self._last_ai_call))
+        if not self._fading_out:
             return
-        self._last_ai_call = now
-        ctx = dict(self._context)
+        self._fading_out = False
+        pool = self._pool()
+        self._index = (self._index + 1) % len(pool)
+        self._apply(pool[self._index])
+        self._anim.setDuration(self._FADE_MS)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
 
-        def _worker() -> None:
-            loop = asyncio.new_event_loop()
-            try:
-                text = loop.run_until_complete(
-                    self._gemini.generate_announcement(ctx)
-                )
-            except Exception as exc:
-                logger.debug("GeminiBanner Gemini: %s", exc)
-                text = None
-            finally:
-                loop.close()
-            if text:
-                if urgent:
-                    QTimer.singleShot(0, lambda t=text: self._show_text_now(t))
-                else:
-                    QTimer.singleShot(0, lambda t=text: self._messages.__setitem__(
-                        slice(None), self._build_fallback_messages() + [t]
-                    ))
-            else:
-                QTimer.singleShot(0, lambda: setattr(
-                    self, "_messages", self._build_fallback_messages()
-                ))
-
-        threading.Thread(target=_worker, daemon=True).start()
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        pool = self._pool()
+        if pool:
+            self._apply(pool[min(self._index, len(pool) - 1)])
 
 
 # ── Player card top 3 ──────────────────────────────────────────────────────
@@ -617,10 +758,12 @@ class _AccueilPlayerCard(QFrame):
         name_col = QVBoxLayout()
         name_col.setSpacing(2)
         self._name_lbl = QLabel("—")
+        self._name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._name_lbl.setFont(_bold_font(_FONT_SEGOE, 13))
         self._name_lbl.setStyleSheet(_SS_WHITE_CLEAR)
         name_col.addWidget(self._name_lbl)
         self._game_lbl = QLabel("")
+        self._game_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._game_lbl.setFont(QFont(_FONT_SEGOE, 11))
         self._game_lbl.setStyleSheet("color: #666666; border: none; background: transparent;")
         name_col.addWidget(self._game_lbl)
@@ -698,11 +841,64 @@ class _AccueilTimeline(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self.update)
+        # Démarré par showEvent : inutile de tourner tant que le
+        # widget n'est pas affiché.
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
         self._timer.start()
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._timer.stop()
 
     def set_events(self, events: list[EventItem]) -> None:
         self._events = events
         self.update()
+
+    def _layout_events(self, now: float, cx: int, w: int, px_per_sec: float):
+        """Place les événements en couloirs et renvoie [(ev, x, largeur, y, hauteur)].
+
+        Tous les événements étaient dessinés dans la MÊME bande verticale :
+        deux qui se chevauchent se recouvraient, et le clic renvoyait le
+        premier de la liste alors que le dernier dessiné était celui qu'on
+        voyait. On les répartit donc en couloirs, et le clic teste aussi la
+        hauteur — ce qu'on voit est ce qu'on ouvre.
+        """
+        items = []
+        for ev in self._events:
+            s_ts = ev.start_ts if ev.start_ts else self._parse_ts(ev.day, ev.start_local)
+            e_ts = ev.end_ts   if ev.end_ts   else self._parse_ts(ev.day, ev.end_local)
+            if s_ts is None or e_ts is None:
+                continue
+            x = cx + int((s_ts - now) * px_per_sec)
+            ew = max(int((e_ts - s_ts) * px_per_sec), 60)
+            if x > w or x + ew < 0:
+                continue
+            items.append([ev, s_ts, e_ts, x, ew, 0])
+
+        # Premier couloir libre, en balayant par date de début.
+        items.sort(key=lambda it: it[1])
+        lane_ends: list[int] = []
+        for it in items:
+            for i, end_x in enumerate(lane_ends):
+                if it[3] >= end_x:
+                    lane_ends[i] = it[3] + it[4]
+                    it[5] = i
+                    break
+            else:
+                lane_ends.append(it[3] + it[4])
+                it[5] = len(lane_ends) - 1
+
+        n_lanes = max(1, len(lane_ends))
+        band = self._BASELINE_Y - self._CARD_TOP - 4
+        gap = 2 if n_lanes > 1 else 0
+        lane_h = max(12, (band - gap * (n_lanes - 1)) // n_lanes)
+        out = []
+        for ev, _s, _e, x, ew, lane in items:
+            y = self._CARD_TOP + lane * (lane_h + gap)
+            out.append((ev, x, ew, y, lane_h))
+        return out
 
     def _hit_event(self, mouse_x: int) -> "EventItem | None":
         import time as _t
@@ -710,19 +906,25 @@ class _AccueilTimeline(QWidget):
         w = self.width()
         px_per_sec = w / (8 * 3600)
         cx = w // 2
-        for ev in self._events:
-            s_ts = ev.start_ts if ev.start_ts else self._parse_ts(ev.day, ev.start_local)
-            e_ts = ev.end_ts   if ev.end_ts   else self._parse_ts(ev.day, ev.end_local)
-            if s_ts is None or e_ts is None:
-                continue
-            start_x = cx + int((s_ts - now) * px_per_sec)
-            ev_w    = max(int((e_ts - s_ts) * px_per_sec), 60)
-            if start_x <= mouse_x <= start_x + ev_w:
+        for ev, x, ew, _y, _h in self._layout_events(now, cx, w, px_per_sec):
+            if x <= mouse_x <= x + ew:
+                return ev
+        return None
+
+    def _hit_event_at(self, mouse_x: int, mouse_y: int) -> "EventItem | None":
+        """Comme _hit_event mais en tenant compte du couloir."""
+        import time as _t
+        now = _t.time()
+        w = self.width()
+        px_per_sec = w / (8 * 3600)
+        cx = w // 2
+        for ev, x, ew, y, h in self._layout_events(now, cx, w, px_per_sec):
+            if x <= mouse_x <= x + ew and y <= mouse_y <= y + h:
                 return ev
         return None
 
     def mouseMoveEvent(self, _event: QMouseEvent) -> None:  # type: ignore[override]
-        ev = self._hit_event(_event.pos().x())
+        ev = self._hit_event_at(_event.pos().x(), _event.pos().y())
         self.setCursor(
             QCursor(Qt.CursorShape.PointingHandCursor) if ev
             else QCursor(Qt.CursorShape.ArrowCursor)
@@ -731,7 +933,7 @@ class _AccueilTimeline(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        ev = self._hit_event(event.pos().x())
+        ev = self._hit_event_at(event.pos().x(), event.pos().y())
         if ev is not None:
             self.event_clicked.emit(ev)
 
@@ -775,20 +977,12 @@ class _AccueilTimeline(QWidget):
     def _draw_event_cards(
         self, p: QPainter, cx: int, w: int, now: float, px_per_sec: float
     ) -> None:
-        T = self._CARD_TOP
-        H = self._CARD_H
         R = 4  # border-radius
 
-        for ev in self._events:
-            # Prefer pre-computed timestamps (set by mock + real API); fall back to parsing
-            start_ts: float | None = ev.start_ts if ev.start_ts else self._parse_ts(ev.day, ev.start_local)
-            end_ts:   float | None = ev.end_ts   if ev.end_ts   else self._parse_ts(ev.day, ev.end_local)
+        for ev, start_x, ev_w, T, H in self._layout_events(now, cx, w, px_per_sec):
+            start_ts = ev.start_ts if ev.start_ts else self._parse_ts(ev.day, ev.start_local)
+            end_ts   = ev.end_ts   if ev.end_ts   else self._parse_ts(ev.day, ev.end_local)
             if start_ts is None or end_ts is None:
-                continue
-
-            start_x = cx + int((start_ts - now) * px_per_sec)
-            ev_w    = max(int((end_ts - start_ts) * px_per_sec), 60)
-            if start_x > w or start_x + ev_w < 0:
                 continue
 
             is_past    = end_ts < now
@@ -836,7 +1030,7 @@ class _AccueilTimeline(QWidget):
                 accent_color.setAlpha(accent_opacity)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QBrush(accent_color))
-                p.drawRoundedRect(QRectF(start_x + 1, T, 3, H), 2, 2)
+                p.drawRoundedRect(QRectF(start_x + 1, T, 3, float(H)), 2, 2)
 
             # ── Texte : heure de début (petite) + nom ────────────────
             # Clip text origin so it never drifts left of the widget when
@@ -845,7 +1039,7 @@ class _AccueilTimeline(QWidget):
             visible_w = start_x + ev_w - text_x - 6  # remaining width inside card
             inner = QRectF(text_x, T, max(visible_w, 0), H)
 
-            if not is_past and visible_w > 50:
+            if not is_past and visible_w > 50 and H >= 28:
                 # Heure en haut
                 p.setFont(QFont(_FONT_SEGOE, 8))
                 p.setPen(QPen(time_col))
@@ -943,78 +1137,171 @@ class _AccueilTimeline(QWidget):
 # ── Ticker ────────────────────────────────────────────────────────────────
 
 class _AccueilTicker(QWidget):
-    """Bande 36px fond #0d0d0d — défilement seamless via QScrollArea + QLabel doublé."""
+    """Bande 36 px défilante — peinture directe des seuls éléments visibles.
 
-    _SEP = "     ·     "
+    L'implémentation précédente était un QLabel en texte riche de 90 000 px de
+    large contenant une balise <img> par streamer, défilé par une QScrollArea.
+    Chaque tick repassait par le QTextDocument (13,9 ms par image, ~46 % d'un
+    cœur en continu), et reconstruire le HTML rechargeait les images depuis le
+    disque — 539 ms de gel au premier rafraîchissement.
+
+    Ici on ne dessine que ce qui tient à l'écran, avec des pixmaps déjà en
+    mémoire : une poignée d'éléments au lieu de trois cents.
+    """
+
+    _H = 36
+    _AV = 22          # diamètre des avatars
+    _GAP = 10         # espace avatar ↔ texte
+    _SEP_W = 34       # largeur du séparateur entre deux entrées
+    _SPEED = 60.0     # pixels par seconde
+    _TICK_MS = 33     # ~30 fps
+
+    _C_LAN = QColor("#00ff87")
+    _C_REMOTE = QColor("#38bdf8")
+    _C_GAME = QColor("#888888")
+    _C_SEP = QColor("#444444")
+    _BG = QColor("#0d0d0d")
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(36)
-        self._FONT = QFont(_FONT_MONO, 11)
-        self._content: str = _WAIT_MSG
-        self._text_width: int = 0
-        self._scroll_pos: int = 0
+        self.setFixedHeight(self._H)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
-        self._label = QLabel()
-        self._label.setFont(self._FONT)
-        self._label.setStyleSheet("color: #cccccc; background: transparent; border: none; padding: 0px;")
-        self._label.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        # Polices et métriques construites UNE fois : les recréer par image
+        # coûtait plus cher que le dessin lui-même.
+        self._f_name = _bold_font(_FONT_MONO, 11)
+        self._f_game = QFont(_FONT_MONO, 11)
+        self._fm_name = QFontMetrics(self._f_name)
+        self._fm_game = QFontMetrics(self._f_game)
 
-        self._scroll = QScrollArea(self)
-        self._scroll.setWidget(self._label)
-        self._scroll.setWidgetResizable(False)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setFixedHeight(36)
-        self._scroll.setStyleSheet(
-            "QScrollArea { background: #0d0d0d; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: #0d0d0d; }"
-        )
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._scroll)
+        # [(login, nom, couleur_nom, jeu, largeur_totale, url_photo)]
+        self._items: list[tuple[str, str, QColor, str, int, str]] = []
+        self._total_w: int = 0
+        self._offset: float = 0.0
+        self._idle_text: str = _WAIT_MSG
 
         self._timer = QTimer(self)
-        self._timer.setInterval(30)
+        self._timer.setInterval(self._TICK_MS)
         self._timer.timeout.connect(self._tick)
+        # Démarré par showEvent.
+
+    # -- cycle de vie ---------------------------------------------------------
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
         self._timer.start()
 
-        self._set_content(self._content)
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        super().hideEvent(event)
+        self._timer.stop()
 
-    def _set_content(self, text: str) -> None:
-        self._content = text
-        doubled = text + self._SEP + text
-        self._label.setText(doubled)
-        fm = QFontMetrics(self._FONT)
-        self._text_width = fm.horizontalAdvance(text + self._SEP)
-        self._label.setFixedWidth(self._text_width * 2)
-        self._label.setFixedHeight(36)
-        self._scroll_pos = 0
-        self._scroll.horizontalScrollBar().setValue(0)
+    # -- données --------------------------------------------------------------
 
     def set_streamers(self, streamers: list[StreamerInfo]) -> None:
-        parts: list[str] = []
-        for s in streamers:
-            dot = "🟢" if (s.location or "").upper() == "LAN" else "🔵"
-            game = f"  {s.game}" if s.game else ""
-            parts.append(f"{dot} {s.display}{game}")
-        text = (
-            "   ·   ".join(parts)
-            if parts
-            else _WAIT_MSG
-        )
-        if text != self._content:
-            self._set_content(text)
+        live = [s for s in streamers if s.online]
+        # Rien de visible ne change tant que ce quadruplet est identique :
+        # recomposer la liste coûtait ~100 ms sur le thread GUI à chaque poll.
+        sig = tuple((s.twitch_login, s.display, s.game, s.location) for s in live)
+        if sig == getattr(self, "_sig", None):
+            return
+        self._sig = sig
+        items: list[tuple[str, str, QColor, str, int, str]] = []
+        total = 0
+        for s in live:
+            lan = (s.location or "").upper() == "LAN"
+            colour = self._C_LAN if lan else self._C_REMOTE
+            # On garde l'IDENTITÉ du streamer, PAS son pixmap. Le capturer ici
+            # figeait ce que le cache avait à cet instant — les initiales, tant
+            # que la photo n'était pas téléchargée — et le garde `sig` ci-dessus
+            # empêchait ensuite toute reconstruction : les initiales restaient
+            # affichées indéfiniment. La photo est donc relue à la peinture.
+            game = s.game or ""
+            w = (self._AV + self._GAP
+                 + self._fm_name.horizontalAdvance(s.display))
+            if game:
+                w += self._GAP + self._fm_game.horizontalAdvance(game)
+            w += self._SEP_W
+            items.append((s.twitch_login, s.display, colour, game, w,
+                          getattr(s, "profile_url", "")))
+            total += w
+        self._items = items
+        self._total_w = total
+        if total and self._offset >= total:
+            self._offset = 0.0
+        self.update()
+
+    # -- animation ------------------------------------------------------------
 
     def _tick(self) -> None:
-        self._scroll_pos += 2
-        if self._scroll_pos >= self._text_width:
-            self._scroll_pos = 0
-        self._scroll.horizontalScrollBar().setValue(self._scroll_pos)
+        if not self._total_w:
+            return
+        prev = int(self._offset)
+        self._offset = (self._offset
+                        + self._SPEED * self._TICK_MS / 1000.0) % self._total_w
+        # Inutile de repeindre si le décalage entier n'a pas bougé.
+        if int(self._offset) != prev:
+            self.update()
 
+    # -- peinture -------------------------------------------------------------
 
-# ── Accueil — liste streamers live ───────────────────────────────────────────────────────
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        p.fillRect(self.rect(), self._BG)
+        w = self.width()
+
+        if not self._items:
+            p.setFont(self._f_game)
+            p.setPen(QPen(self._C_GAME))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._idle_text)
+            p.end()
+            return
+
+        # On part de l'élément qui couvre le bord gauche, et on ne dessine que
+        # jusqu'au bord droit : une poignée d'entrées, pas les trois cents.
+        start = -int(self._offset) % self._total_w - self._total_w
+        x = start
+        n = len(self._items)
+        i = 0
+        guard = 0
+        while x < w and guard < n * 2 + 4:
+            login, name, colour, game, item_w, purl = self._items[i % n]
+            if x + item_w > 0:
+                self._draw_item(p, x, login, name, colour, game, purl)
+            x += item_w
+            i += 1
+            guard += 1
+        p.end()
+
+    def _draw_item(self, p: QPainter, x: int, login: str,
+                   name: str, colour: QColor, game: str,
+                   profile_url: str = "") -> None:
+        y = (self._H - self._AV) // 2
+        # Lecture au moment de peindre : simple accès au dictionnaire du cache
+        # mémoire quand la photo est là, et l'affichage se corrige tout seul dès
+        # qu'elle arrive — le bandeau défile, donc il repeint de toute façon.
+        from widgets.bigscreen_widget import _avatar_cache
+        av = _avatar_cache.get(login, name, self._AV, None, profile_url)
+        if av is not None:
+            p.drawPixmap(x, y, av)  # type: ignore[arg-type]
+        tx = x + self._AV + self._GAP
+        p.setFont(self._f_name)
+        p.setPen(QPen(colour))
+        p.drawText(tx, 0, self._fm_name.horizontalAdvance(name), self._H,
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                   name)
+        if game:
+            tx += self._fm_name.horizontalAdvance(name) + self._GAP
+            p.setFont(self._f_game)
+            p.setPen(QPen(self._C_GAME))
+            p.drawText(tx, 0, self._fm_game.horizontalAdvance(game), self._H,
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                       game)
+            tx += self._fm_game.horizontalAdvance(game)
+        p.setPen(QPen(self._C_SEP))
+        p.drawText(tx, 0, self._SEP_W, self._H,
+                   int(Qt.AlignmentFlag.AlignCenter), "·")
+
 
 class _AccueilStreamerItem(QWidget):
     """Ligne 36px — un streamer live dans la liste centrale."""
@@ -1149,13 +1436,34 @@ class _AccueilStreamersList(QWidget):
             return
 
         # Structure changée (arrivée/depart streamer) — rebuild complet
+        # Arrivee ou depart : on ne touche qu'aux items concernes. Reconstruire
+        # les 220 items (environ 1100 widgets, ~245 ms mesurees) parce qu'un
+        # seul streamer arrive etait le meme travers que dans l'onglet
+        # Streamers.
         self._prev_live = live_logins
-        _clear_layout(self._list_layout)
-        self._item_map.clear()
-        for s in live:
-            item = _AccueilStreamerItem(s)
-            self._item_map[s.twitch_login] = item
-            self._list_layout.addWidget(item)
+        for lg in [lg for lg in self._item_map if lg not in live_logins]:
+            item = self._item_map.pop(lg)
+            self._list_layout.removeWidget(item)
+            item.setParent(None)
+            item.deleteLater()
+
+        # Le stretch final est retire : il doit rester en queue apres insertion.
+        while self._list_layout.count():
+            it = self._list_layout.itemAt(self._list_layout.count() - 1)
+            if it is not None and it.widget() is None:
+                self._list_layout.takeAt(self._list_layout.count() - 1)
+            else:
+                break
+
+        for idx, s in enumerate(live):
+            item = self._item_map.get(s.twitch_login)
+            if item is None:
+                item = _AccueilStreamerItem(s)
+                self._item_map[s.twitch_login] = item
+            else:
+                item.patch(s)
+            # insertWidget replace sans detruire : l'ordre suit les viewers.
+            self._list_layout.insertWidget(idx, item)
         self._list_layout.addStretch()
 
 
@@ -1178,11 +1486,13 @@ class _AccueilGoalItem(QWidget):
         row1 = QHBoxLayout()
         row1.setSpacing(6)
         streamer_lbl = QLabel(g.streamer_display[:16])
+        streamer_lbl.setTextFormat(Qt.TextFormat.PlainText)
         streamer_lbl.setFont(_bold_font(_FONT_SEGOE, 11))
         streamer_lbl.setStyleSheet("color: #ffffff; background: transparent;")
         row1.addWidget(streamer_lbl)
         goal_name = g.goal_name[:30] + ("…" if len(g.goal_name) > 30 else "")
         goal_lbl = QLabel(goal_name)
+        goal_lbl.setTextFormat(Qt.TextFormat.PlainText)
         goal_lbl.setFont(QFont(_FONT_SEGOE, 11))
         goal_lbl.setStyleSheet("color: #888888; background: transparent;")
         row1.addWidget(goal_lbl, stretch=1)
@@ -1208,7 +1518,9 @@ class _AccueilGoalItem(QWidget):
 
 
 class _AccueilGoalsWidget(QWidget):
-    """Colonne droite 40% — goals proches d'atteinte (pct \u2265 90%)."""
+    """Colonne droite — les objectifs les plus proches d'être atteints."""
+
+    _MAX_SHOWN = 12
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1224,7 +1536,7 @@ class _AccueilGoalsWidget(QWidget):
         hdr = QHBoxLayout()
         hdr.setContentsMargins(0, 4, 0, 4)
         hdr.setSpacing(0)
-        title = QLabel("OBJECTIFS PROCHES")
+        title = QLabel("PROCHAINS OBJECTIFS")
         title.setFont(_bold_font(_FONT_SEGOE, 10))
         title.setStyleSheet("color: #00ff87; letter-spacing: 2px; background: transparent;")
         hdr.addWidget(title)
@@ -1249,7 +1561,7 @@ class _AccueilGoalsWidget(QWidget):
         self._goals_layout.setContentsMargins(0, 0, 0, 0)
         self._goals_layout.setSpacing(0)
         self._goals_layout.addStretch()
-        emp = QLabel("Aucun objectif proche\npour l'instant")
+        emp = QLabel("Aucun objectif publié\npour l'instant")
         emp.setAlignment(Qt.AlignmentFlag.AlignCenter)
         emp.setFont(QFont(_FONT_SEGOE, 12))
         emp.setStyleSheet("color: #444444; background: transparent;")
@@ -1259,15 +1571,22 @@ class _AccueilGoalsWidget(QWidget):
         root.addWidget(scroll, stretch=1)
 
     def update_goals(self, goals: list[GoalWithStreamer]) -> None:
-        to_show = sorted(
-            [g for g in goals if g.pct >= 90.0 and not g.accomplished],
+        # Le seuil à 90 % laissait la colonne vide l'essentiel du temps, sur
+        # 40 % de la largeur. On montre les plus proches quel que soit leur
+        # avancement : c'est ce qu'on veut voir en direct.
+        pending = sorted(
+            [g for g in goals if not g.accomplished],
             key=lambda g: -g.pct,
         )
-        self._count_lbl.setText(f"{len(to_show)} goals \xe0 90%+" if to_show else "")
+        to_show = pending[:self._MAX_SHOWN]
+        self.setVisible(bool(to_show))
+        self._count_lbl.setText(
+            f"{len(to_show)} sur {len(pending)}" if pending else ""
+        )
         _clear_layout(self._goals_layout)
         if not to_show:
             self._goals_layout.addStretch()
-            emp = QLabel("Aucun objectif proche\npour l'instant")
+            emp = QLabel("Aucun objectif publié\npour l'instant")
             emp.setAlignment(Qt.AlignmentFlag.AlignCenter)
             emp.setFont(QFont(_FONT_SEGOE, 12))
             emp.setStyleSheet("color: #444444; background: transparent;")
@@ -1284,15 +1603,107 @@ class _AccueilGoalsWidget(QWidget):
         self._goals_layout.addStretch()
 
 
+class _EventFeed(QWidget):
+    """Fil chronologique des événements marquants.
+
+    Les alertes HypeWatcher, les objectifs atteints et les rappels de programme
+    n'existaient que sous forme de toasts : dix minutes d'absence et tout était
+    perdu. Ici ils s'accumulent, horodatés et consultables.
+    """
+
+    stream_requested = pyqtSignal(str)
+
+    _MAX_ITEMS = 60
+
+    _KIND_COLORS = {
+        "hype":  "#ff6b00",
+        "goal":  "#00ff87",
+        "live":  "#38bdf8",
+        "off":   "#666666",
+        "event": "#a855f7",
+        "money": "#f5c518",   # or — palier de cagnotte
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setStyleSheet("background-color: #0a0a0a; border-left: 1px solid #1a1a1a;")
+        self._build()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 4, 12, 4)
+        root.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(0)
+        title = QLabel("FIL D'ÉVÉNEMENTS")
+        title.setFont(_bold_font(_FONT_SEGOE, 10))
+        title.setStyleSheet("color: #00ff87; letter-spacing: 2px; background: transparent;")
+        hdr.addWidget(title)
+        self._count_lbl = QLabel("")
+        self._count_lbl.setFont(QFont(_FONT_SEGOE, 10))
+        self._count_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._count_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        hdr.addWidget(self._count_lbl, stretch=1)
+        root.addLayout(hdr)
+
+        self._list = QListWidget()
+        self._list.setFont(QFont(_FONT_SEGOE, 11))
+        # Retour à la ligne plutôt qu'un défilement horizontal : la colonne est
+        # étroite et l'extrait du chat, qui porte le contexte, se retrouvait
+        # tronqué en plein milieu.
+        self._list.setWordWrap(True)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self._list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; color: #cccccc; }"
+            "QListWidget::item { padding: 4px 2px; }"
+            "QListWidget::item:hover { background: #14251c; }"
+        )
+        self._list.itemActivated.connect(self._on_activate)
+        self._list.itemClicked.connect(self._on_activate)
+        root.addWidget(self._list, stretch=1)
+
+        self._empty = QLabel("Rien à signaler\npour l'instant")
+        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty.setFont(QFont(_FONT_SEGOE, 11))
+        self._empty.setStyleSheet("color: #444444; background: transparent;")
+        root.addWidget(self._empty, stretch=1)
+
+    def add_event(self, kind: str, login: str, text: str) -> None:
+        """Ajoute une entrée en tête de fil."""
+        stamp = datetime.now().strftime("%H:%M")
+        item = QListWidgetItem(f"{stamp}  {text}")
+        item.setForeground(QBrush(QColor(self._KIND_COLORS.get(kind, "#cccccc"))))
+        # Le login voyage avec l'item : un clic ramène au stream concerné.
+        item.setData(Qt.ItemDataRole.UserRole, login)
+        self._list.insertItem(0, item)
+        while self._list.count() > self._MAX_ITEMS:
+            self._list.takeItem(self._list.count() - 1)
+        self._count_lbl.setText(str(self._list.count()))
+        self._empty.setVisible(False)
+        self._list.setVisible(True)
+
+    def _on_activate(self, item: QListWidgetItem) -> None:
+        login = item.data(Qt.ItemDataRole.UserRole)
+        if login:
+            self.stream_requested.emit(str(login))
+
+
 # ── Accueil Tab ───────────────────────────────────────────────────────────
 
 class _AccueilTab(QWidget):
     stream_selected = pyqtSignal(str)
     add_to_grid     = pyqtSignal(str)  # twitch_login
+    #: (login du présentateur, nom du show) — un show vient de commencer.
+    show_started    = pyqtSignal(str, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._prev_viewers: int = 0
+        self._started_shows: set[str] = set()
+        self._shows_init_done = False
         self._prev_live: set[str] = set()
         self._prev_donation: float = 0.0
         self._initialized: bool = False
@@ -1306,20 +1717,29 @@ class _AccueilTab(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # 1. Bandeau Gemini — 36px fixe, pleine largeur
-        self._banner = _AccueilGeminiBanner()
+        # 1. Bandeau d'annonces — 36px fixe, pleine largeur
+        self._banner = _AccueilBanner()
+        # « dans 25 min » doit devenir « dans 24 min » : les messages de fond
+        # sont recomposés régulièrement, indépendamment des sondages réseau.
+        self._ambient_timer = QTimer(self)
+        self._ambient_timer.setInterval(45_000)
+        self._ambient_timer.timeout.connect(self._refresh_ambient)
+        self._ambient_timer.timeout.connect(self._check_started_shows)
+        self._ambient_timer.start()
         root.addWidget(self._banner)
 
         # 2. Cards stats — 90px fixe
         cards_row = QHBoxLayout()
         cards_row.setContentsMargins(12, 8, 12, 0)
         cards_row.setSpacing(8)
-        self._card_donation, self._amt_lbl = self._make_card_donation()
+        self._card_donation, self._amt_lbl, self._rate_lbl = self._make_card_donation()
         self._card_viewers, self._viewers_lbl, self._trend_lbl = self._make_card_viewers()
         self._card_live, self._live_count_lbl = self._make_card_live()
+        self._card_proj, self._proj_lbl, self._proj_sub = self._make_card_projection()
         cards_row.addWidget(self._card_donation)
         cards_row.addWidget(self._card_viewers)
         cards_row.addWidget(self._card_live)
+        cards_row.addWidget(self._card_proj)
         cards_wrap = QWidget()
         cards_wrap.setFixedHeight(90)
         cards_wrap.setLayout(cards_row)
@@ -1347,8 +1767,22 @@ class _AccueilTab(QWidget):
         self._streamers_list = _AccueilStreamersList()
         self._streamers_list.stream_selected.connect(self.stream_selected)
         self._goals_widget = _AccueilGoalsWidget()
-        central_layout.addWidget(self._streamers_list, stretch=6)
-        central_layout.addWidget(self._goals_widget, stretch=4)
+        central_layout.addWidget(self._streamers_list, stretch=7)
+
+        # Colonne droite : objectifs au-dessus, fil d'événements en dessous.
+        # Le fil occupe ainsi l'espace laissé vide par les objectifs hors event.
+        right = QWidget()
+        right_l = QVBoxLayout(right)
+        right_l.setContentsMargins(0, 0, 0, 0)
+        right_l.setSpacing(0)
+        right_l.addWidget(self._goals_widget, stretch=1)
+        self._feed = _EventFeed()
+        self._feed.stream_requested.connect(self.stream_selected.emit)
+        right_l.addWidget(self._feed, stretch=1)
+        central_layout.addWidget(right, stretch=3)
+        # Hors event, aucun objectif n'existe : la colonne se masque d'elle-même
+        # et le fil récupère toute la hauteur.
+        self._goals_widget.setVisible(False)
         root.addWidget(central_widget, stretch=1)
 
         # 5. Timeline — 110px fixe
@@ -1379,7 +1813,7 @@ class _AccueilTab(QWidget):
         card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         return card
 
-    def _make_card_donation(self) -> tuple[QFrame, QLabel]:
+    def _make_card_donation(self) -> tuple[QFrame, QLabel, QLabel]:
         card = self._base_card()
         vl = QVBoxLayout(card)
         vl.setContentsMargins(14, 0, 14, 0)
@@ -1389,11 +1823,40 @@ class _AccueilTab(QWidget):
         amt.setFont(_bold_font(_FONT_MONO, 22))
         amt.setStyleSheet(_SS_WHITE_CLEAR)
         vl.addWidget(amt)
+        row = QHBoxLayout()
+        row.setSpacing(6)
         sub = QLabel("cagnotte totale")
+        self._don_sub = sub
+        sub.setFont(QFont(_FONT_SEGOE, 10))
+        sub.setStyleSheet(_SS_GREY_CLEAR)
+        row.addWidget(sub)
+        # Vitesse de collecte : la question qu'on se pose en boucle pendant
+        # l'event, et la série temporelle est déjà en mémoire.
+        rate = QLabel("")
+        rate.setFont(_bold_font(_FONT_MONO, 10))
+        rate.setStyleSheet(_SS_GREEN_CLEAR)
+        row.addWidget(rate)
+        row.addStretch()
+        vl.addLayout(row)
+        return card, amt, rate
+
+    def _make_card_projection(self) -> tuple[QFrame, QLabel, QLabel]:
+        card = self._base_card()
+        vl = QVBoxLayout(card)
+        vl.setContentsMargins(14, 0, 14, 0)
+        vl.setSpacing(2)
+        vl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        proj = QLabel("—")
+        proj.setFont(_bold_font(_FONT_MONO, 22))
+        proj.setStyleSheet("color: #38bdf8; border: none; background: transparent;")
+        vl.addWidget(proj)
+        # Libellé initial neutre : tant qu'aucun historique n'est arrivé,
+        # annoncer « au rythme actuel » sous un tiret serait mensonger.
+        sub = QLabel("en attente de données")
         sub.setFont(QFont(_FONT_SEGOE, 10))
         sub.setStyleSheet(_SS_GREY_CLEAR)
         vl.addWidget(sub)
-        return card, amt
+        return card, proj, sub
 
     def _make_card_viewers(self) -> tuple[QFrame, QLabel, QLabel]:
         card = self._base_card()
@@ -1413,7 +1876,9 @@ class _AccueilTab(QWidget):
         row.addWidget(trend)
         row.addStretch()
         vl.addLayout(row)
-        sub = QLabel("viewers")
+        # « viewers » seul laissait croire à l'audience d'une seule chaîne : ce
+        # compteur est la somme de TOUS les participants en direct.
+        sub = QLabel("viewers au total")
         sub.setFont(QFont(_FONT_SEGOE, 10))
         sub.setStyleSheet(_SS_GREY_CLEAR)
         vl.addWidget(sub)
@@ -1478,7 +1943,7 @@ class _AccueilTab(QWidget):
         # Liste streamers live (section centrale)
         self._streamers_list.update_streamers(streamers)
 
-        # Contexte Gemini
+        # Contexte du bandeau
         self._banner.set_context({
             "year": 2025,
             "donation": stats.donation_formatted,
@@ -1488,12 +1953,61 @@ class _AccueilTab(QWidget):
             "_raw_donation": stats.donation_total,
         })
 
+        favs = favorites.get()
+        live_favs = [s.display or s.twitch_login for s in streamers
+                     if s.online and s.twitch_login.lower() in favs]
+        if live_favs:
+            noms = ", ".join(live_favs[:3])
+            reste = len(live_favs) - 3
+            self._banner.set_ambient(
+                "favs", "live",
+                f"Vos favoris en direct : {noms}"
+                + (f" et {reste} autre" + ("s" if reste > 1 else "") if reste > 0 else ""))
+        else:
+            self._banner.set_ambient("favs", "live", "")
+
         self._prev_live = {s.twitch_login for s in streamers if s.online}
         self._prev_donation = stats.donation_total
         self._initialized = True
         # Rebuild UUID map for timeline click resolution
         self._uuid_to_login = {s.gdoc_id: s.twitch_login for s in streamers if s.gdoc_id}
         self._all_logins = {s.twitch_login for s in streamers}
+
+    def _host_login(self, ev: EventItem) -> str:
+        """Login du présentateur d'un show, vide si non résolvable."""
+        for uid in (ev.host_uuids or []):
+            if uid in self._uuid_to_login:
+                return self._uuid_to_login[uid]
+            if uid in self._all_logins:
+                return uid
+        return ""
+
+    def _check_started_shows(self) -> None:
+        """Signale les shows qui viennent de COMMENCER.
+
+        Les rappels du Programme préviennent AVANT ; ici il s'agit de proposer
+        la bascule au moment où ça démarre. Chaque show n'est proposé qu'une
+        fois, et seulement s'il a démarré dans les deux dernières minutes :
+        au lancement de l'application, un show en cours depuis une heure n'est
+        pas une nouvelle.
+        """
+        now = time.time()
+        for ev in self._events:
+            start, _end = self._ev_bounds(ev)
+            if start is None or not (0 <= now - start <= 120):
+                continue
+            cle = f"{ev.day}_{ev.start_local}_{ev.name}"
+            if cle in self._started_shows:
+                continue
+            self._started_shows.add(cle)
+            if not self._shows_init_done:
+                continue
+            login = self._host_login(ev)
+            if login:
+                from core import alerts
+                if alerts.enabled("show_started"):
+                    self.show_started.emit(login, ev.name or "Événement")
+        self._shows_init_done = True
 
     def _on_timeline_click(self, ev: EventItem) -> None:
         """Clic sur un event : popup pour ouvrir en fullscreen ou ajouter à la grille."""
@@ -1510,13 +2024,7 @@ class _AccueilTab(QWidget):
             return  # pas de présentateur résolvable
 
         menu = QMenu(self)
-        menu.setStyleSheet(
-            "QMenu { background: #111111; border: 1px solid #2a2a2a; color: #cccccc; "
-            "font-family: 'Segoe UI Variable'; font-size: 11px; padding: 4px 0; }"
-            "QMenu::item { padding: 6px 20px; }"
-            "QMenu::item:selected { background: #1e1e1e; color: #ffffff; }"
-            "QMenu::separator { height: 1px; background: #2a2a2a; margin: 2px 0; }"
-        )
+        menu.setStyleSheet(MENU_QSS)
         host_act = QAction(f"{ev.name or 'Événement'}  —  {login}", menu)
         host_act.setEnabled(False)
         menu.addAction(host_act)
@@ -1532,6 +2040,86 @@ class _AccueilTab(QWidget):
     def update_events(self, events: list[EventItem]) -> None:
         self._events = events
         self._timeline.set_events(events)
+        self._refresh_next_show()
+
+    @staticmethod
+    def _ev_bounds(ev: EventItem) -> tuple[float | None, float | None]:
+        start = ev.start_ts if ev.start_ts else _AccueilTimeline._parse_ts(
+            ev.day, ev.start_local)
+        end = ev.end_ts if getattr(ev, "end_ts", 0) else _AccueilTimeline._parse_ts(
+            ev.day, ev.end_local)
+        return start, end
+
+    @staticmethod
+    def _delai(seconds: float) -> str:
+        """« dans 25 min », « dans 3 h 10 », « dans 2 jours »."""
+        m = max(0, int(seconds // 60))
+        if m < 60:
+            return f"dans {m} min" if m else "dans un instant"
+        h, mm = divmod(m, 60)
+        if h < 24:
+            return f"dans {h} h {mm:02d}" if mm else f"dans {h} h"
+        j = h // 24
+        return f"dans {j} jour" + ("s" if j > 1 else "")
+
+    def _refresh_ambient(self) -> None:
+        """Recompose les messages de fond du bandeau.
+
+        Rappelée périodiquement, pas seulement à l'arrivée de données : les
+        formulations sont relatives à l'instant (« dans 25 min »), et un
+        bandeau qui répète la même phrase pendant une heure ne donne plus
+        l'impression de suivre quoi que ce soit.
+        """
+        now = time.time()
+
+        # En cours et à venir.
+        current: EventItem | None = None
+        nxt: EventItem | None = None
+        nxt_start = 0.0
+        for ev in self._events:
+            start, end = self._ev_bounds(ev)
+            if start is None:
+                continue
+            if end is not None and start <= now <= end:
+                current = current or ev
+            elif start > now and (nxt is None or start < nxt_start):
+                nxt, nxt_start = ev, start
+
+        if current is not None:
+            fin = f" jusqu'à {_fmt_time_fr(current.end_local)}" if current.end_local else ""
+            self._banner.set_ambient(
+                "now", "event", f"En ce moment : {current.name or 'Événement'}{fin}")
+        else:
+            self._banner.set_ambient("now", "event", "")
+
+        if nxt is not None:
+            heure = _fmt_time_fr(nxt.start_local) if nxt.start_local else ""
+            self._banner.set_ambient(
+                "next", "next",
+                f"À suivre : {nxt.name or 'Événement'} à {heure} "
+                f"({self._delai(nxt_start - now)})")
+        else:
+            self._banner.set_ambient("next", "next", "")
+
+        # Nombre de shows restants aujourd'hui.
+        jour = datetime.now().strftime("%Y-%m-%d")
+        reste = sum(1 for ev in self._events
+                    if ev.day == jour
+                    and (self._ev_bounds(ev)[0] or 0) > now)
+        self._banner.set_ambient(
+            "count", "next",
+            f"{reste} rendez-vous encore au programme aujourd'hui" if reste > 1 else "")
+
+        # Avant le coup d'envoi, dire quand ça commence.
+        debut = _AccueilTimeline._parse_ts(_PROG_DAYS_ORDERED[0], "18:00")
+        if debut and now < debut:
+            self._banner.set_ambient(
+                "info", "idle", f"Le ZEvent 2026 commence {self._delai(debut - now)}")
+        else:
+            self._banner.set_ambient("info", "idle", "")
+
+    def _refresh_next_show(self) -> None:
+        self._refresh_ambient()
 
     def update_history(self, history: HistoryStore) -> None:
         ts, _ = history.get_donation_series()
@@ -1542,8 +2130,65 @@ class _AccueilTab(QWidget):
                 datetime.fromtimestamp(ts[0], tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             )
 
+        # Comparaison avec l'édition précédente : la question que tout le monde
+        # se pose pendant l'event, et la donnée est déjà sur le disque.
+        cmp_ = history.compare_to_previous(getattr(self, "_prev_donation", 0.0))
+        if cmp_ is not None:
+            ref, ecart = cmp_
+            signe = "+" if ecart >= 0 else ""
+            self._banner.set_ambient(
+                "vs", "money",
+                f"À la même heure en 2025 : {ref:,.0f} €".replace(",", "\u202f")
+                + f" — nous sommes {signe}{ecart:.0f} %")
+            self._don_sub.setText(f"cagnotte totale · {signe}{ecart:.0f} % vs 2025")
+        else:
+            self._banner.set_ambient("vs", "money", "")
+            self._don_sub.setText("cagnotte totale")
+
+        rate = history.donation_rate()
+        if rate is None:
+            self._rate_lbl.setText("")
+        else:
+            self._rate_lbl.setText(f"{'+' if rate >= 0 else ''}{rate:,.0f} €/min"
+                                   .replace(",", "\u202f"))
+
+        proj = history.projected_total(history.event_end_ts)
+        if proj is None:
+            self._proj_lbl.setText("—")
+            # Dire POURQUOI : hors event il n'y a rien à extrapoler, ce n'est
+            # pas une panne.
+            now = time.time()
+            if now < history.event_start_ts:
+                self._proj_sub.setText("disponible au début de l'event")
+            elif now > history.event_end_ts:
+                self._proj_sub.setText("event terminé")
+            else:
+                self._proj_sub.setText("en attente de données")
+        else:
+            self._proj_lbl.setText(f"{proj:,.0f} €".replace(",", "\u202f"))
+            self._proj_sub.setText("projection au rythme actuel")
+
     def update_goals(self, goals: list[GoalWithStreamer]) -> None:
         self._goals_widget.update_goals(goals)
+        # Celui qui va tomber en premier : c'est l'information qui a une chance
+        # de se vérifier dans les minutes qui suivent.
+        pending = [g for g in goals if not g.accomplished and g.pct > 0]
+        if pending:
+            g = max(pending, key=lambda x: x.pct)
+            self._banner.set_ambient(
+                "goal", "goal",
+                f"{g.streamer_display} est à {g.pct:.0f} % de son objectif "
+                f"« {g.goal_name} »")
+        else:
+            self._banner.set_ambient("goal", "goal", "")
+
+    def add_feed_event(self, kind: str, login: str, text: str) -> None:
+        self._feed.add_event(kind, login, text)
+        # Les alertes de chat se comptent par dizaines par heure : les faire
+        # défiler dans le bandeau le rendrait illisible. Seuls les événements
+        # rares y montent.
+        if kind in ("goal", "live", "event", "money"):
+            self._banner.push(kind, text)
 
 
 # ---------------------------------------------------------------------------
@@ -1588,12 +2233,16 @@ def _fmt_duration(start: str, end: str) -> str:
         return ""
 
 
+# Édition 2026 : jeudi 3 → lundi 7 septembre. Ces tables étaient restées sur
+# l'édition 2025, donc sur des dates qui ne correspondaient à aucun événement.
 _PROG_DAY_LABELS: dict[str, str] = {
-    "2025-09-05": "Vendredi 5",
-    "2025-09-06": "Samedi 6",
-    "2025-09-07": "Dimanche 7",
+    "2026-09-03": "Jeudi 3",
+    "2026-09-04": "Vendredi 4",
+    "2026-09-05": "Samedi 5",
+    "2026-09-06": "Dimanche 6",
+    "2026-09-07": "Lundi 7",
 }
-_PROG_DAYS_ORDERED: list[str] = ["2025-09-05", "2025-09-06", "2025-09-07"]
+_PROG_DAYS_ORDERED: list[str] = sorted(_PROG_DAY_LABELS)
 
 _BTN_INACTIVE = (
     "QPushButton { background: transparent; color: #666666; "
@@ -1606,6 +2255,64 @@ _BTN_ACTIVE = (
 )
 
 # ── Chip de participant ────────────────────────────────────────────────────
+
+_PERSON_AV_SZ = 24
+
+
+def _avatar_cache_key(login: str, profile_url: str) -> str:
+    """Clé de cache disque pour un intervenant.
+
+    Les invités d'un show (artistes) n'ont pas de compte Twitch : leur login est
+    vide et leur avatar est hébergé hors Twitch. Sans clé dérivée, tous
+    partageraient le fichier "".png et afficheraient la même image — le dernier
+    téléchargé écrasant les autres.
+    """
+    if login:
+        return login
+    if not profile_url:
+        return ""
+    return "guest_" + hashlib.sha1(profile_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _infobulle(texte: str) -> str:
+    """Infobulle sûre pour du texte venu d'une API.
+
+    Qt interprète le texte riche dans les infobulles : un nom d'affichage ou un
+    nom d'objectif contenant une balise serait rendu comme telle, et une
+    « image » distante y déclencherait une requête réseau. L'échappement dans
+    un conteneur <qt> restitue le texte d'origine, inerte.
+    """
+    return "<qt>" + _html.escape(str(texte)) + "</qt>"
+
+
+def _make_person_avatar(
+    display: str, login: str, size: int = _PERSON_AV_SZ, ring: str = "",
+    profile_url: str = "",
+) -> QLabel:
+    """Pastille ronde portant l'avatar du streamer, son nom en infobulle.
+
+    Plus compact qu'une puce texte : on affiche davantage de participants sur
+    une ligne, et le nom reste accessible au survol.
+    """
+    lbl = QLabel()
+    lbl.setFixedSize(size, size)
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lbl.setToolTip(_infobulle(display))
+    lbl.setStyleSheet(
+        f"border-radius: {size // 2}px; background-color: #1e1e1e; "
+        + (f"border: 1px solid {ring};" if ring else "border: none;")
+        + " color: #8a8a8a; font-family: 'Segoe UI Variable'; "
+        "font-size: 9px; font-weight: bold;"
+    )
+    lbl.setText(display[:2].upper())
+    key = _avatar_cache_key(login, profile_url)
+    if key:
+        from widgets.bigscreen_widget import load_avatar_into_label as _load_av
+        # profile_url non vide : les invités d'un show ne sont pas dans le cache
+        # disque, le loader doit pouvoir aller chercher l'image.
+        _load_av(lbl, key, display, size, profile_url)
+    return lbl
+
 
 def _make_chip(name: str) -> QLabel:
     """Petit badge arrondi avec le nom du participant."""
@@ -1799,9 +2506,14 @@ class _ProgrammeTab(QWidget):
         super().__init__(parent)
         self._events_layout: QVBoxLayout
         self._gdoc_display: dict[str, str] = {}   # gdoc_id → display_name
+        self._gdoc_login: dict[str, str] = {}     # gdoc_id → twitch_login
+        self._needs_render: bool = False          # rendu différé si onglet caché
         self._events: list[EventItem] = []
         self._day_btns: dict[str, QPushButton] = {}
-        self._subscribed_ids: set[str] = set()     # event ids avec rappel activé
+        # Rappels relus depuis config.json : ils étaient jusqu'ici en mémoire
+        # seulement, donc perdus à chaque redémarrage — gênant sur un event de
+        # trois jours où l'application est forcément relancée.
+        self._subscribed_ids: set[str] = _load_reminders()
         self._reminded_ids: set[str] = set()       # rappels déjà déclenchés
         _today = datetime.now().strftime("%Y-%m-%d")
         self._current_day: str = _today if _today in _PROG_DAYS_ORDERED else _PROG_DAYS_ORDERED[0]
@@ -1885,17 +2597,44 @@ class _ProgrammeTab(QWidget):
 
     # -- public ---------------------------------------------------------------
 
-    def set_gdoc_map(self, gdoc_id_to_display: dict[str, str]) -> None:
+    def set_gdoc_map(
+        self,
+        gdoc_id_to_display: dict[str, str],
+        gdoc_id_to_login: dict[str, str] | None = None,
+    ) -> None:
+        logins = gdoc_id_to_login or {}
+        # Le mapping est reconstruit à chaque cycle de 30 s mais il est
+        # identique la quasi-totalité du temps ; le re-rendre détruisait et
+        # recréait ~650 widgets pour rien, sur un onglet le plus souvent caché.
+        if (gdoc_id_to_display == self._gdoc_display
+                and logins == self._gdoc_login):
+            return
         self._gdoc_display = gdoc_id_to_display
+        self._gdoc_login = logins
         if self._events:
+            self._render_deferred()
+
+    def _render_deferred(self) -> None:
+        """Rend maintenant si l'onglet est visible, sinon au prochain affichage."""
+        if self.isVisible():
+            self._needs_render = False
+            self._render_current_day()
+        else:
+            self._needs_render = True
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self._needs_render:
+            self._needs_render = False
             self._render_current_day()
 
     def update_events(self, events: list[EventItem]) -> None:
         self._events = events
-        # Recalcule les jours disponibles depuis les événements reçus
-        days = sorted({ev.day for ev in events if ev.day})
-        if not days:
-            days = _PROG_DAYS_ORDERED
+        # TOUS les jours de l'édition restent proposés, plus ceux qu'apporterait
+        # l'API. Se limiter aux jours ayant déjà des événements faisait
+        # disparaître un jour dont le programme n'est pas encore publié — samedi
+        # s'était ainsi volatilisé entre vendredi et dimanche.
+        days = sorted(set(_PROG_DAYS_ORDERED) | {ev.day for ev in events if ev.day})
         if list(self._day_btns.keys()) != days:
             self._rebuild_day_buttons(days)
             # Essayer de rester sur le jour actuel, sinon prendre le premier
@@ -1961,6 +2700,33 @@ class _ProgrammeTab(QWidget):
             resolved = [uid[:12] + "…" if len(uid) > 12 else uid for uid in uuids]
         return resolved
 
+    def _resolve_people(
+        self,
+        uuids: list[str],
+        names: dict[str, str] | None = None,
+        logins: dict[str, str] | None = None,
+        avatars: dict[str, str] | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """Renvoie (nom_affiché, twitch_login, url_avatar) pour chaque uuid.
+
+        Les invités d'un show (artistes, groupes) n'apparaissent pas dans la
+        liste des streamers ZEvent : leur login et leur avatar ne viennent que
+        de la charge du show, d'où la priorité donnée à `logins`/`avatars`.
+        """
+        names = names or {}
+        logins = logins or {}
+        avatars = avatars or {}
+        out: list[tuple[str, str, str]] = []
+        for uid in uuids:
+            display = names.get(uid) or self._gdoc_display.get(uid)
+            if display is None:
+                continue
+            login = logins.get(uid) or self._gdoc_login.get(uid, "")
+            out.append((display, login, avatars.get(uid, "")))
+        if not out and uuids:
+            out = [((uid[:12] + "…" if len(uid) > 12 else uid), "", "") for uid in uuids]
+        return out
+
     def _event_key(self, ev: EventItem) -> str:
         return ev.id if ev.id else f"{ev.day}_{ev.start_local}_{ev.name}"
 
@@ -1968,8 +2734,14 @@ class _ProgrammeTab(QWidget):
 
     def _event_card(self, ev: EventItem) -> QFrame:
         key = self._event_key(ev)
-        hosts_names = self._resolve(ev.host_uuids, ev.names)
-        parts_names = self._resolve(ev.participant_uuids, ev.names)
+        _ev_logins = getattr(ev, "logins", None)
+        _ev_avatars = getattr(ev, "profile_urls", None)
+        hosts_people = self._resolve_people(ev.host_uuids, ev.names, _ev_logins, _ev_avatars)
+        hosts_names = [d for d, _, _ in hosts_people]
+        parts_people = self._resolve_people(
+            ev.participant_uuids, ev.names, _ev_logins, _ev_avatars
+        )
+        parts_names = [d for d, _, _ in parts_people]
         is_subscribed = key in self._subscribed_ids
 
         card = QFrame()
@@ -2008,6 +2780,7 @@ class _ProgrammeTab(QWidget):
         line1.addWidget(time_lbl)
 
         name_lbl = QLabel(ev.name or "—")
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         name_lbl.setFont(_bold_font(_FONT_SEGOE, 13))
         name_lbl.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         name_lbl.setWordWrap(True)
@@ -2017,41 +2790,54 @@ class _ProgrammeTab(QWidget):
         if dur:
             dur_lbl = QLabel(dur)
             dur_lbl.setFont(QFont(_FONT_SEGOE, 10))
-            dur_lbl.setStyleSheet("color: #444444; background: transparent; border: none;")
+            dur_lbl.setStyleSheet("color: #888888; background: transparent; border: none;")
             dur_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             line1.addWidget(dur_lbl)
+            line1.addSpacing(2)
 
-        # Bouton rappel (🔔)
-        bell_btn = QPushButton("🔔" if is_subscribed else "🔕")
+        # Bouton rappel. Pas d'emoji : U+1F514/U+1F515 ne rendent aucun glyphe
+        # hors Windows (le bouton apparaissait vide), on passe par qtawesome
+        # comme les boutons du header.
+        bell_btn = QPushButton()
         bell_btn.setFixedSize(26, 26)
-        bell_btn.setFont(QFont(_FONT_SEGOE, 11))
         bell_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         bell_btn.setToolTip("Désactiver le rappel" if is_subscribed else "Me rappeler 5 min avant")
-        bell_btn.setStyleSheet(
-            f"QPushButton {{ background: {'#0d1f16' if is_subscribed else 'transparent'}; "
-            f"border: 1px solid {'#00ff87' if is_subscribed else '#333333'}; border-radius: 4px; }}"
-            "QPushButton:hover { border-color: #00ff87; background: #0d1f16; }"
-        )
+        bell_btn.setFont(_bold_font(_FONT_SEGOE, 11))
+        self._style_bell(bell_btn, is_subscribed)
         bell_btn.clicked.connect(lambda _, k=key, b=bell_btn, e=ev: self._toggle_reminder(k, b, e))
         line1.addWidget(bell_btn)
         cl.addLayout(line1)
 
         # ── Ligne 2 : hôtes (chips) ───────────────────────────────────
-        if hosts_names:
+        if hosts_people:
             hosts_row = QHBoxLayout()
             hosts_row.setSpacing(4)
-            host_icon = QLabel("🎙")
-            host_icon.setFont(QFont(_FONT_SEGOE, 10))
+            host_icon = QLabel()
+            host_icon.setFixedSize(14, 14)
             host_icon.setStyleSheet("background: transparent; border: none;")
+            host_icon.setToolTip("Animé par")
+            if _QTA_OK:
+                host_icon.setPixmap(
+                    qta.icon("mdi6.microphone", color="#8a8a8a").pixmap(QSize(14, 14))
+                )
+            else:
+                host_icon.setText("\U0001f399")
             hosts_row.addWidget(host_icon)
-            for name in hosts_names[:3]:
-                chip = _make_chip(name)
+            HOSTS_SHOWN = 8
+            for display, login, purl in hosts_people[:HOSTS_SHOWN]:
+                if login or purl:
+                    # Anneau vert : marque l'animateur face aux participants.
+                    hosts_row.addWidget(
+                        _make_person_avatar(display, login, ring="#1a3328", profile_url=purl)
+                    )
+                    continue
+                chip = _make_chip(display)
                 chip.setStyleSheet(
                     "color: #00ff87; background: #0d1f16; border: 1px solid #1a3328; "
                     "border-radius: 10px; padding: 1px 8px;"
                 )
                 hosts_row.addWidget(chip)
-            extra_h = len(hosts_names) - 3
+            extra_h = len(hosts_people) - HOSTS_SHOWN
             if extra_h > 0:
                 more = QPushButton(f"+{extra_h}")
                 more.setFont(QFont(_FONT_SEGOE, 10))
@@ -2060,6 +2846,7 @@ class _ProgrammeTab(QWidget):
                 more.setStyleSheet(
                     "QPushButton { color: #00ff87; background: transparent; border: none; "
                     "text-decoration: underline; padding: 0 2px; }"
+                    "QPushButton:hover { color: #ffffff; }"
                 )
                 more.clicked.connect(
                     lambda _, e=ev, h=hosts_names, p=parts_names: self._open_participants_popup(e, h, p)
@@ -2068,23 +2855,33 @@ class _ProgrammeTab(QWidget):
             hosts_row.addStretch()
             cl.addLayout(hosts_row)
 
-        # ── Ligne 3 : participants (chips) ────────────────────────────
-        if parts_names:
+        # ── Ligne 3 : participants (avatars, nom au survol) ───────────
+        if parts_people:
             parts_row = QHBoxLayout()
             parts_row.setSpacing(4)
-            CHIPS_SHOWN = 3
-            for name in parts_names[:CHIPS_SHOWN]:
-                parts_row.addWidget(_make_chip(name))
-            extra_p = len(parts_names) - CHIPS_SHOWN
+            # Les avatars tiennent bien plus serré que les puces texte : on en
+            # montre 8 au lieu de 3 avant de renvoyer vers la popup.
+            AVATARS_SHOWN = 8
+            shown = parts_people[:AVATARS_SHOWN]
+            for display, login, purl in shown:
+                if login or purl:
+                    parts_row.addWidget(
+                        _make_person_avatar(display, login, profile_url=purl)
+                    )
+                else:
+                    # Intervenant hors ZEvent (artiste, invité) : pas de login
+                    # donc pas d'avatar, la puce texte reste la seule option.
+                    parts_row.addWidget(_make_chip(display))
+            extra_p = len(parts_people) - len(shown)
             if extra_p > 0:
                 more = QPushButton(f"voir les {extra_p} autres…")
                 more.setFont(QFont(_FONT_SEGOE, 10))
                 more.setFixedHeight(20)
                 more.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 more.setStyleSheet(
-                    "QPushButton { color: #555555; background: transparent; border: none; "
+                    "QPushButton { color: #888888; background: transparent; border: none; "
                     "text-decoration: underline; padding: 0 2px; }"
-                    "QPushButton:hover { color: #888888; }"
+                    "QPushButton:hover { color: #00ff87; }"
                 )
                 more.clicked.connect(
                     lambda _, e=ev, h=hosts_names, p=parts_names: self._open_participants_popup(e, h, p)
@@ -2110,23 +2907,43 @@ class _ProgrammeTab(QWidget):
 
     # ── Système de rappels ────────────────────────────────────────────
 
+    @staticmethod
+    def _style_bell(btn: QPushButton, subscribed: bool) -> None:
+        """Applique l'état du bouton rappel.
+
+        L'icône est un pixmap qtawesome : il faut la REMPLACER, pas poser un
+        texte. Poser les deux faisait cohabiter icône et libellé côte à côte,
+        l'icône se retrouvant décalée et rognée dans un bouton de 26 px.
+        """
+        if _QTA_OK:
+            btn.setIcon(qta.icon(
+                "mdi6.bell" if subscribed else "mdi6.bell-outline",
+                color="#00ff87" if subscribed else "#8a8a8a",
+                color_active="#00ff87",
+            ))
+            btn.setIconSize(QSize(15, 15))
+        else:
+            btn.setText("!" if subscribed else "·")
+        btn.setToolTip("Désactiver le rappel" if subscribed else "Me rappeler 5 min avant")
+        btn.setStyleSheet(
+            f"QPushButton {{ background: {'#0d1f16' if subscribed else 'transparent'}; "
+            f"color: {'#00ff87' if subscribed else '#8a8a8a'}; "
+            f"border: 1px solid {'#00ff87' if subscribed else '#333333'}; "
+            "border-radius: 4px; }"
+            "QPushButton:hover { border-color: #00ff87; background: #0d1f16; }"
+        )
+
     def _toggle_reminder(self, key: str, btn: QPushButton, ev: EventItem) -> None:
         if key in self._subscribed_ids:
             self._subscribed_ids.discard(key)
-            btn.setText("🔕")
-            btn.setToolTip("Me rappeler 5 min avant")
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; border: 1px solid #333333; border-radius: 4px; }"
-                "QPushButton:hover { border-color: #00ff87; background: #0d1f16; }"
-            )
+            self._style_bell(btn, False)
         else:
             self._subscribed_ids.add(key)
-            btn.setText("🔔")
-            btn.setToolTip("Désactiver le rappel")
-            btn.setStyleSheet(
-                "QPushButton { background: #0d1f16; border: 1px solid #00ff87; border-radius: 4px; }"
-                "QPushButton:hover { border-color: #00ff87; background: #0d1f16; }"
-            )
+            self._style_bell(btn, True)
+        # Sans cette purge, un événement déjà rappelé restait marqué à vie :
+        # se désabonner puis se réabonner ne redéclenchait plus rien.
+        self._reminded_ids.discard(key)
+        _save_reminders(self._subscribed_ids)
 
     def _check_reminders(self) -> None:
         """Vérifie si un événement souscrit commence dans les 5 prochaines minutes."""
@@ -2195,8 +3012,12 @@ class _GoalsTab(QWidget):
         self._combo = QComboBox()
         self._combo.setFont(QFont(_FONT_SEGOE, 11))
         self._combo.setMinimumHeight(30)
+        # Un nom de streamer n'a pas besoin de 1900 px : largeur fixe, puis on
+        # pousse le reste à droite plutôt que d'étirer le champ.
+        self._combo.setFixedWidth(280)
         self._combo.currentIndexChanged.connect(self._on_streamer_changed)
-        hdr.addWidget(self._combo, stretch=1)
+        hdr.addWidget(self._combo)
+        hdr.addStretch(1)
         root.addLayout(hdr)
 
         # Zone d'affichage des objectifs
@@ -2249,7 +3070,7 @@ class _GoalsTab(QWidget):
             return
         s: StreamerInfo | None = self._combo.itemData(idx)
         if s is None or not s.participation_id:
-            self._show_placeholder("Aucune participation evenmorestats pour ce streamer")
+            self._show_placeholder("Ce streamer n'a pas d'objectifs publiés")
             return
         self._load_goals(s.participation_id, s.twitch_login)
 
@@ -2337,6 +3158,7 @@ class _GoalsTab(QWidget):
         info = QVBoxLayout()
         info.setSpacing(2)
         nm = QLabel(g.name)
+        nm.setTextFormat(Qt.TextFormat.PlainText)
         nm.setFont(QFont(_FONT_SEGOE, 12))
         nm.setStyleSheet(
             _SS_MUTED if g.accomplished else _SS_WHITE
@@ -2364,6 +3186,8 @@ class _GoalsTab(QWidget):
 
 _CARD_W = 220          # largeur de référence pour le texte elide
 _CARD_H = 168          # hauteur fixe des cartes
+_FAV_COLOR = "#f5c518"   # or — étoile favori
+
 _AVATAR_SZ = 56        # taille avatar circulaire
 
 _COL_LAN        = "#d97706"   # ambre — badge LAN
@@ -2382,6 +3206,8 @@ class _StreamerCard(QFrame):
     """
 
     toggled = pyqtSignal(str, bool)   # login, selected
+    #: Clic droit sur la carte — ouvrir la fiche du participant.
+    sheet_requested = pyqtSignal(str)
 
     def __init__(self, s: StreamerInfo, slot: int | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2396,6 +3222,7 @@ class _StreamerCard(QFrame):
         if self._online:
             self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
+        self.setObjectName("streamerCard")
         self._apply_style()
         self._build(s)
 
@@ -2421,7 +3248,7 @@ class _StreamerCard(QFrame):
         self._avatar_lbl.move(2, 2)
         self._avatar_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._avatar_lbl.setStyleSheet(
-            f"border-radius: {_AVATAR_SZ // 2}px; "
+            f"border-radius: {_AVATAR_SZ // 2}px; border: none; "
             "background-color: #222222; "
             "font-family: 'Segoe UI Variable'; font-size: 15px; font-weight: bold; "
             + ("color: #555555;" if not s.online else "color: #00ff87;")
@@ -2469,6 +3296,38 @@ class _StreamerCard(QFrame):
             )
             badge_text = "Online"
 
+        # Étoile favori : enfant DIRECT de la carte, posée en bas à droite par
+        # resizeEvent. Dans la rangée du haut elle se disputait la place avec le
+        # badge LAN/Online, et l'angle libre en bas de carte est plus lisible.
+        self._fav_btn = QPushButton(self)
+        self._fav_btn.setFixedSize(26, 26)
+        self._fav_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._fav_btn.clicked.connect(self._toggle_favorite)
+        self._refresh_fav_btn()
+        self._fav_btn.raise_()
+
+        # Donner à CE streamer. L'URL est relevée par l'API pour chacun, mais
+        # elle ne servait jusqu'ici qu'au plein écran, pour la chaîne en cours.
+        self._don_url = getattr(s, "donation_url", "") or ""
+        self._don_btn = None
+        if self._don_url:
+            b = QPushButton(self)
+            b.setFixedSize(26, 26)
+            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.setToolTip(_infobulle(f"Donner à {s.display}"))
+            if _QTA_OK:
+                b.setIcon(qta.icon("mdi6.hand-heart-outline", color="#00ff87"))
+                b.setIconSize(QSize(16, 16))
+            else:
+                b.setText("\u2665")
+            b.setStyleSheet(
+                "QPushButton { background: transparent; border: none;"
+                " color: #00ff87; font-size: 15px; }"
+                "QPushButton:hover { background: #0f1a14; border-radius: 4px; }"
+            )
+            b.clicked.connect(self._on_donate)
+            self._don_btn = b
+
         type_badge = QLabel(badge_text)
         type_badge.setFont(_bold_font(_FONT_SEGOE, 8))
         type_badge.setStyleSheet(badge_css)
@@ -2480,6 +3339,7 @@ class _StreamerCard(QFrame):
 
         # ── Nom ───────────────────────────────────────────────────
         name_lbl = QLabel(s.display)
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         name_color = "#e8e8e8" if s.online else "#505050"
         name_lbl.setFont(_bold_font(_FONT_SEGOE, 12))
         name_lbl.setStyleSheet(f"color: {name_color}; background: transparent; border: none;")
@@ -2490,6 +3350,7 @@ class _StreamerCard(QFrame):
         # ── Jeu ───────────────────────────────────────────────────
         if s.game:
             game_lbl = QLabel(s.game)
+            game_lbl.setTextFormat(Qt.TextFormat.PlainText)
             game_lbl.setFont(QFont(_FONT_SEGOE, 10))
             game_color = "#888888" if s.online else "#3a3a3a"
             game_lbl.setStyleSheet(f"color: {game_color}; background: transparent; border: none;")
@@ -2519,10 +3380,77 @@ class _StreamerCard(QFrame):
         self._slot_lbl.move(8, 8)
         self._update_slot_badge()
 
+    # -- favori ----------------------------------------------------------------
+
+    def _refresh_fav_btn(self) -> None:
+        fav = favorites.is_favorite(self._login)
+        self._fav_btn.setToolTip(
+            "Retirer des favoris" if fav else "Mettre en favori"
+        )
+        # #5a5a5a sur un fond #111111 ne faisait que 1,5:1 de contraste : le
+        # contour de l'étoile se devinait plus qu'il ne se voyait. Un gris clair
+        # la rend franchement lisible sans lui donner l'air déjà activée, et
+        # l'or reste réservé aux favoris.
+        idle = "#b0b6bd"
+        if _QTA_OK:
+            self._fav_btn.setIcon(qta.icon(
+                "mdi6.star" if fav else "mdi6.star-outline",
+                color=_FAV_COLOR if fav else idle,
+                color_active=_FAV_COLOR,
+            ))
+            self._fav_btn.setIconSize(QSize(20, 20))
+        else:
+            self._fav_btn.setText("★" if fav else "☆")
+        self._fav_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; "
+            f"color: {_FAV_COLOR if fav else idle}; font-size: 17px; }}"
+            "QPushButton:hover { background: #262626; border-radius: 4px; }"
+        )
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._place_fav_btn()
+
+    def _place_fav_btn(self) -> None:
+        btn = getattr(self, "_fav_btn", None)
+        if btn is None:
+            return
+        m = 8
+        btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
+        btn.raise_()
+        don = getattr(self, "_don_btn", None)
+        if don is not None:
+            # Juste à gauche de l'étoile : deux gestes du même coin, distincts.
+            don.move(self.width() - btn.width() - don.width() - m - 4,
+                     self.height() - don.height() - m)
+            don.raise_()
+
+    def _on_donate(self) -> None:
+        from windows.fullscreen import ouvrir_page_de_don
+        ouvrir_page_de_don(getattr(self, "_don_url", ""))
+
+    def contextMenuEvent(self, event) -> None:  # type: ignore[override]
+        """Clic droit : ouvrir la fiche du participant."""
+        self.sheet_requested.emit(self._login)
+        event.accept()
+
+    def _toggle_favorite(self) -> None:
+        favorites.toggle(self._login)
+        self._refresh_fav_btn()
+
     def _apply_style(self) -> None:
+        """Habillage de la carte, restreint à la carte elle-même.
+
+        Le sélecteur porte le nom d'objet, et ce n'est pas cosmétique : QLabel
+        DÉRIVE de QFrame, si bien qu'un simple « QFrame { border: ... } » posé
+        sur la carte s'appliquait aussi à chacune de ses étiquettes. L'avatar
+        héritait ainsi du liseré vert de la sélection — le cerclage disgracieux
+        autour des photos. Les autres étiquettes n'y échappaient que parce
+        qu'elles redéclarent toutes « border: none ».
+        """
         if self._slot is not None:
             self.setStyleSheet(
-                f"QFrame {{"
+                f"QFrame#streamerCard {{"
                 f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
                 f" stop:0 rgba(0,255,135,24), stop:0.45 #131313, stop:1 #111111);"
                 f"border: 2px solid {_COL_SEL};"
@@ -2531,14 +3459,15 @@ class _StreamerCard(QFrame):
             )
         elif self._online:
             self.setStyleSheet(
-                "QFrame { background-color: #111111; border: 1px solid #282828; "
-                "border-radius: 8px; }"
-                "QFrame:hover { background-color: #181818; border-color: #3a3a3a; }"
+                "QFrame#streamerCard { background-color: #111111; "
+                "border: 1px solid #282828; border-radius: 8px; }"
+                "QFrame#streamerCard:hover { background-color: #181818; "
+                "border-color: #3a3a3a; }"
             )
         else:
             self.setStyleSheet(
-                "QFrame { background-color: #0c0c0c; border: 1px solid #1a1a1a; "
-                "border-radius: 8px; }"
+                "QFrame#streamerCard { background-color: #0c0c0c; "
+                "border: 1px solid #1a1a1a; border-radius: 8px; }"
             )
 
     def _update_slot_badge(self) -> None:
@@ -2551,6 +3480,8 @@ class _StreamerCard(QFrame):
     # -- public API ------------------------------------------------------------
 
     def set_slot(self, slot: int | None) -> None:
+        if slot == self._slot:
+            return   # même valeur : pas de repolish inutile
         self._slot = slot
         self._apply_style()
         self._update_slot_badge()
@@ -2629,12 +3560,319 @@ class _CardsGrid(QWidget):
         )
 
 
+# ── _MixerTab ─────────────────────────────────────────────────────────────
+
+class _MixerStrip(QFrame):
+    """Une tranche de console : photo, nom, curseur vertical, muet."""
+
+    volume_changed = pyqtSignal(str, int)   # login, 0-100
+    mute_toggled   = pyqtSignal(str, bool)  # login, muet
+    unpin_requested = pyqtSignal(str)       # retirer cette chaîne de la console
+
+    _W = 84
+
+    def __init__(self, login: str, display: str, volume: int = 100,
+                 parent: QWidget | None = None, principal: bool = False) -> None:
+        super().__init__(parent)
+        self._login = login
+        self._muet = False
+        self.setFixedWidth(self._W)
+        # Sans plafond, la tranche s'étire sur toute la hauteur de l'onglet et
+        # le fader devient une barre de neuf cents pixels, impossible à doser.
+        self.setMaximumHeight(330)
+        self.setObjectName("mixStrip")
+        # La tranche du plein écran se distingue : c'est la source principale,
+        # celle qu'on dose par rapport aux autres.
+        self._principal = principal
+        bord = "#38bdf8" if principal else "#262626"
+        self.setStyleSheet(
+            f"QFrame#mixStrip {{ background: #141414; border: 1px solid {bord};"
+            " border-radius: 8px; }"
+        )
+        v = QVBoxLayout(self)
+        v.setContentsMargins(8, 10, 8, 10)
+        v.setSpacing(6)
+
+        if not principal:
+            # Retirer une chaîne depuis la console : y aller pour constater
+            # qu'on ne veut plus l'entendre, puis devoir retourner faire un
+            # clic droit dans la grille, n'avait aucun sens.
+            haut = QHBoxLayout()
+            haut.setContentsMargins(0, 0, 0, 0)
+            haut.addStretch()
+            fermer = QPushButton()
+            fermer.setFixedSize(18, 18)
+            fermer.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            fermer.setToolTip("Retirer des audios épinglés")
+            if _QTA_OK:
+                fermer.setIcon(qta.icon("mdi6.close", color="#6a6a6a"))
+                fermer.setIconSize(QSize(11, 11))
+            else:
+                fermer.setText("\u2715")
+            fermer.setStyleSheet(
+                "QPushButton { background: transparent; border: none;"
+                " color: #6a6a6a; font-size: 11px; }"
+                "QPushButton:hover { background: #2a1414; color: #ff4444;"
+                " border-radius: 3px; }"
+            )
+            fermer.clicked.connect(
+                lambda: self.unpin_requested.emit(self._login))
+            haut.addWidget(fermer)
+            v.addLayout(haut)
+
+        if principal:
+            cap = QLabel("PLEIN ÉCRAN")
+            cap.setFont(_bold_font(_FONT_SEGOE, 7))
+            cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cap.setStyleSheet(
+                "color: #38bdf8; background: transparent; border: none;"
+                " letter-spacing: 1px;")
+            v.addWidget(cap)
+
+        av = _make_person_avatar(display or login, login, 34)
+        av.setToolTip(_infobulle(display or login))
+        v.addWidget(av, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self._val = QLabel(f"{volume}")
+        self._val.setFont(_bold_font(_FONT_MONO, 12))
+        self._val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._val.setStyleSheet(
+            f"color: {'#38bdf8' if principal else '#00ff87'};"
+            " background: transparent; border: none;")
+        v.addWidget(self._val)
+
+        self._slider = QSlider(Qt.Orientation.Vertical)
+        self._slider.setRange(0, 100)
+        self._slider.setValue(volume)
+        self._slider.setMinimumHeight(150)
+        self._slider.setMaximumHeight(200)
+        self._slider.setStyleSheet(
+            "QSlider::groove:vertical { background: #202020; width: 6px;"
+            " border-radius: 3px; }"
+            "QSlider::sub-page:vertical { background: #202020; border-radius: 3px; }"
+            "QSlider::add-page:vertical { background: #00ff87; border-radius: 3px; }"
+            "QSlider::handle:vertical { background: #e8e8e8; height: 14px;"
+            " margin: 0 -5px; border-radius: 7px; }"
+        )
+        self._slider.valueChanged.connect(self._on_slider)
+        v.addWidget(self._slider, 1, Qt.AlignmentFlag.AlignHCenter)
+
+        self._mute = QPushButton()
+        self._mute.setCheckable(True)
+        self._mute.setFixedSize(28, 24)
+        self._mute.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mute.setToolTip("Couper cette chaîne")
+        self._refresh_mute()
+        self._mute.toggled.connect(self._on_mute)
+        v.addWidget(self._mute, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        nom = QLabel(display or login)
+        nom.setTextFormat(Qt.TextFormat.PlainText)
+        nom.setFont(QFont(_FONT_SEGOE, 9))
+        nom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nom.setStyleSheet("color: #9a9a9a; background: transparent; border: none;")
+        fm = QFontMetrics(nom.font())
+        nom.setText(fm.elidedText(display or login, Qt.TextElideMode.ElideRight,
+                                  self._W - 16))
+        nom.setToolTip(_infobulle(display or login))
+        v.addWidget(nom)
+
+    @property
+    def login(self) -> str:
+        return self._login
+
+    def volume(self) -> int:
+        return self._slider.value()
+
+    def _refresh_mute(self) -> None:
+        if _QTA_OK:
+            self._mute.setIcon(qta.icon(
+                "mdi6.volume-off" if self._muet else "mdi6.volume-high",
+                color="#ff4444" if self._muet else "#8a8a8a"))
+        else:
+            self._mute.setText("\u25cf")
+        self._mute.setStyleSheet(
+            "QPushButton { background: transparent; border: none; }"
+            "QPushButton:hover { background: #202020; border-radius: 4px; }"
+            "QPushButton:checked { background: #2a1414; border-radius: 4px; }"
+        )
+
+    def _on_slider(self, v: int) -> None:
+        self._val.setText(str(v))
+        if not self._muet:
+            self.volume_changed.emit(self._login, v)
+
+    def _on_mute(self, muet: bool) -> None:
+        self._muet = muet
+        self._refresh_mute()
+        self._val.setStyleSheet(
+            f"color: {'#ff4444' if muet else '#00ff87'};"
+            " background: transparent; border: none;")
+        # Le curseur reste à sa valeur : la coupure est une notion distincte du
+        # volume, et couper puis rétablir doit retrouver le réglage.
+        self.mute_toggled.emit(self._login, muet)
+
+
+class _MixerTab(QWidget):
+    """Console de mixage des audios épinglés.
+
+    L'épinglage était binaire : une chaîne s'entendait ou pas. Suivre deux
+    directs à la fois demande de doser — le principal fort, le second en fond.
+    On ne mixe QUE les chaînes épinglées : les autres sont muettes par nature,
+    et une console de trois cents tranches ne se pilote pas.
+    """
+
+    volume_changed = pyqtSignal(str, int)   # login, 0-100
+    #: Volume du flux affiché en plein écran, réglé depuis la console.
+    main_volume_changed = pyqtSignal(int)
+    #: Chaîne à retirer des audios épinglés.
+    unpin_requested = pyqtSignal(str)
+    #: (login, coupé) — coupure d'une chaîne depuis la console.
+    mute_changed = pyqtSignal(str, bool)
+    #: Coupure du flux affiché en plein écran.
+    main_mute_changed = pyqtSignal(bool)
+
+    #: Clé interne de la tranche « plein écran ». Elle ne peut pas entrer en
+    #: collision avec un login Twitch, qui n'accepte pas ce caractère.
+    _MAIN = "#main"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._main_login: str = ""
+        self._muets: dict[str, bool] = {}
+        self._strips: dict[str, _MixerStrip] = {}
+        self._volumes: dict[str, int] = {}
+        self._displays: dict[str, str] = {}
+        self._build()
+
+    def _build(self) -> None:
+        self.setStyleSheet(_SS_BG_DARK)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        entete = QHBoxLayout()
+        titre = QLabel("MIXER")
+        titre.setFont(_bold_font(_FONT_SEGOE, 11))
+        titre.setStyleSheet(
+            "color: #00ff87; background: transparent; letter-spacing: 2px;")
+        entete.addWidget(titre)
+        self._compte = QLabel("")
+        self._compte.setFont(QFont(_FONT_SEGOE, 10))
+        self._compte.setStyleSheet(_SS_GREY_CLEAR)
+        entete.addWidget(self._compte)
+        entete.addStretch()
+        root.addLayout(entete)
+
+        self._vide = QLabel(
+            "Aucune source audio.\n\n"
+            "Le flux en plein écran apparaît ici, ainsi que les cellules dont "
+            "vous épinglez l'audio\n(clic droit sur une cellule de la grille).")
+        self._vide.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._vide.setFont(QFont(_FONT_SEGOE, 11))
+        self._vide.setStyleSheet("color: #555555; background: transparent;")
+        root.addWidget(self._vide, 1)
+
+        self._rangee = QHBoxLayout()
+        self._rangee.setSpacing(10)
+        self._rangee.setContentsMargins(0, 0, 0, 0)
+        self._conteneur = QWidget()
+        self._conteneur.setStyleSheet("background: transparent;")
+        self._conteneur.setLayout(self._rangee)
+        root.addWidget(self._conteneur, 1)
+        self._conteneur.setVisible(False)
+
+    # -- API -------------------------------------------------------------
+
+    def set_displays(self, noms: dict[str, str]) -> None:
+        """Noms d'affichage, pour ne pas montrer des logins bruts."""
+        self._displays = dict(noms)
+
+    def set_main_stream(self, login: str) -> None:
+        """Chaîne affichée en plein écran : première tranche de la console."""
+        login = str(login or "")
+        if login == self._main_login:
+            return
+        self._main_login = login
+        self._rebuild()
+
+    def set_pinned(self, logins: list[str]) -> None:
+        """Reconstruit la console pour les chaînes épinglées."""
+        self._pinned = [str(lg) for lg in logins if lg]
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        # Le plein écran d'abord : c'est la source principale, celle par rapport
+        # à laquelle on dose les autres. Il n'apparaît qu'une fois, même s'il
+        # est aussi épinglé dans la grille.
+        logins = []
+        if self._main_login:
+            logins.append(self._MAIN)
+        logins += [lg for lg in getattr(self, "_pinned", [])
+                   if lg != self._main_login]
+        if list(self._strips) == logins:
+            return
+        while self._rangee.count():
+            item = self._rangee.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._strips.clear()
+        for lg in logins:
+            principal = lg == self._MAIN
+            vrai = self._main_login if principal else lg
+            # Le réglage précédent est retrouvé : dépingler puis rappeler une
+            # chaîne ne doit pas remettre son volume à fond.
+            vol = self._volumes.get(lg, 100)
+            strip = _MixerStrip(vrai, self._displays.get(vrai, vrai), vol,
+                                principal=principal)
+            strip._login = lg      # la clé interne pilote le routage
+            if self._muets.get(lg):
+                strip._mute.setChecked(True)
+            strip.volume_changed.connect(self._on_volume)
+            strip.mute_toggled.connect(self._on_mute)
+            strip.unpin_requested.connect(self.unpin_requested)
+            if strip._muet:
+                # Une tranche reconstruite doit retrouver son état de coupure.
+                self._on_mute(lg, True)
+            self._strips[lg] = strip
+            self._rangee.addWidget(strip, 0, Qt.AlignmentFlag.AlignTop)
+        self._rangee.addStretch()
+        # Appliquer les réglages mémorisés SANS attendre que l'utilisateur
+        # touche un curseur : une chaîne rappelée doit retrouver son niveau.
+        for lg, strip in self._strips.items():
+            self.volume_changed.emit(lg, strip.volume())
+        self._compte.setText(f"· {len(logins)} source" + ("s" if len(logins) > 1 else "")
+                             if logins else "")
+        self._vide.setVisible(not logins)
+        self._conteneur.setVisible(bool(logins))
+
+    def _on_mute(self, login: str, muet: bool) -> None:
+        self._muets[login] = muet
+        if login == self._MAIN:
+            self.main_mute_changed.emit(muet)
+        else:
+            self.mute_changed.emit(login, muet)
+
+    def _on_volume(self, login: str, v: int) -> None:
+        strip = self._strips.get(login)
+        if strip is not None and not strip._muet:
+            self._volumes[login] = v
+        if login == self._MAIN:
+            self.main_volume_changed.emit(v)
+        else:
+            self.volume_changed.emit(login, v)
+
+
 # ── _StreamersTab ─────────────────────────────────────────────────────────
 
 class _StreamersTab(QWidget):
     """Onglet Streamers — vue en cartes interactives pour sélectionner la grille."""
 
     grid_selection_changed = pyqtSignal(list)  # list[str] twitch_logins
+    #: Login dont on veut ouvrir la fiche.
+    sheet_requested = pyqtSignal(str)
 
     MAX_SELECTED: int = 25
 
@@ -2653,6 +3891,13 @@ class _StreamersTab(QWidget):
         self._sort_mode: int = self._SORT_VIEWERS
         # Empreinte structurelle : {(login, online)} — évite un rebuild inutile
         self._prev_structure: frozenset[tuple[str, bool]] = frozenset()
+        # Filtre : trois cents participants sans moyen de chercher, il fallait
+        # faire défiler à l'œil pour trouver quelqu'un.
+        self._query: str = ""
+        self._only_online: bool = False
+        self._only_lan: bool = False
+        self._only_fav: bool = False
+        self._game: str = ""
         self._build()
 
     # -- construction ----------------------------------------------------------
@@ -2690,7 +3935,7 @@ class _StreamersTab(QWidget):
 
         toolbar.addSpacing(8)
 
-        btn_all = QPushButton("✓ Tous")
+        btn_all = QPushButton("\u2713 Tous")
         btn_all.setObjectName("watchBtn")
         btn_all.setFont(QFont(_FONT_SEGOE, 9))
         btn_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -2704,7 +3949,37 @@ class _StreamersTab(QWidget):
         btn_none.clicked.connect(self._deselect_all)
         toolbar.addWidget(btn_none)
 
+        # Dispositions enregistrées : recharger une sélection en un clic plutôt
+        # que de recocher vingt-cinq cases à chaque changement de contexte.
+        toolbar.addSpacing(8)
+        self._preset_combo = QComboBox()
+        self._preset_combo.setFont(QFont(_FONT_SEGOE, 10))
+        self._preset_combo.setMinimumHeight(26)
+        self._preset_combo.setMinimumWidth(160)
+        self._preset_combo.activated.connect(self._on_preset_chosen)
+        toolbar.addWidget(self._preset_combo)
+
+        btn_save = QPushButton("Enregistrer")
+        btn_save.setObjectName("watchBtn")
+        btn_save.setFont(QFont(_FONT_SEGOE, 9))
+        btn_save.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_save.setToolTip("Enregistrer la sélection actuelle sous un nom")
+        btn_save.clicked.connect(self._on_preset_save)
+        toolbar.addWidget(btn_save)
+        self._refresh_presets()
+
         root.addLayout(toolbar)
+        root.addWidget(self._make_filter_bar())
+
+        # Affiché quand le filtre ne laisse rien : une page vide sans un mot
+        # laisse croire à un chargement qui n'arrive pas.
+        self._empty_lbl = QLabel("Aucun streamer ne correspond à ce filtre.")
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setFont(QFont(_FONT_SEGOE, 12))
+        self._empty_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._empty_lbl.setFixedHeight(48)
+        self._empty_lbl.setVisible(False)
+        root.addWidget(self._empty_lbl)
 
         # Séparateur
         sep = QWidget()
@@ -2773,6 +4048,7 @@ class _StreamersTab(QWidget):
             # Structure différente — rebuild avec loader
             self._prev_structure = new_structure
             self._streamers = streamers
+            self._refresh_game_list()
             self._content_stack.setCurrentIndex(0)  # affiche "Chargement…"
             QTimer.singleShot(0, self._deferred_rebuild)
 
@@ -2806,13 +4082,197 @@ class _StreamersTab(QWidget):
         else:  # SORT_VIEWERS
             return sorted(items, key=lambda s: -s.viewers)
 
+    # -- dispositions ----------------------------------------------------------
+
+    def _refresh_presets(self) -> None:
+        from core.selection_store import SelectionStore
+        presets = SelectionStore().presets()
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.clear()
+        self._preset_combo.addItem(
+            f"Dispositions ({len(presets)})" if presets else "Aucune disposition", "")
+        for nom in sorted(presets):
+            self._preset_combo.addItem(f"{nom}  ({len(presets[nom])})", nom)
+        if presets:
+            self._preset_combo.insertSeparator(self._preset_combo.count())
+            self._preset_combo.addItem("Supprimer une disposition\u2026", "__del__")
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
+
+    def _on_preset_chosen(self, _idx: int) -> None:
+        nom = str(self._preset_combo.currentData() or "")
+        if not nom:
+            return
+        from core.selection_store import SelectionStore
+        store = SelectionStore()
+        if nom == "__del__":
+            self._delete_preset_dialog(store)
+            return
+        logins = store.presets().get(nom, [])
+        # Ne garder que ce qui existe encore : une disposition d'hier peut citer
+        # des chaînes absentes aujourd'hui.
+        connus = {s.twitch_login for s in self._streamers}
+        self._selected = [lg for lg in logins if lg in connus][:self.MAX_SELECTED]
+        self._renumber_slots()
+        self._update_counter()
+        self.grid_selection_changed.emit(list(self._selected))
+        self._preset_combo.setCurrentIndex(0)
+
+    def _on_preset_save(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+        if not self._selected:
+            return
+        nom, ok = QInputDialog.getText(
+            self, "Enregistrer la disposition",
+            f"Nom pour ces {len(self._selected)} chaînes :")
+        if not ok or not nom.strip():
+            return
+        from core.selection_store import SelectionStore
+        SelectionStore().save_preset(nom, list(self._selected))
+        self._refresh_presets()
+
+    def _delete_preset_dialog(self, store) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+        noms = sorted(store.presets())
+        if not noms:
+            self._preset_combo.setCurrentIndex(0)
+            return
+        nom, ok = QInputDialog.getItem(
+            self, "Supprimer une disposition", "Disposition :", noms, 0, False)
+        if ok and nom:
+            store.delete_preset(nom)
+        self._refresh_presets()
+
+    # -- filtre ----------------------------------------------------------------
+
+    def _make_filter_bar(self) -> QWidget:
+        """Recherche libre + bascules. Tout se fait en mémoire, sans requête."""
+        bar = QWidget()
+        bar.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Rechercher un streamer ou un jeu\u2026")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFont(QFont(_FONT_SEGOE, 10))
+        self._search.setFixedHeight(28)
+        self._search.setStyleSheet(
+            "QLineEdit { background: #141414; color: #e8e8e8; border: 1px solid "
+            "#2a2a2a; border-radius: 6px; padding: 0 8px; }"
+            "QLineEdit:focus { border-color: #00ff87; }"
+        )
+        self._search.textChanged.connect(self._on_query_changed)
+        h.addWidget(self._search, stretch=1)
+
+        self._toggles: dict[str, QPushButton] = {}
+        for key, label in (("online", "En ligne"), ("lan", "LAN"),
+                           ("fav", "Favoris")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setFont(QFont(_FONT_SEGOE, 10))
+            btn.setFixedHeight(28)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet(
+                "QPushButton { background: #141414; color: #9a9a9a; border: 1px "
+                "solid #2a2a2a; border-radius: 6px; padding: 0 12px; }"
+                "QPushButton:hover { color: #cccccc; border-color: #3a3a3a; }"
+                "QPushButton:checked { background: #0f1a14; color: #00ff87; "
+                "border-color: #00ff87; }"
+            )
+            btn.toggled.connect(self._on_toggle_changed)
+            self._toggles[key] = btn
+            h.addWidget(btn)
+
+        self._game_combo = QComboBox()
+        self._game_combo.setFont(QFont(_FONT_SEGOE, 10))
+        self._game_combo.setMinimumHeight(28)
+        self._game_combo.setMinimumWidth(150)
+        self._game_combo.addItem("Tous les jeux", "")
+        self._game_combo.currentIndexChanged.connect(self._on_game_changed)
+        h.addWidget(self._game_combo)
+
+        self._filter_count = QLabel("")
+        self._filter_count.setFont(QFont(_FONT_SEGOE, 10))
+        self._filter_count.setStyleSheet(_SS_GREY_CLEAR)
+        h.addWidget(self._filter_count)
+        return bar
+
+    def _on_query_changed(self, text: str) -> None:
+        self._query = (text or "").strip().casefold()
+        self._rebuild_cards()
+
+    def _on_toggle_changed(self) -> None:
+        self._only_online = self._toggles["online"].isChecked()
+        self._only_lan = self._toggles["lan"].isChecked()
+        self._only_fav = self._toggles["fav"].isChecked()
+        self._rebuild_cards()
+
+    def _on_game_changed(self) -> None:
+        self._game = str(self._game_combo.currentData() or "")
+        self._rebuild_cards()
+
+    def _refresh_game_list(self) -> None:
+        """Réalimente la liste des jeux depuis les streamers en ligne."""
+        jeux = sorted({(s.game or "").strip() for s in self._streamers
+                       if s.online and (s.game or "").strip()},
+                      key=str.casefold)
+        if jeux == [self._game_combo.itemData(i)
+                    for i in range(1, self._game_combo.count())]:
+            return
+        # Le jeu choisi doit survivre au réassemblage de la liste.
+        garder = self._game
+        self._game_combo.blockSignals(True)
+        self._game_combo.clear()
+        self._game_combo.addItem("Tous les jeux", "")
+        for j in jeux:
+            self._game_combo.addItem(j, j)
+        idx = self._game_combo.findData(garder)
+        self._game_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._game_combo.blockSignals(False)
+        self._game = str(self._game_combo.currentData() or "")
+
+    def _matches(self, s: StreamerInfo) -> bool:
+        if self._only_online and not s.online:
+            return False
+        if self._only_lan and (s.location or "").upper() != "LAN":
+            return False
+        if self._only_fav and s.twitch_login.lower() not in favorites.get():
+            return False
+        if self._game and (s.game or "").strip() != self._game:
+            return False
+        if self._query:
+            foin = f"{s.display} {s.twitch_login} {s.game or ''}".casefold()
+            if self._query not in foin:
+                return False
+        return True
+
+    def _filter_active(self) -> bool:
+        return bool(self._query or self._only_online or self._only_lan
+                    or self._only_fav or self._game)
+
     def _rebuild_cards(self) -> None:
-        """Détruit toutes les cartes et les reconstruit selon le tri actuel."""
-        # Supprimer les anciennes cartes de leur conteneur
-        for card in self._card_map.values():
+        """Réagence les cartes selon le tri courant, en réutilisant l'existant.
+
+        La version précédente détruisait les 300 cartes (≈2 900 widgets, ~785 ms
+        mesurées) dès qu'UN SEUL streamer changeait d'état — ce qui arrive
+        quasiment à chaque cycle pendant l'event. On ne recrée désormais que les
+        cartes réellement concernées : celles qui apparaissent, celles qui
+        disparaissent, et celles dont l'état en ligne a basculé.
+        """
+        wanted = {s.twitch_login: s for s in self._streamers if s.twitch_login}
+
+        # Cartes devenues inutiles, ou dont l'état en ligne ne correspond plus :
+        # une carte porte sa couleur, son curseur et son badge selon cet état.
+        stale = [
+            lg for lg, card in self._card_map.items()
+            if lg not in wanted or card._online != wanted[lg].online
+        ]
+        for lg in stale:
+            card = self._card_map.pop(lg)
             card.setParent(None)  # type: ignore[arg-type]
             card.deleteLater()
-        self._card_map.clear()
 
         # Supprimer tout du scroll_vl (ne pas détruire les grilles/headers — réutilisés)
         while self._scroll_vl.count():
@@ -2820,9 +4280,10 @@ class _StreamersTab(QWidget):
 
         sel_set = set(self._selected)
 
-        lan_streamers    = self._sorted_streamers([s for s in self._streamers if s.online and (s.location or "").upper() == "LAN"])
-        online_streamers = self._sorted_streamers([s for s in self._streamers if s.online and (s.location or "").upper() != "LAN"])
-        off_streamers    = self._sorted_streamers([s for s in self._streamers if not s.online])
+        visibles = [s for s in self._streamers if self._matches(s)]
+        lan_streamers    = self._sorted_streamers([s for s in visibles if s.online and (s.location or "").upper() == "LAN"])
+        online_streamers = self._sorted_streamers([s for s in visibles if s.online and (s.location or "").upper() != "LAN"])
+        off_streamers    = self._sorted_streamers([s for s in visibles if not s.online])
 
         def _make_cards(items: list[StreamerInfo]) -> list[_StreamerCard]:
             cards: list[_StreamerCard] = []
@@ -2830,11 +4291,30 @@ class _StreamersTab(QWidget):
                 slot: int | None = None
                 if s.twitch_login in sel_set:
                     slot = self._selected.index(s.twitch_login) + 1
-                card = _StreamerCard(s, slot)
-                card.toggled.connect(self._on_card_toggled)
-                self._card_map[s.twitch_login] = card
+                card = self._card_map.get(s.twitch_login)
+                if card is None:
+                    card = _StreamerCard(s, slot)
+                    card.toggled.connect(self._on_card_toggled)
+                    card.sheet_requested.connect(self.sheet_requested)
+                    self._card_map[s.twitch_login] = card
+                else:
+                    # Réutilisée : seuls le slot et les viewers peuvent avoir
+                    # bougé, et set_slot ne repolit que si la valeur change.
+                    card.set_slot(slot)
+                    card.update_viewers(s.viewers)
                 cards.append(card)
             return cards
+
+        # Un en-tête ou une grille dont la section est vide n'est PAS réinséré
+        # dans le layout — mais takeAt() ne l'a pas déparenté : il continue de
+        # se peindre à sa dernière position, et les titres se superposaient.
+        for section, entete, grille in (
+            (lan_streamers, self._hdr_lan, self._grid_lan),
+            (online_streamers, self._hdr_online, self._grid_online),
+            (off_streamers, self._hdr_off, self._grid_off),
+        ):
+            entete.setVisible(bool(section))
+            grille.setVisible(bool(section))
 
         # Section LAN
         if lan_streamers:
@@ -2862,14 +4342,32 @@ class _StreamersTab(QWidget):
 
         self._scroll_vl.addStretch()
 
-    def _renumber_slots(self) -> None:
-        """Resynchronise les numéros de slot sur toutes les cartes."""
-        sel_set = set(self._selected)
+        # Une carte écartée par le filtre reste enfant de sa grille : sans la
+        # masquer explicitement, elle continuerait de se peindre par-dessus.
+        gardees = {s.twitch_login for s in visibles}
         for login, card in self._card_map.items():
-            if login in sel_set:
-                card.set_slot(self._selected.index(login) + 1)
-            else:
-                card.set_slot(None)
+            card.setVisible(login in gardees)
+
+        total = len(self._streamers)
+        if self._filter_active():
+            self._filter_count.setText(f"{len(visibles)} / {total}")
+        else:
+            self._filter_count.setText("")
+        self._empty_lbl.setVisible(bool(visibles) is False and total > 0)
+
+    def _renumber_slots(self) -> None:
+        """Resynchronise les numéros de slot sur toutes les cartes.
+
+        Seules les cartes dont le slot CHANGE sont retouchées : appeler
+        set_slot() sur les 280 autres leur réappliquait la feuille de style
+        qu'elles avaient déjà, et un setStyleSheet sur une carte repolit tout
+        son sous-arbre (0,32 ms pièce, ~100 ms au total à chaque clic).
+        """
+        slots = {lg: i + 1 for i, lg in enumerate(self._selected)}
+        for login, card in self._card_map.items():
+            new = slots.get(login)
+            if card._slot != new:
+                card.set_slot(new)
 
     def _update_counter(self) -> None:
         n = len(self._selected)
@@ -3005,6 +4503,8 @@ class _StatsTab(QWidget):
         super().__init__(parent)
         self._g5_bars: pg.BarGraphItem | None = None
         self._charts_view: QWebEngineView | None = None
+        self._charts_ready = False
+        self._charts_payload: str | None = None   # derniere serie non encore poussee
         self._build()
 
     def _build(self) -> None:
@@ -3012,11 +4512,35 @@ class _StatsTab(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Row 0 — Chart.js (cagnotte + viewers)
+        # Row 0 — courbes cagnotte + viewers. Hors event elles n'ont aucun point
+        # à tracer : 420 px d'axes vides mangeaient la moitié de la page. On
+        # affiche alors un message compact à la place.
         self._charts_view = QWebEngineView()
         self._charts_view.setFixedHeight(420)
-        self._charts_view.setHtml(self._build_charts_html([], [], [], []))
+        self._charts_view.loadFinished.connect(self._on_charts_loaded)
+        # Fichier ecrit une fois : setHtml() prive la page d'une URL de base, ce
+        # qui compliquerait tout ajout de ressource locale par la suite.
+        shell = _CHARTJS_PATH.parent / "stats_chart.html"
+        try:
+            shell.write_text(self._build_charts_html(), encoding="utf-8")
+            self._charts_view.setUrl(QUrl.fromLocalFile(str(shell)))
+        except OSError as exc:
+            logger.warning("Page des graphiques non ecrite — %s", exc)
         root.addWidget(self._charts_view, stretch=2)
+
+        self._charts_empty = QLabel(
+            "Les courbes de cagnotte et de viewers apparaîtront\n"
+            "dès les premières données de l'édition."
+        )
+        self._charts_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._charts_empty.setFont(QFont(_FONT_SEGOE, 12))
+        self._charts_empty.setFixedHeight(80)
+        self._charts_empty.setStyleSheet(
+            "color: #555555; background-color: #0f0f0f; border: 1px solid #1a1a1a; "
+            "border-radius: 6px;"
+        )
+        root.addWidget(self._charts_empty)
+        self._charts_view.setVisible(False)
 
         # Row 1 — LAN/Online + Top viewers (fixed height)
         middle = QWidget()
@@ -3041,21 +4565,15 @@ class _StatsTab(QWidget):
 
     # -- chart HTML builder ---------------------------------------------------
 
-    def _build_charts_html(
-        self,
-        ts_don: list[float],
-        val_don: list[float],
-        ts_view: list[float],
-        val_view: list[float],
-    ) -> str:
-        def fmt(ts: float) -> str:
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
-            return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
+    def _build_charts_html(self) -> str:
+        """Page squelette : Chart.js et deux graphes VIDES, construite une fois.
 
-        labels_don = json.dumps([fmt(ts) for ts in ts_don])
-        data_don = json.dumps([round(v) for v in val_don])
-        labels_view = json.dumps([fmt(ts) for ts in ts_view])
-        data_view = json.dumps([round(v) for v in val_view])
+        Les 205 Ko de Chart.js etaient relus sur le disque, reinjectes dans un
+        nouveau document et reinterpretes a CHAQUE rafraichissement, toutes les
+        30 s pendant l'event, page entierement rechargee. Les donnees passent
+        desormais par zlUpdate(), qui ne transporte que les points.
+        """
+        labels_don = data_don = labels_view = data_view = "[]"
 
         # Pas de repli sur le CDN distant : seul le fichier local, dont
         # l'empreinte a été vérifiée au démarrage, est inliné.
@@ -3112,7 +4630,7 @@ const BASE = {{
   }},
 }};
 
-new Chart(document.getElementById('cagnotteChart'), {{
+const chartDon = new Chart(document.getElementById('cagnotteChart'), {{
   type: 'line',
   data: {{
     labels: {labels_don},
@@ -3132,7 +4650,7 @@ new Chart(document.getElementById('cagnotteChart'), {{
   }},
 }});
 
-new Chart(document.getElementById('viewersChart'), {{
+const chartView = new Chart(document.getElementById('viewersChart'), {{
   type: 'line',
   data: {{
     labels: {labels_view},
@@ -3151,6 +4669,19 @@ new Chart(document.getElementById('viewersChart'), {{
     }} }},
   }},
 }});
+
+// Point d'entree unique cote Python : remplace les series en place, sans
+// reconstruire les graphes ni recharger la page. 'none' supprime l'animation,
+// qui n'a aucun sens pour un rafraichissement periodique.
+window.zlUpdate = function (payload) {{
+  var d = JSON.parse(payload);
+  chartDon.data.labels = d.ld;
+  chartDon.data.datasets[0].data = d.vd;
+  chartView.data.labels = d.lv;
+  chartView.data.datasets[0].data = d.vv;
+  chartDon.update('none');
+  chartView.update('none');
+}};
 </script>
 </body></html>"""
 
@@ -3162,7 +4693,7 @@ new Chart(document.getElementById('viewersChart'), {{
         vl.setContentsMargins(8, 8, 8, 8)
         vl.setSpacing(6)
 
-        hdr = QLabel("CLASSEMENT CAGNOTTES")
+        hdr = QLabel("CLASSEMENT CAGNOTTES · TOP 20")
         hdr.setFont(_bold_font(_FONT_SEGOE, 10))
         hdr.setStyleSheet("color: #00ff87; letter-spacing: 2px;")
         vl.addWidget(hdr)
@@ -3171,9 +4702,19 @@ new Chart(document.getElementById('viewersChart'), {{
         self._ranking_table.setHorizontalHeaderLabels(["#", "Streamer", "Cagnotte", "Viewers"])
         hh = self._ranking_table.horizontalHeader()
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._ranking_table.setColumnWidth(0, 30)
-        self._ranking_table.setColumnWidth(2, 110)
-        self._ranking_table.setColumnWidth(3, 60)
+        # Les en-têtes étaient centrés alors que les valeurs sont alignées à
+        # gauche : « Streamer » flottait au milieu d'une colonne vide, loin des
+        # noms. On aligne chaque en-tête sur son contenu.
+        hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        for col in (2, 3):
+            item = self._ranking_table.horizontalHeaderItem(col)
+            if item is not None:
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+        self._ranking_table.setColumnWidth(0, 34)
+        self._ranking_table.setColumnWidth(2, 120)
+        self._ranking_table.setColumnWidth(3, 80)
         self._ranking_table.verticalHeader().setVisible(False)
         self._ranking_table.setShowGrid(False)
         self._ranking_table.setAlternatingRowColors(True)
@@ -3231,32 +4772,85 @@ new Chart(document.getElementById('viewersChart'), {{
         """Met à jour les graphes Chart.js cagnotte et viewers."""
         ts_d, vals_d = history.get_donation_series()
         ts_v, vals_v = history.get_viewers_series()
+        has_data = bool(ts_d or ts_v)
+        self._charts_empty.setVisible(not has_data)
         if self._charts_view is not None:
-            html = self._build_charts_html(ts_d, vals_d, ts_v, list(vals_v))
-            tmp = _CHARTJS_PATH.parent / "stats_chart.html"
-            tmp.write_text(html, encoding="utf-8")
-            self._charts_view.setUrl(QUrl.fromLocalFile(str(tmp)))
+            self._charts_view.setVisible(has_data)
+        if not has_data:
+            return
+        if self._charts_view is not None:
+            def _fmt(ts: float) -> str:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
+                return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
+
+            self._charts_payload = json.dumps({
+                "ld": [_fmt(t) for t in ts_d],
+                "vd": [round(v) for v in vals_d],
+                "lv": [_fmt(t) for t in ts_v],
+                "vv": [round(v) for v in vals_v],
+            })
+            self._push_charts()
+
+    def _on_charts_loaded(self, ok: bool) -> None:
+        """La page est prete : pousser la serie arrivee avant elle, s'il y en a."""
+        self._charts_ready = bool(ok)
+        if not ok:
+            logger.warning("Page des graphiques non chargee")
+            return
+        self._push_charts()
+
+    def _push_charts(self) -> None:
+        """Envoie la derniere serie a la page, si celle-ci est prete.
+
+        Les donnees peuvent arriver avant la fin du chargement : on les garde
+        alors en attente plutot que de les perdre dans un runJavaScript sans
+        effet.
+        """
+        if not self._charts_ready or self._charts_payload is None:
+            return
+        view = self._charts_view
+        if view is None:
+            return
+        # La serie est CONSERVEE : si la page est rechargee un jour, ses graphes
+        # repartent vides et loadFinished doit pouvoir la repousser telle quelle.
+        view.page().runJavaScript(
+            f"window.zlUpdate({json.dumps(self._charts_payload)})"
+        )
 
     def update_streamers(self, streamers: list[StreamerInfo]) -> None:
         """Rafraîchit LAN/Online, ranking et top viewers."""
         # LAN vs Online
         self._lan_online.update_data(streamers)
 
-        # Ranking (top 20 par donation)
-        sorted_s = sorted(streamers, key=lambda x: -x.donation)[:20]
+        # Classement : avant l'event toutes les cagnottes valent 0, et le tri
+        # rendait alors l'ordre alphabétique de l'API — illisible. On retombe
+        # sur les viewers, qui eux discriminent.
+        sorted_s = sorted(streamers, key=lambda x: (-x.donation, -x.viewers))[:20]
         self._ranking_table.setRowCount(len(sorted_s))
         for i, s in enumerate(sorted_s):
             rank_item = QTableWidgetItem(str(i + 1))
             rank_item.setForeground(QBrush(QColor("#00ff87")))
             self._ranking_table.setItem(i, 0, rank_item)
-            self._ranking_table.setItem(i, 1, QTableWidgetItem(s.display))
+            name_item = QTableWidgetItem(s.display)
+            if favorites.is_favorite(s.twitch_login):
+                # Marqué et coloré : on doit repérer ses favoris d'un coup d'œil
+                # dans une liste de vingt lignes.
+                name_item.setText(f"★  {s.display}")
+                name_item.setForeground(QBrush(QColor("#f5c518")))
+            self._ranking_table.setItem(i, 1, name_item)
             amt_item = QTableWidgetItem(s.donation_formatted)
             amt_item.setForeground(QBrush(QColor("#00ff87")))
+            amt_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
             self._ranking_table.setItem(i, 2, amt_item)
             v_item = QTableWidgetItem(
                 f"{s.viewers / 1000:.1f}k" if s.viewers > 999 else str(s.viewers)
             )
             v_item.setForeground(QBrush(QColor("#00ff87" if s.online else "#555555")))
+            v_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
             self._ranking_table.setItem(i, 3, v_item)
 
         # Top 10 viewers — barres horizontales
@@ -3277,6 +4871,12 @@ new Chart(document.getElementById('viewersChart'), {{
         ax = self._g5_plot.getAxis("left")
         ax.setTicks([list(zip(y, names))])
         ax.setStyle(tickFont=QFont(_FONT_MONO, 8))
+        # pyqtgraph ne recalcule pas la largeur de l'axe après setTicks : elle
+        # restait à 35 px, trop étroite pour la plupart des pseudos, et les
+        # libellés étaient donc silencieusement abandonnés. On la dimensionne
+        # sur le plus long nom réellement affiché.
+        fm = QFontMetrics(QFont(_FONT_MONO, 8))
+        ax.setWidth(max(40, min(120, max(fm.horizontalAdvance(n) for n in names) + 12)))
         max_v = max(x) if x else 1
         self._g5_plot.setXRange(0, max_v * 1.1)
         self._g5_plot.setYRange(-0.5, len(top10) - 0.5)
@@ -3333,6 +4933,174 @@ class _TabButton(QPushButton):
 # _SplashOverlay — écran de chargement au démarrage
 # ---------------------------------------------------------------------------
 
+class _CommandPalette(QWidget):
+    """Recherche instantanée au clavier (Ctrl+K).
+
+    Avec près de 300 participants, atteindre un streamer précis imposait
+    d'ouvrir l'onglet Streamers et de faire défiler. Ici on tape trois lettres
+    et on ouvre le flux, l'ajoute à la grille ou saute à un onglet.
+    """
+
+    stream_requested = pyqtSignal(str)   # twitch_login
+    grid_requested   = pyqtSignal(str)   # twitch_login
+    tab_requested    = pyqtSignal(str)   # nom d'onglet
+    action_requested = pyqtSignal(str)   # identifiant d'action
+
+    #: Actions atteignables au clavier. Les mêmes gestes que les raccourcis du
+    #: plein écran, pour qui préfère les chercher par leur nom.
+    _ACTIONS = [
+        ("clip",   "Garder le moment en cours"),
+        ("replay", "Revoir les dernières secondes"),
+        ("recap",  "Récapitulatif de session"),
+    ]
+
+    _MAX_RESULTS = 9
+
+    def __init__(self, parent: QWidget, tab_names: list[str]) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 190);")
+        self._streamers: list[StreamerInfo] = []
+        self._tab_names = tab_names
+        self._results: list[tuple[str, str, str]] = []   # (type, clé, libellé)
+        self._build()
+        self.hide()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 120, 0, 0)
+        root.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        box = QFrame()
+        box.setFixedWidth(620)
+        box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
+        box.setStyleSheet(
+            "QFrame { background-color: #141414; border: 1px solid #2a2a2a; "
+            "border-radius: 8px; }"
+        )
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(10, 10, 10, 10)
+        bl.setSpacing(6)
+
+        self._input = QLineEdit()
+        self._input.setFont(QFont(_FONT_SEGOE, 14))
+        self._input.setPlaceholderText("Rechercher un streamer, un onglet…")
+        self._input.setStyleSheet(
+            "QLineEdit { background: #0d0d0d; color: #ffffff; border: none; "
+            "border-radius: 5px; padding: 8px 10px; }"
+        )
+        self._input.textChanged.connect(self._refilter)
+        self._input.installEventFilter(self)
+        bl.addWidget(self._input)
+
+        self._list = QListWidget()
+        self._list.setFont(QFont(_FONT_SEGOE, 12))
+        # Hauteur ajustée au contenu : sans cela la boîte s'étirait jusqu'en bas
+        # de la fenêtre, quel que soit le nombre de résultats.
+        self._list.setFixedHeight(self._MAX_RESULTS * 30)
+        self._list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; color: #cccccc; }"
+            "QListWidget::item { padding: 6px 8px; border-radius: 4px; }"
+            "QListWidget::item:selected { background: #0d1f16; color: #00ff87; }"
+        )
+        self._list.itemActivated.connect(lambda _i: self._activate())
+        bl.addWidget(self._list)
+
+        hint = QLabel("↑↓ naviguer · Entrée ouvrir · Ctrl+Entrée ajouter à la grille · Échap fermer")
+        hint.setFont(QFont(_FONT_SEGOE, 9))
+        hint.setStyleSheet("color: #555555; background: transparent; border: none;")
+        bl.addWidget(hint)
+
+        root.addWidget(box)
+
+    # -- données ---------------------------------------------------------------
+
+    def set_streamers(self, streamers: list[StreamerInfo]) -> None:
+        self._streamers = streamers
+
+    # -- ouverture / fermeture -------------------------------------------------
+
+    def open(self) -> None:
+        self.resize(self.parentWidget().size())
+        self._input.clear()
+        self._refilter("")
+        self.show()
+        self.raise_()
+        self._input.setFocus()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is self._input and event.type() == event.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                self.hide()
+                return True
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                row = self._list.currentRow()
+                row += 1 if key == Qt.Key.Key_Down else -1
+                self._list.setCurrentRow(max(0, min(self._list.count() - 1, row)))
+                return True
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                to_grid = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                self._activate(to_grid)
+                return True
+        return super().eventFilter(obj, event)
+
+    # -- filtrage --------------------------------------------------------------
+
+    def _refilter(self, text: str) -> None:
+        q = text.strip().lower()
+        self._results = []
+        # Les onglets ne remontent que sur une recherche explicite : à vide, la
+        # liste doit proposer ce qu'on cherche neuf fois sur dix, des streamers.
+        if q:
+            for name in self._tab_names:
+                if q in name.lower():
+                    self._results.append(("tab", name, f"Onglet · {name}"))
+            for cle, libelle in self._ACTIONS:
+                if q in libelle.lower() or q in cle:
+                    self._results.append(("action", cle, f"Action · {libelle}"))
+        # Favoris d'abord, puis les live, puis les plus suivis.
+        favs = favorites.get()
+        ordered = sorted(
+            self._streamers,
+            key=lambda x: (x.twitch_login.lower() not in favs, not x.online, -x.viewers),
+        )
+        for s in ordered:
+            if len(self._results) >= self._MAX_RESULTS:
+                break
+            hay = f"{s.twitch_login} {s.display}".lower()
+            if q and q not in hay:
+                continue
+            state = f"{s.viewers:,}".replace(",", "\u202f") + " viewers" if s.online else "hors ligne"
+            game = f" · {s.game}" if s.game else ""
+            star = "★ " if s.twitch_login.lower() in favs else ""
+            self._results.append(
+                ("streamer", s.twitch_login, f"{star}{s.display}{game} — {state}")
+            )
+        self._results = self._results[:self._MAX_RESULTS]
+
+        self._list.clear()
+        for _kind, _key, label in self._results:
+            self._list.addItem(label)
+        if self._results:
+            self._list.setCurrentRow(0)
+
+    def _activate(self, to_grid: bool = False) -> None:
+        row = self._list.currentRow()
+        if not (0 <= row < len(self._results)):
+            return
+        kind, key, _label = self._results[row]
+        self.hide()
+        if kind == "tab":
+            self.tab_requested.emit(key)
+        elif kind == "action":
+            self.action_requested.emit(key)
+        elif to_grid:
+            self.grid_requested.emit(key)
+        else:
+            self.stream_requested.emit(key)
+
+
 class _SplashOverlay(QWidget):
     """Overlay plein-fenêtre affiché jusqu'au premier fetch API réussi."""
 
@@ -3371,7 +5139,8 @@ class _SplashOverlay(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(420)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        # Démarré par showEvent : inutile de tourner tant que le
+        # widget n'est pas affiché.
 
         self._anim: QPropertyAnimation | None = None
 
@@ -3400,12 +5169,68 @@ class _SplashOverlay(QWidget):
 # PanelWindow
 # ---------------------------------------------------------------------------
 
+class _VersionLabel(QLabel):
+    """Étiquette de version : cliquer ouvre la page des releases."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class _HeaderBar(QWidget):
+    """En-tête dont un enfant reste centré sur la LARGEUR de la fenêtre.
+
+    Deux ressorts de part et d'autre dans la rangée ne suffisent pas : ils
+    centrent entre le logo et le groupe de droite, qui n'ont pas la même
+    largeur, et le titre apparaît décalé d'une soixantaine de pixels.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._centered: QWidget | None = None
+
+    def set_centered(self, w: QWidget) -> None:
+        self._centered = w
+        w.setParent(self)
+        w.raise_()
+        self._recenter()
+
+    def _recenter(self) -> None:
+        w = self._centered
+        if w is None:
+            return
+        w.adjustSize()
+        w.move((self.width() - w.width()) // 2,
+               (self.height() - w.height()) // 2)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._recenter()
+
+
 class PanelWindow(QMainWindow):
     """Fenêtre panel fullscreen. show_grid_tab=True en mode dual."""
 
     stream_selected = pyqtSignal(str)
     grid_selection_changed = pyqtSignal(list)  # list[str] twitch_logins
     settings_changed = pyqtSignal(dict)
+    #: (login du présentateur, nom du show) — relayé depuis l'onglet Accueil.
+    show_started = pyqtSignal(str, str)
+    #: Action demandée depuis la palette et destinée au plein écran.
+    action_requested = pyqtSignal(str)
+    #: (login, volume 0-100) — réglage venu de la console de mixage.
+    cell_volume_changed = pyqtSignal(str, int)
+    #: Volume du plein écran, réglé depuis la console.
+    main_volume_changed = pyqtSignal(int)
+    #: Chaîne à retirer des audios épinglés, demandé depuis la console.
+    unpin_requested = pyqtSignal(str)
+    #: (login, coupé) — coupure d'une chaîne depuis la console.
+    cell_mute_changed = pyqtSignal(str, bool)
+    #: Coupure du plein écran depuis la console.
+    main_mute_changed = pyqtSignal(bool)
 
     def __init__(
         self,
@@ -3426,6 +5251,8 @@ class PanelWindow(QMainWindow):
 
         # Cache local pour les données les plus récentes
         self._last_streamers: list[StreamerInfo] = []
+        # Objectifs bruts par login, pour la fiche d'un participant.
+        self._goals_raw: dict[str, list] = {}
         self._last_stats: GlobalStats = GlobalStats(0.0, "—", 0, "offline")
 
         # Références aux onglets dynamiques
@@ -3435,17 +5262,85 @@ class PanelWindow(QMainWindow):
         self._goals_tab: _GoalsTab
         self._streamers_tab: _StreamersTab
 
-        # Badge hors-event (dans le header)
-        self._offline_badge: QLabel
-
+        self._accueil_refresh_pending: bool = False
         self._splash: _SplashOverlay | None = None
         self._first_data_received: bool = False
 
         self._build()
+
+        # Palette de commandes (Ctrl+K) — superposée au widget central.
+        names = ["Accueil", "Programme", "Stats", "Goals", "Streamers", "Mixer"]
+        if self._show_grid_tab:
+            names.append("Grille")
+        self._palette = _CommandPalette(self.centralWidget(), names)
+        self._palette.tab_requested.connect(self.switch_to_tab)
+        self._palette.action_requested.connect(self._on_palette_action)
+        self._palette.stream_requested.connect(self.stream_selected.emit)
+        self._palette.grid_requested.connect(self._on_add_to_grid)
+
         if show_on_init:
             self._move_to_screen(screen)
             self._splash = _SplashOverlay(self)
             self._splash.show()
+
+    def _on_palette_action(self, cle: str) -> None:
+        """Exécute une action choisie dans la palette."""
+        if cle == "recap":
+            self._open_recap()
+        else:
+            # clip / replay concernent le plein écran, que le panel ne connaît
+            # pas : la demande remonte à main.py, qui relie les deux fenêtres.
+            self.action_requested.emit(cle)
+
+    def _open_recap(self) -> None:
+        """Ouvre le récapitulatif de la session en cours."""
+        from windows.recap import RecapDialog
+        RecapDialog(self).exec()
+
+    # ── Badge de version ─────────────────────────────────────────────
+    def _apply_version_badge(self) -> None:
+        """Peint le badge selon qu'une mise à jour attend ou non."""
+        maj = getattr(self, "_update_version", "")
+        if maj:
+            self._version_lbl.setText(f"{_display_version()} → {maj}")
+            self._version_lbl.setStyleSheet(
+                "#versionBadge { color: #00ff87; background: #0d1f16;"
+                " border: 1px solid #16452f; border-radius: 7px;"
+                " padding: 1px 6px; }")
+            self._version_lbl.setToolTip(_infobulle(
+                f"ZLink {maj} est disponible — vous utilisez "
+                f"{_display_version()}.\nCliquer pour ouvrir la page de la "
+                f"version."))
+        else:
+            self._version_lbl.setText(_display_version())
+            self._version_lbl.setStyleSheet(
+                "#versionBadge { color: #888888; background: transparent;"
+                " border: 1px solid #262626; border-radius: 7px;"
+                " padding: 1px 6px; }")
+            self._version_lbl.setToolTip(_infobulle(
+                f"Version installée : {_display_version()}\n"
+                f"Cliquer pour ouvrir les versions publiées."))
+        self._version_lbl.adjustSize()
+
+    def _open_version_page(self) -> None:
+        QDesktopServices.openUrl(QUrl(self._version_url))
+
+    def set_update_available(self, version: str, url: str) -> None:
+        """Signale dans l'en-tête qu'une version plus récente existe."""
+        self._update_version = version
+        if url.startswith("https://github.com/"):
+            self._version_url = url
+        self._apply_version_badge()
+
+    def _tick_clock(self) -> None:
+        """Rafraîchit l'horloge de l'en-tête."""
+        now = datetime.now()
+        txt = now.strftime("%H:%M")
+        if self._clock_lbl.text() != txt:
+            self._clock_lbl.setText(txt)
+        day = f"{_JOURS_FR[now.weekday()][:3].capitalize()} {now.day}"
+        if self._clock_date.text() != day:
+            self._clock_date.setText(day)
 
     def _build(self) -> None:
         central = QWidget()
@@ -3455,7 +5350,7 @@ class PanelWindow(QMainWindow):
         root.setSpacing(0)
 
         # ── Header 60 px ─────────────────────────────────────────────
-        header = QWidget()
+        header = _HeaderBar()
         header.setObjectName("header")
         header.setFixedHeight(60)
         hl = QHBoxLayout(header)
@@ -3467,81 +5362,70 @@ class PanelWindow(QMainWindow):
         logo.setStyleSheet(_SS_GREEN)
         hl.addWidget(logo)
 
-        # Badge hors-event (masqué par défaut)
-        self._offline_badge = QLabel("HORS EVENT")
-        self._offline_badge.setFont(_bold_font(_FONT_SEGOE, 10))
-        self._offline_badge.setStyleSheet(
-            "color: #ff8800; background-color: #2a1800; "
-            "border: 1px solid #ff8800; border-radius: 4px; "
-            "padding: 2px 8px;"
-        )
-        self._offline_badge.setVisible(False)
-        hl.addWidget(self._offline_badge)
+        # Version collée au logo : en régie on ouvre un ticket ou on envoie une
+        # capture sans avoir le temps de fouiller les paramètres.
+        self._version_lbl = _VersionLabel(_display_version())
+        self._version_lbl.setObjectName("versionBadge")
+        self._version_lbl.setFont(QFont(_FONT_MONO, 8))
+        self._version_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._version_url = (
+            f"https://github.com/{_GH_OWNER}/{_GH_REPO}/releases")
+        self._version_lbl.clicked.connect(self._open_version_page)
+        self._apply_version_badge()
+        hl.addWidget(self._version_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
 
         hl.addStretch()
 
+        # Hors de la rangée : posé par-dessus et centré sur la fenêtre.
         ev = QLabel("ZEvent 2026")
         ev.setFont(QFont(_FONT_SEGOE, 13))
-        ev.setStyleSheet(_SS_MUTED)
-        hl.addWidget(ev)
+        ev.setStyleSheet(_SS_MUTED + " background: transparent;")
+        header.set_centered(ev)
 
-        _btn_ss_normal = (
-            "QPushButton { background: transparent; color: #666666; "
-            "border: none; border-radius: 4px; }"
-            "QPushButton:hover { color: #ffffff; background: #1a1a1a; }"
-        )
-        _btn_ss_quit = (
-            "QPushButton { background: transparent; color: #666666; "
-            "border: none; border-radius: 4px; }"
-            "QPushButton:hover { color: #ff4444; background: #2a1a1a; }"
-        )
-        _btn_ss_bigscreen = (
-            "QPushButton { background: transparent; color: #666666; "
-            "border: none; border-radius: 4px; }"
-            "QPushButton:hover { color: #ffffff; background: #1a1a1a; }"
-            "QPushButton:checked { color: #00ff87; }"
-        )
+        # Horloge : en régie, l'écran du panel occupe souvent tout le moniteur
+        # et masque celle du système. Le programme se lit à l'heure près.
+        hl.addSpacing(10)
+        self._clock_lbl = QLabel()
+        self._clock_lbl.setFont(_bold_font(_FONT_MONO, 15))
+        self._clock_lbl.setStyleSheet(
+            "color: #e8e8e8; background: transparent; border: none;")
+        self._clock_lbl.setToolTip("Heure locale")
+        hl.addWidget(self._clock_lbl)
+        self._clock_date = QLabel()
+        self._clock_date.setFont(QFont(_FONT_SEGOE, 9))
+        self._clock_date.setStyleSheet(_SS_MUTED)
+        hl.addWidget(self._clock_date)
+        self._tick_clock()
+        self._clock_timer = QTimer(self)
+        # Une seconde par battement pour rester juste au changement de minute,
+        # sans repeindre autre chose que deux étiquettes.
+        self._clock_timer.setInterval(1000)
+        self._clock_timer.timeout.connect(self._tick_clock)
+        self._clock_timer.start()
 
-        settings_btn = QPushButton()
-        settings_btn.setFixedSize(32, 32)
-        settings_btn.setToolTip("Paramètres")
-        settings_btn.setCheckable(True)
-        if _QTA_OK:
-            settings_btn.setIcon(qta.icon("mdi6.cog-outline", color="#666666"))
-            settings_btn.setIconSize(settings_btn.size())
-        else:
-            settings_btn.setText("⚙")
-            settings_btn.setStyleSheet(_btn_ss_normal + " QPushButton { font-size: 16px; }")
-        settings_btn.setStyleSheet(_btn_ss_bigscreen)
-        settings_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        hl.addSpacing(4)
+
+        settings_btn = _mk_header_btn(
+            "mdi6.cog-outline", "\u2699", "Paramètres", checkable=True
+        )
         settings_btn.clicked.connect(self._toggle_settings)
         self._settings_btn = settings_btn
         hl.addWidget(settings_btn)
 
-        bigscreen_btn = QPushButton()
-        bigscreen_btn.setFixedSize(32, 32)
-        bigscreen_btn.setToolTip("Mode Big Screen")
-        bigscreen_btn.setCheckable(True)
-        if _QTA_OK:
-            bigscreen_btn.setIcon(qta.icon("mdi6.fullscreen", color="#666666"))
-            bigscreen_btn.setIconSize(bigscreen_btn.size())
-        else:
-            bigscreen_btn.setText("⧆")
-        bigscreen_btn.setStyleSheet(_btn_ss_bigscreen)
-        bigscreen_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        recap_btn = _mk_header_btn(
+            "mdi6.text-box-outline", "\u2261", "Récapitulatif de session"
+        )
+        recap_btn.clicked.connect(self._open_recap)
+        hl.addWidget(recap_btn)
+
+        bigscreen_btn = _mk_header_btn(
+            "mdi6.fullscreen", "\u29c6", "Mode Big Screen", checkable=True
+        )
         bigscreen_btn.clicked.connect(self._toggle_bigscreen)
         self._bigscreen_btn = bigscreen_btn
         hl.addWidget(bigscreen_btn)
 
-        quit_btn = QPushButton()
-        quit_btn.setFixedSize(32, 32)
-        if _QTA_OK:
-            quit_btn.setIcon(qta.icon("mdi6.close", color="#666666"))
-            quit_btn.setIconSize(quit_btn.size())
-        else:
-            quit_btn.setText("✕")
-        quit_btn.setStyleSheet(_btn_ss_quit)
-        quit_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        quit_btn = _mk_header_btn("mdi6.close", "\u2715", "Quitter", danger=True)
         quit_btn.clicked.connect(QApplication.quit)
         hl.addWidget(quit_btn)
 
@@ -3556,7 +5440,7 @@ class PanelWindow(QMainWindow):
         bl.setContentsMargins(16, 0, 16, 0)
         bl.setSpacing(0)
 
-        names = ["Accueil", "Programme", "Stats", "Goals", "Streamers"]
+        names = ["Accueil", "Programme", "Stats", "Goals", "Streamers", "Mixer"]
         if self._show_grid_tab:
             names.append("Grille")
         for n in names:
@@ -3573,10 +5457,17 @@ class PanelWindow(QMainWindow):
 
         self._accueil_tab = _AccueilTab()
         self._accueil_tab.stream_selected.connect(self.stream_selected)
+        self._accueil_tab.show_started.connect(self.show_started)
         self._accueil_tab.add_to_grid.connect(self._on_add_to_grid)
         self._stack.addWidget(self._accueil_tab)
 
         self._programme_tab = _ProgrammeTab()
+        # Le toast de rappel disparaît en quelques secondes : on archive aussi
+        # l'entrée dans le fil, consultable après coup. Le signal existait mais
+        # n'était connecté nulle part.
+        self._programme_tab.reminder_triggered.connect(
+            lambda _name, msg: self.add_feed_event("event", "", msg)
+        )
         self._stack.addWidget(self._programme_tab)
 
         self._stats_tab = _StatsTab()
@@ -3587,7 +5478,16 @@ class PanelWindow(QMainWindow):
 
         self._streamers_tab = _StreamersTab()
         self._streamers_tab.grid_selection_changed.connect(self.grid_selection_changed)
+        self._streamers_tab.sheet_requested.connect(self.open_streamer_sheet)
         self._stack.addWidget(self._streamers_tab)
+
+        self._mixer_tab = _MixerTab()
+        self._mixer_tab.volume_changed.connect(self.cell_volume_changed)
+        self._mixer_tab.main_volume_changed.connect(self.main_volume_changed)
+        self._mixer_tab.unpin_requested.connect(self.unpin_requested)
+        self._mixer_tab.mute_changed.connect(self.cell_mute_changed)
+        self._mixer_tab.main_mute_changed.connect(self.main_mute_changed)
+        self._stack.addWidget(self._mixer_tab)
 
         if self._show_grid_tab:
             # Placeholder vide — le clic sur cet onglet déclenche le switch vers GridWindow
@@ -3626,6 +5526,9 @@ class PanelWindow(QMainWindow):
         super().resizeEvent(event)
         if self._splash is not None and self._splash.isVisible():
             self._splash.resize(self.size())
+        pal = getattr(self, "_palette", None)
+        if pal is not None and pal.isVisible():
+            pal.resize(pal.parentWidget().size())
 
     def update_streamers(
         self,
@@ -3633,24 +5536,33 @@ class PanelWindow(QMainWindow):
         selected_logins: list[str] | None = None,
     ) -> None:
         """Propagé depuis DataManager.streamers_updated."""
+        self._mixer_tab.set_displays(
+            {s.twitch_login: s.display for s in streamers if s.twitch_login})
+        # Historique par streamer : l'API ne publie qu'un cumul instantané, la
+        # courbe de la fiche se construit donc au fil de la session.
+        from windows.streamer_sheet import note_donation
+        for st in streamers:
+            if st.twitch_login and st.donation:
+                note_donation(st.twitch_login, st.donation)
         if not self._first_data_received:
             self._first_data_received = True
             if self._splash is not None:
                 self._splash.dismiss()
         self._last_streamers = streamers
-        self._accueil_tab.refresh(streamers, self._last_stats)
+        self._schedule_accueil_refresh()
         self._goals_tab.set_streamers(streamers)
         self._streamers_tab.refresh(streamers, selected_logins or [])
         self._stats_tab.update_streamers(streamers)
         gdoc_display = {s.gdoc_id: s.display for s in streamers if s.gdoc_id}
-        self._programme_tab.set_gdoc_map(gdoc_display)
+        gdoc_login = {s.gdoc_id: s.twitch_login for s in streamers if s.gdoc_id}
+        self._programme_tab.set_gdoc_map(gdoc_display, gdoc_login)
         self._bigscreen.update_streamers(streamers)
+        self._palette.set_streamers(streamers)
 
     def update_stats(self, stats: GlobalStats) -> None:
         """Propagé depuis DataManager.global_stats_updated."""
         self._last_stats = stats
-        self._accueil_tab.refresh(self._last_streamers, stats)
-        self._offline_badge.setVisible(stats.website_mode != "live")
+        self._schedule_accueil_refresh()
         self._bigscreen.update_stats(stats)
 
     def update_data(
@@ -3665,10 +5577,10 @@ class PanelWindow(QMainWindow):
         self._accueil_tab.refresh(streamers, stats)
         self._goals_tab.set_streamers(streamers)
         self._streamers_tab.refresh(streamers, selected_logins or [])
-        self._offline_badge.setVisible(stats.website_mode != "live")
         self._stats_tab.update_streamers(streamers)
         gdoc_display = {s.gdoc_id: s.display for s in streamers if s.gdoc_id}
-        self._programme_tab.set_gdoc_map(gdoc_display)
+        gdoc_login = {s.gdoc_id: s.twitch_login for s in streamers if s.gdoc_id}
+        self._programme_tab.set_gdoc_map(gdoc_display, gdoc_login)
 
     def update_events(self, events: list[EventItem]) -> None:
         """Propagé depuis DataManager.events_updated."""
@@ -3685,8 +5597,53 @@ class PanelWindow(QMainWindow):
         self._accueil_tab.update_goals(goals)
         self._bigscreen.update_goals(goals)
 
+    def _schedule_accueil_refresh(self) -> None:
+        """Fusionne les rafraîchissements de l'Accueil sur un même tour de boucle.
+
+        DataManager émet streamers_updated puis global_stats_updated coup sur
+        coup : l'Accueil se reconstruisait deux fois par cycle.
+        """
+        if self._accueil_refresh_pending:
+            return
+        self._accueil_refresh_pending = True
+        QTimer.singleShot(0, self._do_accueil_refresh)
+
+    def _do_accueil_refresh(self) -> None:
+        self._accueil_refresh_pending = False
+        self._accueil_tab.refresh(self._last_streamers, self._last_stats)
+
+    def open_streamer_sheet(self, login: str) -> None:
+        """Ouvre la fiche d'un participant : tout ce qu'on sait de lui."""
+        from windows.streamer_sheet import StreamerSheet
+        st = next((x for x in self._last_streamers or []
+                   if x.twitch_login == login), None)
+        if st is None:
+            return
+        goals = list(self._goals_raw.get(login, []))
+        events = [ev for ev in (self._accueil_tab._events or [])
+                  if login in (ev.host_uuids or [])
+                  or login in (ev.participant_uuids or [])]
+        fiche = StreamerSheet(st, goals, events, self)
+        fiche.stream_requested.connect(self.stream_selected)
+        fiche.grid_requested.connect(self._on_add_to_grid)
+        fiche.exec()
+
+    def set_pinned_audio(self, logins: list) -> None:
+        """Chaînes épinglées : elles rejoignent la console de mixage."""
+        self._mixer_tab.set_pinned([str(lg) for lg in logins])
+
+    def set_main_stream(self, login: str) -> None:
+        """Flux affiché en plein écran : première tranche de la console."""
+        self._mixer_tab.set_main_stream(login)
+
+    def add_feed_event(self, kind: str, login: str, text: str) -> None:
+        """Ajoute une entrée au fil d'événements de l'Accueil."""
+        self._accueil_tab.add_feed_event(kind, login, text)
+
     def update_goals_cache(self, cache: dict) -> None:
         """Propagé depuis DataManager.goals_raw_updated — seed le cache local du tab goals."""
+        # Conservés aussi pour la fiche d'un participant, qui les affiche.
+        self._goals_raw = dict(cache or {})
         self._goals_tab.seed_cache(cache)
 
     # -- bigscreen ------------------------------------------------------------
@@ -3781,7 +5738,14 @@ class PanelWindow(QMainWindow):
         self.settings_changed.emit(config)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if (event.key() == Qt.Key.Key_K
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._palette.open()
+            return
         if event.key() == Qt.Key.Key_Escape:
+            if self._palette.isVisible():
+                self._palette.hide()
+                return
             self.close()
         else:
             super().keyPressEvent(event)

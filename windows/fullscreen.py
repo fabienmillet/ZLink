@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """Fenêtre fullscreen — stream principal + overlay info (écran centre)."""
 
 from __future__ import annotations
@@ -6,7 +10,10 @@ import html
 import json
 import logging
 import os
+import sys
 import threading
+import pathlib
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,7 +26,7 @@ from PyQt6.QtCore import (
     QTimer,
     QUrl,
     pyqtSignal,
-)
+    QSize,)
 from PyQt6.QtGui import (
     QBitmap,
     QBrush,
@@ -39,6 +46,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -63,6 +71,16 @@ if _WEBENGINE_OK and _QWebEnginePage is not None:
         """QWebEnginePage qui absorbe les erreurs JS de Twitch (GraphQL non auth, etc.)."""
         def javaScriptConsoleMessage(self, level, message, line_number, source_id) -> None:  # type: ignore[override]
             pass  # supprimer tous les messages JS du chat embed
+
+try:
+    import qtawesome as qta
+    _QTA_OK = True
+except Exception:  # noqa: BLE001
+    # Pas seulement ImportError : qtawesome charge des polices et peut
+    # échouer autrement. Un except trop étroit laissait _QTA_OK non
+    # défini, et le démarrage plantait par NameError une fois sur six.
+    qta = None  # type: ignore[assignment]
+    _QTA_OK = False
 
 from widgets.mpv_widget import MpvWidget
 from widgets.bigscreen_widget import load_avatar_into_label as _load_avatar_into_label
@@ -163,6 +181,11 @@ def _circle_pixmap(px: QPixmap, size: int) -> QPixmap:
 # ---------------------------------------------------------------------------
 # AvatarLabel
 # ---------------------------------------------------------------------------
+
+def _infobulle(texte: str) -> str:
+    """Infobulle sûre : Qt y rend le texte riche, une balise y serait active."""
+    return "<qt>" + html.escape(str(texte)) + "</qt>"
+
 
 class AvatarLabel(QLabel):
     """QLabel circulaire avec chargement async de l'avatar depuis profileUrl."""
@@ -281,7 +304,9 @@ class RemoteItemLarge(QWidget):
         col.setSpacing(2)
 
         name_color = "#00ff87" if self._is_current else "#ffffff"
-        name_lbl = QLabel(display if display else login)
+        # _build ne reçoit pas le login : il est porté par l'instance. Sans
+        # cela, un streamer sans nom d'affichage levait un NameError.
+        name_lbl = QLabel(display if display else self._login)
         name_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         name_lbl.setStyleSheet(f"color: {name_color}; background: transparent;")
         col.addWidget(name_lbl)
@@ -300,6 +325,7 @@ class RemoteItemLarge(QWidget):
         title_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
+        title_lbl.setTextFormat(Qt.TextFormat.PlainText)
         col.addWidget(title_lbl)
         self._title_lbl = title_lbl
         self._raw_title = title or ""
@@ -310,7 +336,7 @@ class RemoteItemLarge(QWidget):
                 self._raw_title, Qt.TextElideMode.ElideRight, _avail
             )
             title_lbl.setText(elided)
-            title_lbl.setToolTip(self._raw_title)
+            title_lbl.setToolTip(_infobulle(self._raw_title))
 
         v_text = f"{_fmt_viewers(viewers)} viewers" if viewers > 0 else ""
         v_lbl = QLabel(v_text)
@@ -464,10 +490,11 @@ class RemoteItemSmall(QWidget):
             _game_font = QFont("Segoe UI", 10)
             game_text = ""
         game_lbl = QLabel(game_text)
+        game_lbl.setTextFormat(Qt.TextFormat.PlainText)
         game_lbl.setFont(_game_font)
         game_lbl.setStyleSheet("color: #555555; background: transparent;")
         if game:
-            game_lbl.setToolTip(game)
+            game_lbl.setToolTip(_infobulle(game))
         col.addWidget(game_lbl)
 
         outer.addWidget(info_col, stretch=1)
@@ -1207,6 +1234,206 @@ class _AdEndToast(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Toast « favori en direct »
+# ---------------------------------------------------------------------------
+
+def ouvrir_page_de_don(url: str) -> bool:
+    """Ouvre une page de don dans le NAVIGATEUR, après contrôle de l'hôte.
+
+    Hors de l'application, volontairement : la vue web intégrée n'a pas de
+    barre d'adresse, alors que l'utilisateur va y saisir des coordonnées de
+    paiement. Dans son navigateur il voit l'URL réelle et son cadenas.
+    """
+    if not url:
+        return False
+    sur = _safe_https_url(url, _DONATION_HOSTS)
+    if not sur:
+        logger.error("Don annulé : URL hors allowlist (%s)", str(url)[:60])
+        return False
+    QDesktopServices.openUrl(QUrl(sur))
+    return True
+
+
+class _FavoriteLiveToast(QWidget):
+    """Annonce en haut à droite qu'un favori vient de lancer son direct.
+
+    Une bascule automatique serait insupportable : elle vous arracherait à ce
+    que vous regardez au pire moment. Le toast propose, il n'impose pas — et la
+    barre qui se vide dit combien de temps il reste pour décider, plutôt que de
+    disparaître sans prévenir.
+    """
+
+    switch_requested = pyqtSignal(str)   # login
+
+    _W, _H = 320, 76
+    _LIFE_MS = 12_000            # durée avant disparition si on ne clique pas
+    _TICK_MS = 50
+
+    def __init__(self, login: str, display: str, parent: QWidget,
+                 top_offset: int = 0) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._login = login
+        self.setFixedSize(self._W, self._H)
+        self.setStyleSheet(
+            "QWidget#favToast { background: rgba(8,8,8,228);"
+            " border: 1px solid #f5c518; border-radius: 6px; }"
+        )
+        self.setObjectName("favToast")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        hl = QHBoxLayout(body)
+        hl.setContentsMargins(10, 8, 12, 4)
+        hl.setSpacing(10)
+
+        av = AvatarLabel(login, (display or login)[:2], 34, body)
+        av.load_async("")
+        hl.addWidget(av)
+
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(1)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+        star = QLabel()
+        star.setFixedSize(12, 12)
+        if _QTA_OK:
+            star.setPixmap(qta.icon("mdi6.star", color="#f5c518").pixmap(12, 12))
+        star.setStyleSheet("background: transparent; border: none;")
+        top.addWidget(star)
+        title = QLabel(display or login)
+        title.setTextFormat(Qt.TextFormat.PlainText)
+        title.setFont(QFont("Segoe UI Variable", 11, QFont.Weight.Bold))
+        title.setStyleSheet("color: #ffffff; background: transparent; border: none;")
+        top.addWidget(title, stretch=1)
+        col.addLayout(top)
+        self._sub = QLabel("vient de passer en direct")
+        self._sub.setFont(QFont("Segoe UI Variable", 9))
+        self._sub.setStyleSheet("color: #9a9a9a; background: transparent; border: none;")
+        col.addWidget(self._sub)
+        hl.addLayout(col, stretch=1)
+
+        watch = QPushButton("Regarder")
+        watch.setFixedHeight(26)
+        watch.setCursor(Qt.CursorShape.PointingHandCursor)
+        watch.setStyleSheet(
+            "QPushButton { background: #f5c518; color: #1a1400; border: none;"
+            " border-radius: 5px; font-weight: bold; padding: 0 12px; }"
+            "QPushButton:hover { background: #ffd84d; }"
+        )
+        watch.clicked.connect(self._on_watch)
+        self._boutons = QHBoxLayout()
+        self._boutons.setContentsMargins(0, 0, 0, 0)
+        self._boutons.setSpacing(6)
+        self._boutons.addWidget(watch, 0, Qt.AlignmentFlag.AlignVCenter)
+        hl.addLayout(self._boutons)
+        root.addWidget(body, stretch=1)
+
+        # Barre de temps restant : 3 px sur toute la largeur, en bas.
+        self._bar = QProgressBar()
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(3)
+        self._bar.setRange(0, self._LIFE_MS)
+        self._bar.setValue(self._LIFE_MS)
+        self._bar.setStyleSheet(
+            "QProgressBar { background: #2a2a2a; border: none;"
+            " border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }"
+            "QProgressBar::chunk { background: #f5c518; }"
+        )
+        root.addWidget(self._bar)
+
+        self._left = self._LIFE_MS
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+        self.move(parent.width() - self._W - 16, 16 + top_offset)
+        self.show()
+        self.raise_()
+
+    def set_message(self, texte: str, couleur: str = "") -> None:
+        """Réutilise le toast pour une autre annonce que « en direct »."""
+        self._sub.setTextFormat(Qt.TextFormat.PlainText)
+        self._sub.setText(texte)
+        if couleur:
+            self.setStyleSheet(
+                "QWidget#favToast { background: rgba(8,8,8,228);"
+                f" border: 1px solid {couleur}; border-radius: 6px; }}"
+            )
+            self._bar.setStyleSheet(
+                "QProgressBar { background: #2a2a2a; border: none;"
+                " border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }"
+                f"QProgressBar::chunk {{ background: {couleur}; }}"
+            )
+
+    def _tick(self) -> None:
+        self._left -= self._TICK_MS
+        if self._left <= 0:
+            self._timer.stop()
+            self._fade_out()
+            return
+        self._bar.setValue(self._left)
+
+    def enterEvent(self, event) -> None:  # type: ignore[override]
+        # Le décompte s'arrête sous le curseur : viser un bouton qui s'échappe
+        # est le meilleur moyen de rater ce qu'on voulait.
+        self._timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        if self._left > 0:
+            self._timer.start()
+        super().leaveEvent(event)
+
+    def add_donate_button(self, url: str) -> None:
+        """Ajoute un bouton « Donner » à côté de « Regarder »."""
+        self._donate_url = url
+        b = QPushButton("Donner")
+        b.setFixedHeight(26)
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            "QPushButton { background: transparent; color: #00ff87;"
+            " border: 1px solid #00ff87; border-radius: 5px;"
+            " font-weight: bold; padding: 0 10px; }"
+            "QPushButton:hover { background: #0f1a14; }"
+        )
+        b.clicked.connect(self._on_donate)
+        self._boutons.insertWidget(0, b, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.setFixedWidth(self._W + 74)
+        parent = self.parentWidget()
+        if parent is not None:
+            self.move(parent.width() - self.width() - 16, self.y())
+
+    def _on_donate(self) -> None:
+        self._timer.stop()
+        ouvrir_page_de_don(getattr(self, "_donate_url", ""))
+        self.close()
+
+    def _on_watch(self) -> None:
+        self._timer.stop()
+        self.switch_requested.emit(self._login)
+        self.close()
+
+    def _fade_out(self) -> None:
+        eff = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", self)
+        anim.setDuration(500)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.finished.connect(self.close)
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+# ---------------------------------------------------------------------------
 # Toast HypeWatcher (discret, haut-droite)
 # ---------------------------------------------------------------------------
 
@@ -1267,6 +1494,211 @@ class _FsHypeToast(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# PinnedAudioOverlay — chaînes dont l'audio est épinglé
+# ---------------------------------------------------------------------------
+
+_PIN_ROW_H = 30
+_PIN_OV_W = 224
+_PIN_HEAD_H = 14         # bandeau « AUDIO ÉPINGLÉ »
+_PIN_MARGIN_T = 8
+_PIN_MARGIN_B = 10
+_PIN_GAP = 6             # entre le bandeau et la liste
+_PIN_ROW_GAP = 4         # entre deux lignes
+
+
+class PinnedAudioOverlay(QWidget):
+    """Liste, en haut à droite, des chaînes dont l'audio est épinglé.
+
+    Le son de la grille vient de cellules qu'on ne regarde pas forcément :
+    l'épinglage restait invisible depuis le plein écran, et on ne savait pas
+    ce qu'on entendait. Chaque entrée porte la photo de profil et le nom de la
+    chaîne, empilées comme une liste de participants.
+    """
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("pinnedAudio")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Purement informatif : sans cela l'overlay avalerait les clics destinés
+        # à la vidéo qu'il recouvre.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet(
+            "QWidget#pinnedAudio { background: rgba(10,10,10,190); "
+            "border: 1px solid #2a2a2a; border-radius: 8px; }"
+        )
+        self._v = QVBoxLayout(self)
+        self._v.setContentsMargins(10, _PIN_MARGIN_T, 12, _PIN_MARGIN_B)
+        self._v.setSpacing(_PIN_GAP)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(6)
+        icon = QLabel()
+        icon.setFixedSize(12, 12)
+        if _QTA_OK:
+            icon.setPixmap(qta.icon("mdi6.volume-high", color="#00ff87").pixmap(12, 12))
+        icon.setStyleSheet("background: transparent; border: none;")
+        head.addWidget(icon)
+        title = QLabel("AUDIO ÉPINGLÉ")
+        title.setFont(QFont("Segoe UI Variable", 7, QFont.Weight.Bold))
+        title.setStyleSheet(
+            "color: #00ff87; background: transparent; border: none; "
+            "letter-spacing: 1px;"
+        )
+        head.addWidget(title)
+        head.addStretch()
+        self._v.addLayout(head)
+
+        self._rows = QVBoxLayout()
+        self._rows.setContentsMargins(0, 0, 0, 0)
+        self._rows.setSpacing(_PIN_ROW_GAP)
+        self._v.addLayout(self._rows)
+
+        self._shown: list[str] = []
+        self._muted: set[str] = set()
+        self._elements: dict[str, tuple[QLabel, QLabel]] = {}
+        self.setFixedWidth(_PIN_OV_W)
+        self.hide()
+
+    # -- API -------------------------------------------------------------
+
+    def set_logins(self, logins: list[str]) -> None:
+        """Remplace la liste affichée. Sans effet si elle n'a pas changé."""
+        logins = [str(lg) for lg in logins if lg]
+        if logins == self._shown:
+            return
+        self._shown = logins
+        while self._rows.count():
+            item = self._rows.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                # setParent(None) avant deleteLater : le seul deleteLater laisse
+                # le widget se peindre jusqu'au retour à la boucle d'événements.
+                w.setParent(None)
+                w.deleteLater()
+        self._elements.clear()
+        for lg in logins:
+            self._rows.addWidget(self._make_row(lg))
+        self._apply_muted()
+        self.setVisible(bool(logins))
+        # Hauteur calculée, pas mesurée : sizeHint() interrogé dans la foulée
+        # renvoie encore celle du bandeau seul — les lignes qu'on vient
+        # d'ajouter ne sont prises en compte qu'au tour de boucle suivant. La
+        # boîte se figeait alors à 31 px et tronquait toute la liste.
+        n = len(logins)
+        height = (_PIN_MARGIN_T + _PIN_HEAD_H + _PIN_GAP
+                  + n * _PIN_ROW_H + max(0, n - 1) * _PIN_ROW_GAP
+                  + _PIN_MARGIN_B)
+        self.setFixedSize(_PIN_OV_W, height)
+        parent = self.parentWidget()
+        if parent is not None:
+            self.reposition(parent.width(), parent.height())
+
+    def reposition(self, w: int, h: int) -> None:
+        self.move(max(0, w - self.width() - 8), 8)
+
+    def set_muted(self, logins: set) -> None:
+        """Grise les chaînes coupées depuis la console.
+
+        Sans cela, la liste affirme qu'on entend une chaîne qui est en fait
+        silencieuse — exactement l'information qu'elle est censée donner.
+        """
+        self._muted = {str(x) for x in logins}
+        self._apply_muted()
+
+    def _apply_muted(self) -> None:
+        """Applique l'état de coupure aux lignes ACTUELLES.
+
+        Pas de raccourci « rien n'a changé » : les lignes sont recréées à
+        chaque reconstruction de la liste, et un état inchangé devait quand
+        même être repeint sur des widgets neufs.
+        """
+        coupees = self._muted
+        for login, (icone, nom) in self._elements.items():
+            mute = login in coupees
+            nom.setStyleSheet(
+                f"color: {'#5a5a5a' if mute else '#e8e8e8'};"
+                " background: transparent; border: none;")
+            if _QTA_OK:
+                icone.setPixmap(qta.icon(
+                    "mdi6.volume-off" if mute else "mdi6.volume-high",
+                    color="#ff4444" if mute else "#00ff87").pixmap(12, 12))
+            icone.setVisible(True)
+
+    def height_hint(self) -> int:
+        """Hauteur occupée, 0 si masqué — pour décaler ce qui vient dessous."""
+        return self.height() if self.isVisible() else 0
+
+    # -- interne ---------------------------------------------------------
+
+    def _make_row(self, login: str) -> QWidget:
+        row = QWidget()
+        row.setFixedHeight(_PIN_ROW_H)
+        row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+
+        av = AvatarLabel(login, login[:2], 24, row)
+        av.load_async("")
+        h.addWidget(av)
+
+        etat = QLabel()
+        etat.setFixedSize(12, 12)
+        etat.setStyleSheet("background: transparent; border: none;")
+        if _QTA_OK:
+            etat.setPixmap(qta.icon("mdi6.volume-high",
+                                    color="#00ff87").pixmap(12, 12))
+        h.addWidget(etat)
+
+        name = QLabel(login)
+        name.setTextFormat(Qt.TextFormat.PlainText)
+        name.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
+        name.setStyleSheet("color: #e8e8e8; background: transparent; border: none;")
+        fm = QFontMetrics(name.font())
+        name.setText(fm.elidedText(login, Qt.TextElideMode.ElideRight, _PIN_OV_W - 60))
+        h.addWidget(name, stretch=1)
+        self._elements[login] = (etat, name)
+        return row
+
+
+# ---------------------------------------------------------------------------
+# Replay — le direct passe en incrustation, l'action repasse en grand
+# ---------------------------------------------------------------------------
+
+_REPLAY_PIP_W, _REPLAY_PIP_H, _REPLAY_MARGIN = 320, 180, 16
+#: Attente maximale de fin d'écriture du fichier par dump-cache.
+_REPLAY_DUMP_TIMEOUT_S = 6.0
+
+
+class _ReplayBadge(QWidget):
+    """Bandeau « REPLAY » posé sur la vidéo rejouée."""
+
+    def __init__(self, login: str, secs: int, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet(
+            "QWidget { background: rgba(10,10,10,200); border: 1px solid #ff6b00;"
+            " border-radius: 6px; }"
+        )
+        h = QHBoxLayout(self)
+        h.setContentsMargins(12, 6, 12, 6)
+        h.setSpacing(8)
+        dot = QLabel("REPLAY")
+        dot.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
+        dot.setStyleSheet("color: #ff6b00; background: transparent; border: none;"
+                          " letter-spacing: 2px;")
+        h.addWidget(dot)
+        who = QLabel(f"{login} · {secs} dernières secondes")
+        who.setTextFormat(Qt.TextFormat.PlainText)
+        who.setFont(QFont("Segoe UI Variable", 10))
+        who.setStyleSheet("color: #e0e0e0; background: transparent; border: none;")
+        h.addWidget(who)
+        self.adjustSize()
+
+
+# ---------------------------------------------------------------------------
 # FullscreenWindow
 # ---------------------------------------------------------------------------
 
@@ -1278,6 +1710,10 @@ class FullscreenWindow(QMainWindow):
     """
 
     stream_change_requested = pyqtSignal(str)
+    #: Index (0-based) d'une cellule de la grille, demandé au clavier.
+    slot_requested          = pyqtSignal(int)
+    #: -1 / +1 — stream précédent ou suivant dans l'ordre de la grille.
+    neighbour_requested     = pyqtSignal(int)
     stream_changed = pyqtSignal(str)  # emis quand le stream actif change (Bug 3)
 
     def __init__(self, screen: QScreen, show_on_init: bool = True, clip_config: dict | None = None, parent: QWidget | None = None) -> None:
@@ -1294,6 +1730,15 @@ class FullscreenWindow(QMainWindow):
         self._current_donation_url: str = ""
         self._loading: bool = False
         self._pip_active: bool = False
+        # Replay : le direct passe en incrustation, l'action repasse en grand.
+        self._replay_active: bool = False
+        self._replay_player: MpvWidget | None = None
+        self._replay_badge: QWidget | None = None
+        self._replay_path: str = ""
+        self._replay_login: str = ""
+        self._replay_secs: int = 30
+        self._replay_size: int = -1
+        self._replay_deadline: float = 0.0
 
         # Ad-break watcher
         self._ad_watcher = AdWatcher(self)
@@ -1384,28 +1829,25 @@ class FullscreenWindow(QMainWindow):
         self._hide_timer.setInterval(3000)
         self._hide_timer.timeout.connect(self._start_fade_out)
 
+        # La barre est en trois blocs : gauche et droite reçoivent la MÊME
+        # part d'espace (stretch 1), ce qui place mathématiquement le bloc
+        # central au milieu de la barre quelle que soit sa largeur.
         ol = QHBoxLayout(self._overlay)
         ol.setContentsMargins(20, 0, 20, 0)
         ol.setSpacing(0)
 
-        # Left: name · game
+        _left = QWidget()
+        _left.setStyleSheet("background: transparent;")
+        ll = QHBoxLayout(_left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(0)
+
+        # Nom · jeu en premier, le volume vient après.
         self._ov_info = QLabel()
         self._ov_info.setFont(QFont("Segoe UI", 15))
         self._ov_info.setStyleSheet("color: #ffffff; background: transparent;")
-        ol.addWidget(self._ov_info)
-
-        ol.addStretch()
-
-        # Right: viewers
-        self._ov_viewers = QLabel()
-        self._ov_viewers.setFont(QFont("Consolas", 15, QFont.Weight.Bold))
-        self._ov_viewers.setStyleSheet("color: #00ff87; background: transparent;")
-        self._ov_viewers.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
-        )
-        ol.addWidget(self._ov_viewers)
-
-        ol.addSpacing(16)
+        ll.addWidget(self._ov_info)
+        ll.addSpacing(16)
 
         # ── Volume ───────────────────────────────────────────────
         self._volume = int(_load_setting("volume", 60))
@@ -1420,7 +1862,7 @@ class FullscreenWindow(QMainWindow):
         )
         self._vol_btn.setToolTip("Couper le son")
         self._vol_btn.clicked.connect(self._toggle_mute)
-        ol.addWidget(self._vol_btn)
+        ll.addWidget(self._vol_btn)
 
         self._vol_slider = QSlider(Qt.Orientation.Horizontal)
         self._vol_slider.setRange(0, 100)
@@ -1440,7 +1882,7 @@ class FullscreenWindow(QMainWindow):
             QSlider::handle:horizontal:hover { background: #00ff87; }
         """)
         self._vol_slider.valueChanged.connect(self._on_volume_changed)
-        ol.addWidget(self._vol_slider)
+        ll.addWidget(self._vol_slider)
 
         # Écriture différée : éviter un accès disque à chaque cran du curseur.
         self._vol_save_timer = QTimer(self)
@@ -1448,10 +1890,31 @@ class FullscreenWindow(QMainWindow):
         self._vol_save_timer.setInterval(1500)
         self._vol_save_timer.timeout.connect(self._persist_volume)
 
-        ol.addSpacing(16)
+        ll.addStretch()
+        ol.addWidget(_left, stretch=1)
+
+        # Centre : viewers
+        self._ov_viewers = QLabel()
+        self._ov_viewers.setFont(QFont("Consolas", 15, QFont.Weight.Bold))
+        self._ov_viewers.setStyleSheet("color: #00ff87; background: transparent;")
+        self._ov_viewers.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ol.addWidget(self._ov_viewers)
+
+        _right = QWidget()
+        _right.setStyleSheet("background: transparent;")
+        rl = QHBoxLayout(_right)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(0)
+        rl.addStretch()
 
         # Bouton chat
-        self._chat_btn = QPushButton("\U0001f4ac Chat")
+        self._chat_btn = QPushButton("Chat")
+        if _QTA_OK:
+            # U+1F4AC ne rend aucun glyphe hors Windows : le bouton Chat
+            # apparaissait sans icône. On passe à qtawesome comme ailleurs.
+            self._chat_btn.setIcon(qta.icon("mdi6.message-text-outline", color="#888888",
+                                        color_active="#ffffff"))
+            self._chat_btn.setIconSize(QSize(14, 14))
         self._chat_btn.setCheckable(True)
         self._chat_btn.setStyleSheet("""
             QPushButton {
@@ -1469,12 +1932,18 @@ class FullscreenWindow(QMainWindow):
             QPushButton:hover { color: #ffffff; }
         """)
         self._chat_btn.clicked.connect(self._toggle_chat)
-        ol.addWidget(self._chat_btn)
+        rl.addWidget(self._chat_btn)
 
-        ol.addSpacing(8)
+        rl.addSpacing(8)
 
         # Bouton donation
-        self._donate_btn = QPushButton("\u2665 Faire un don")
+        self._donate_btn = QPushButton("Faire un don")
+        if _QTA_OK:
+            # U+1F4AC ne rend aucun glyphe hors Windows : le bouton Chat
+            # apparaissait sans icône. On passe à qtawesome comme ailleurs.
+            self._donate_btn.setIcon(qta.icon("mdi6.heart-outline", color="#888888",
+                                        color_active="#ffffff"))
+            self._donate_btn.setIconSize(QSize(14, 14))
         self._donate_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -1492,12 +1961,18 @@ class FullscreenWindow(QMainWindow):
         self._donate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._donate_btn.clicked.connect(self._open_donate_view)
         self._donate_btn.hide()  # visible seulement quand donation_url est dispo
-        ol.addWidget(self._donate_btn)
+        rl.addWidget(self._donate_btn)
 
-        ol.addSpacing(8)
+        rl.addSpacing(8)
 
         # Bouton clip 60s
-        self._clip_btn = QPushButton("⏺ Clip")
+        self._clip_btn = QPushButton("Clip")
+        if _QTA_OK:
+            # U+1F4AC ne rend aucun glyphe hors Windows : le bouton Chat
+            # apparaissait sans icône. On passe à qtawesome comme ailleurs.
+            self._clip_btn.setIcon(qta.icon("mdi6.record-circle-outline", color="#888888",
+                                        color_active="#ffffff"))
+            self._clip_btn.setIconSize(QSize(14, 14))
         self._clip_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -1511,7 +1986,8 @@ class FullscreenWindow(QMainWindow):
         """)
         self._clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._clip_btn.clicked.connect(self._save_clip)
-        ol.addWidget(self._clip_btn)
+        rl.addWidget(self._clip_btn)
+        ol.addWidget(_right, stretch=1)
 
         self._remote_menu = RemoteMenu(central)
         self._remote_menu.stream_selected.connect(self._on_remote_stream_selected)
@@ -1537,10 +2013,14 @@ class FullscreenWindow(QMainWindow):
         self._btn_opacity_fx.setOpacity(0.0)
         self._remote_btn.setGraphicsEffect(self._btn_opacity_fx)
 
+        self._pinned_muted: set[str] = set()
+        self._pinned_audio = PinnedAudioOverlay(central)
+
         # Z-order : stack au fond, remote_btn au premier plan
         self._stack.lower()
         self._chat_panel.raise_()
         self._overlay.raise_()
+        self._pinned_audio.raise_()
         self._remote_menu.raise_()
         self._remote_btn.raise_()
 
@@ -1643,6 +2123,10 @@ class FullscreenWindow(QMainWindow):
         self._loading = False
         self._stack.setCurrentIndex(1)  # afficher le MPV
         self._mpv.play(url)
+        # Le volume et la coupure sont ceux de la FENÊTRE, pas du flux : les
+        # réimposer, sinon changer de streamer remettait le son à fond alors
+        # que la barre affichait toujours le réglage précédent.
+        self._apply_volume()
         self._ad_watcher.watch(login, url)
         logger.info("Fullscreen: lecture MPV démarrée pour %s", login)
 
@@ -1694,42 +2178,23 @@ class FullscreenWindow(QMainWindow):
     # ── vue donation (PiP) ───────────────────────────────────────────
 
     def _open_donate_view(self) -> None:
-        """Passe en mode PiP : stream en miniature, vue web de donation en plein écran."""
+        """Ouvre la page de don dans le navigateur par défaut.
+
+        Volontairement hors de l'application : la vue web intégrée n'a pas de
+        barre d'adresse, alors que l'utilisateur va y saisir des coordonnées de
+        paiement. Dans le navigateur il voit l'URL réelle et son cadenas.
+        """
         if not self._current_donation_url:
             return
-        # macOS : QWebEngineView cohabite mal avec la surface OpenGL du lecteur
-        # (vue vide, artefacts de composition). Le navigateur système est aussi
-        # plus sûr : l'utilisateur voit l'URL réelle avant de payer.
-        if sys.platform == "darwin":
-            url = _safe_https_url(self._current_donation_url, _DONATION_HOSTS)
-            if not url:
-                logger.error(
-                    "Don annulé : URL hors allowlist (%s)",
-                    self._current_donation_url[:60],
-                )
-                return
-            logger.info("Ouverture de la page de don dans le navigateur système")
-            QDesktopServices.openUrl(QUrl(url))
-            return
-
-        self._pip_active = True
-        self._hide_overlay()  # masque la barre overlay
-        # Revalidation avant ouverture : la page est affichée sans barre d'adresse
-        # et l'utilisateur y saisit des coordonnées de paiement.
         url = _safe_https_url(self._current_donation_url, _DONATION_HOSTS)
         if not url:
             logger.error(
-                "Vue don annulée : URL hors allowlist (%s)",
+                "Don annulé : URL hors allowlist (%s)",
                 self._current_donation_url[:60],
             )
-            self._pip_active = False
-            self._show_overlay()
             return
-        if _WEBENGINE_OK and hasattr(self._donate_view, "load"):
-            self._donate_view.load(QUrl(url))  # type: ignore[attr-defined]
-        self._donate_view.show()
-        self._donate_close_btn.show()
-        self._update_mpv_geometry()
+        logger.info("Ouverture de la page de don dans le navigateur système")
+        QDesktopServices.openUrl(QUrl(url))
 
     def _close_donate_view(self) -> None:
         """Quitte le mode PiP et restaure le stream en plein écran."""
@@ -1850,12 +2315,247 @@ class FullscreenWindow(QMainWindow):
 
     # ── hype toast ────────────────────────────────────────────────────
 
-    def show_hype_alert(self, login: str, label: str, score: float, color: str) -> None:
+    # ── replay ────────────────────────────────────────────────────────
+
+    def start_replay(self, login: str, path: str, secs: int = 30) -> None:
+        """Rejoue `path` en grand, le direct passant en incrustation.
+
+        Le direct ne peut pas se rembobiner lui-même : reculer dans son cache
+        le mettrait en pause et ferait décrocher le flux. Le moment est donc
+        rejoué par un SECOND lecteur, tandis que le direct continue, réduit
+        dans un coin.
+        """
+        cw = self.centralWidget()
+        if cw is None or not path or self._replay_active:
+            return
+        self._replay_path = path
+        self._replay_login = login
+        self._replay_secs = secs
+        # dump-cache écrit en arrière-plan et mpv ne signale pas la fin : on
+        # attend que le fichier cesse de grossir, sinon on lit un tronçon.
+        self._replay_size = -1
+        self._replay_deadline = time.monotonic() + _REPLAY_DUMP_TIMEOUT_S
+        self._replay_wait = QTimer(self)
+        self._replay_wait.setInterval(200)
+        self._replay_wait.timeout.connect(self._check_replay_file)
+        self._replay_wait.start()
+        logger.info("Replay demandé : %s (%s)", login, path)
+
+    def _check_replay_file(self) -> None:
+        try:
+            size = pathlib.Path(self._replay_path).stat().st_size
+        except OSError:
+            size = 0
+        if size > 0 and size == self._replay_size:
+            self._replay_wait.stop()
+            self._begin_replay()
+            return
+        self._replay_size = size
+        if time.monotonic() > self._replay_deadline:
+            self._replay_wait.stop()
+            if size > 0:
+                # Fichier partiel mais lisible : mieux vaut un replay tronqué
+                # que rien du tout.
+                logger.warning("Replay : écriture non terminée, lecture partielle")
+                self._begin_replay()
+            else:
+                logger.warning("Replay abandonné : aucun fichier produit")
+                self._cleanup_replay()
+
+    def _begin_replay(self) -> None:
+        cw = self.centralWidget()
+        if cw is None:
+            return
+        self._replay_active = True
+        self._replay_player = MpvWidget(cw)
+        self._replay_player.playback_ended.connect(self.stop_replay)
+        self._replay_badge = _ReplayBadge(self._replay_login, self._replay_secs, cw)
+        # Le direct se tait pendant le replay : deux sources simultanées ne
+        # s'écoutent pas, et c'est l'action qu'on veut entendre.
+        self._mpv.set_mute(True)
+        self._update_mpv_geometry()
+        self._replay_player.show()
+        self._replay_badge.show()
+        self._replay_badge.raise_()
+        self._replay_player.play(self._replay_path)
+
+    def stop_replay(self) -> None:
+        """Referme le replay et rend l'écran au direct."""
+        if not self._replay_active:
+            return
+        self._replay_active = False
+        player, self._replay_player = self._replay_player, None
+        if player is not None:
+            player.shutdown()
+            player.setParent(None)
+            player.deleteLater()
+        badge, self._replay_badge = self._replay_badge, None
+        if badge is not None:
+            badge.setParent(None)
+            badge.deleteLater()
+        self._apply_volume()          # rétablit le son du direct
+        self._update_mpv_geometry()
+        self._cleanup_replay()
+
+    def _cleanup_replay(self) -> None:
+        """Supprime le fichier temporaire du replay."""
+        path, self._replay_path = self._replay_path, ""
+        if path:
+            try:
+                pathlib.Path(path).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug("Replay : fichier temporaire non supprimé — %s", exc)
+
+    def run_action(self, cle: str) -> None:
+        """Exécute une action demandée depuis la palette du panel."""
+        if cle == "clip":
+            self._save_clip()
+        elif cle == "replay":
+            self._replay_current()
+
+    def _replay_current(self) -> None:
+        """Rejoue les dernières secondes du direct affiché."""
+        if self._replay_active or not self._current_login:
+            self.stop_replay()
+            return
+        import tempfile
+        secs = int(self._clip_config.get("duration_secs", 30) or 30)
+        path = self._mpv.save_clip(secs, tempfile.gettempdir())
+        if path:
+            self.start_replay(self._current_login, path, secs)
+
+    def _toggle_favorite_current(self) -> None:
+        """Bascule le favori du direct affiché."""
+        if not self._current_login:
+            return
+        from core import favorites
+        etat = favorites.toggle(self._current_login)
+        self._hint_lbl.setText(
+            "Ajouté aux favoris" if etat else "Retiré des favoris")
+        self._hint_lbl.setStyleSheet("color: #f5c518;")
+
+    def show_show_started(self, login: str, nom: str) -> None:
+        """Propose de basculer sur le show du programme qui vient de démarrer."""
+        cw = self.centralWidget()
+        if cw is None or not login or login == self._current_login:
+            return
+        toast = _FavoriteLiveToast(login, nom or login, cw,
+                                   top_offset=self._pinned_audio.height_hint())
+        toast.set_message(f"commence maintenant · {login}", "#a855f7")
+        toast.switch_requested.connect(self.stream_change_requested)
+
+    def show_goal_imminent(self, login: str, display: str, goal: str,
+                           reste: float, donation_url: str = "") -> None:
+        """Annonce qu'un objectif est sur le point de tomber."""
+        cw = self.centralWidget()
+        if cw is None or not login:
+            return
+        montant = f"{reste:,.0f} €".replace(",", "\u202f")
+        toast = _FavoriteLiveToast(login, display or login, cw,
+                                   top_offset=self._pinned_audio.height_hint())
+        toast.set_message(f"plus que {montant} — « {goal} »", "#00ff87")
+        toast.switch_requested.connect(self.stream_change_requested)
+        # Le geste utile n'est pas seulement de regarder : c'est de faire
+        # tomber l'objectif. Sans ce bouton, l'alerte ne mène nulle part.
+        if donation_url:
+            toast.add_donate_button(donation_url)
+
+    def show_top_entry(self, login: str, display: str, viewers: int,
+                       rang: int) -> None:
+        """Une chaîne qu'on n'affiche pas vient d'entrer dans les plus grosses."""
+        cw = self.centralWidget()
+        if cw is None or not login:
+            return
+        toast = _FavoriteLiveToast(login, display or login, cw,
+                                   top_offset=self._pinned_audio.height_hint())
+        toast.set_message(
+            f"n°{rang} des audiences · " + f"{viewers:,}".replace(",", "\u202f")
+            + " viewers", "#38bdf8")
+        toast.switch_requested.connect(self.stream_change_requested)
+
+    def show_raid(self, source: str, cible: str, viewers: int) -> None:
+        """Annonce un raid arrivé sur une chaîne de la grille."""
+        cw = self.centralWidget()
+        if cw is None or not cible:
+            return
+        detail = (f"raid de {source}"
+                  + (f" · {viewers:,}".replace(",", "\u202f") if viewers else ""))
+        toast = _FsHypeToast(cible, detail, 1.0, "#a855f7", cw)
+        off = self._pinned_audio.height_hint()
+        if off:
+            toast.move(toast.x(), 8 + off + 6)
+        toast.show()
+        toast.raise_()
+
+    def show_big_donation(self, login: str, display: str, amount: float,
+                          nature: str = "don") -> None:
+        """Signale qu'une chaîne vient de recevoir une somme notable."""
+        cw = self.centralWidget()
+        if cw is None or not login:
+            return
+        montant = f"{amount:,.0f} €".replace(",", "\u202f")
+        texte = (f"bombardement · +{montant}" if nature == "bombardement"
+                 else f"+{montant}")
+        toast = _FsHypeToast(display or login, texte, 1.0, "#f5c518", cw)
+        off = self._pinned_audio.height_hint()
+        if off:
+            toast.move(toast.x(), 8 + off + 6)
+        toast.show()
+        toast.raise_()
+
+    def show_milestone(self, amount: float, label: str) -> None:
+        """Annonce un palier de cagnotte, là où l'utilisateur regarde."""
+        cw = self.centralWidget()
+        if cw is None or not label:
+            return
+        toast = _FsHypeToast("Cagnotte", f"{label} franchis !", 1.0,
+                             "#f5c518", cw)
+        off = self._pinned_audio.height_hint()
+        if off:
+            toast.move(toast.x(), 8 + off + 6)
+        toast.show()
+        toast.raise_()
+
+    def show_favorite_live(self, login: str, display: str = "") -> None:
+        """Annonce qu'un favori vient de lancer son direct."""
+        cw = self.centralWidget()
+        if cw is None or not login:
+            return
+        # Déjà en train de le regarder : l'annoncer n'apprendrait rien.
+        if login == self._current_login:
+            return
+        # Sous la liste des audios épinglés, qui occupe le même coin.
+        toast = _FavoriteLiveToast(login, display or login, cw,
+                                   top_offset=self._pinned_audio.height_hint())
+        toast.switch_requested.connect(self.stream_change_requested)
+
+    def set_pinned_audio(self, logins: list) -> None:
+        """Met à jour la liste des chaînes dont l'audio est épinglé."""
+        self._pinned_audio.set_logins([str(lg) for lg in logins])
+        self._pinned_audio.set_muted(self._pinned_muted)
+        self._pinned_audio.raise_()
+
+    def set_pinned_muted(self, login: str, muted: bool) -> None:
+        """Reflète dans la liste qu'une chaîne a été coupée depuis la console."""
+        if muted:
+            self._pinned_muted.add(str(login))
+        else:
+            self._pinned_muted.discard(str(login))
+        self._pinned_audio.set_muted(self._pinned_muted)
+
+    def show_hype_alert(
+        self, login: str, label: str, score: float, color: str, excerpt: str = "",
+    ) -> None:
         """Affiche un toast discret en haut à droite (appelé depuis GridWindow)."""
         cw = self.centralWidget()
         if cw is None:
             return
         toast = _FsHypeToast(login, label, score, color, cw)
+        # Les deux occupent le coin haut-droit : décaler le toast sous la liste
+        # des audios épinglés, sinon il la recouvre.
+        off = self._pinned_audio.height_hint()
+        if off:
+            toast.move(toast.x(), 8 + off + 6)
         toast.show()
         toast.raise_()
 
@@ -1907,6 +2607,13 @@ class FullscreenWindow(QMainWindow):
         self._apply_volume()
         self._vol_save_timer.start()
 
+    def set_muted(self, muted: bool) -> None:
+        """Coupe ou rétablit le direct, depuis la console de mixage."""
+        if self._muted == bool(muted):
+            return
+        self._muted = bool(muted)
+        self._apply_volume()
+
     def set_volume(self, value: int) -> None:
         """Règle le volume depuis l'extérieur (clavier, télécommande)."""
         self._vol_slider.setValue(max(0, min(100, int(value))))
@@ -1935,9 +2642,29 @@ class FullscreenWindow(QMainWindow):
         elif key == Qt.Key.Key_M:
             self._toggle_mute()
             self._show_overlay()
+        elif key == Qt.Key.Key_C:
+            # Garder le moment en cours : le geste le plus fréquent en régie,
+            # et il fallait jusqu'ici viser un bouton dans un overlay masqué.
+            self._save_clip()
+            self._show_overlay()
+        elif key == Qt.Key.Key_R:
+            self._replay_current()
+        elif key == Qt.Key.Key_F:
+            self._toggle_favorite_current()
+            self._show_overlay()
+        elif Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+            self.slot_requested.emit(key - Qt.Key.Key_1)
+        elif key == Qt.Key.Key_Left:
+            self.neighbour_requested.emit(-1)
+        elif key == Qt.Key.Key_Right:
+            self.neighbour_requested.emit(1)
         elif key == Qt.Key.Key_Escape:
-            if self._remote_menu.isVisible():
-                self._remote_menu.hide_menu()
+            if self._replay_active:
+                # Échap coupe le replay avant tout : c'est l'état le plus
+                # transitoire, et le plus susceptible d'être interrompu.
+                self.stop_replay()
+            elif self._remote_menu.isVisible():
+                self._close_remote_menu()
             else:
                 self.close()
         else:
@@ -1951,7 +2678,23 @@ class FullscreenWindow(QMainWindow):
         chat_w = self._chat_panel._width if self._chat_panel._visible else 0
         video_w = w - chat_w
 
-        if self._pip_active:
+        if self._replay_active:
+            # Le replay prend toute la zone vidéo, le direct se réfugie en bas
+            # à droite : c'est l'action qu'on veut voir en grand, le direct ne
+            # sert plus qu'à ne pas perdre le fil.
+            pip_x = video_w - _REPLAY_PIP_W - _REPLAY_MARGIN
+            pip_y = h - _REPLAY_PIP_H - _REPLAY_MARGIN
+            if self._replay_player is not None:
+                self._replay_player.setGeometry(0, 0, video_w, h)
+                self._replay_player.lower()
+            self._stack.setGeometry(pip_x, pip_y, _REPLAY_PIP_W, _REPLAY_PIP_H)
+            self._stack.raise_()
+            if self._replay_badge is not None:
+                self._replay_badge.move(
+                    (video_w - self._replay_badge.width()) // 2, 24)
+                self._replay_badge.raise_()
+            self._overlay.hide()
+        elif self._pip_active:
             _PIP_W, _PIP_H, _MARGIN = 320, 180, 16
             pip_x = video_w - _PIP_W - _MARGIN
             pip_y = h - _PIP_H - _MARGIN
@@ -1968,6 +2711,8 @@ class FullscreenWindow(QMainWindow):
 
             self._remote_btn.move(8, 8)
             self._remote_btn.raise_()
+            self._pinned_audio.reposition(video_w, h)
+            self._pinned_audio.raise_()
 
             if self._remote_menu.isVisible():
                 self._remote_menu.setGeometry(
@@ -1998,10 +2743,27 @@ class FullscreenWindow(QMainWindow):
     def _toggle_remote_menu(self) -> None:
         """Bascule le menu télécommande et maintient l'overlay visible à l'ouverture."""
         if self._remote_menu.isVisible():
-            self._remote_menu.hide_menu()
+            self._close_remote_menu()
         else:
             self._show_overlay()  # montre l'overlay avant que le menu slide-in
             self._remote_menu.show_menu()
+            # Le bouton est à (8, 8), donc DANS l'emprise du menu (0..320) une
+            # fois ouvert — et raise_() le posait par-dessus son titre.
+            self._remote_btn.hide()
+
+    def _close_remote_menu(self) -> None:
+        """Referme le menu et rend la main au bouton."""
+        self._remote_menu.hide_menu()
+        self._remote_btn.show()
+        self._remote_btn.raise_()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        """Un clic hors du menu le referme."""
+        if (self._remote_menu.isVisible()
+                and not self._remote_menu.geometry().contains(event.pos())):
+            self._close_remote_menu()
+            return
+        super().mousePressEvent(event)
 
     def _on_remote_stream_selected(self, login: str) -> None:
         """Relaye la sélection du menu télécommande via stream_change_requested."""

@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """Settings panel — vue plein-panel façon Discord.
 
 Intégré comme overlay dans PanelWindow (même pattern que BigScreenWidget).
@@ -7,9 +11,7 @@ Signal close_requested()      émis quand l'utilisateur ferme le panel.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
@@ -36,10 +38,15 @@ from PyQt6.QtWidgets import (
 try:
     import qtawesome as qta
     _QTA_OK = True
-except ImportError:
+except Exception:  # noqa: BLE001
+    # Pas seulement ImportError : qtawesome charge des polices et peut
+    # échouer autrement. Un except trop étroit laissait _QTA_OK non
+    # défini, et le démarrage plantait par NameError une fois sur six.
+    qta = None  # type: ignore[assignment]
     _QTA_OK = False
 
-from core.paths import CONFIG_PATH
+from core.version import display_version
+from core import config_store
 
 logger = logging.getLogger(__name__)
 
@@ -248,8 +255,15 @@ class _PageStreams(_PageBase):
 
         f = self._form()
         self._grid_quality = QComboBox()
-        self._grid_quality.addItems(["360p,worst", "480p,360p,worst", "720p,480p,worst"])
-        idx = self._grid_quality.findText(config.get("grid_quality", "360p,worst"))
+        # Rendus réels de Twitch : « 360p », « 480p » et « 720p » n'existent pas
+        # et retombaient silencieusement sur « worst », soit 284x160.
+        self._grid_quality.addItems([
+            "160p30,worst", "360p30,160p30,worst", "480p30,360p30,160p30",
+            "720p60,480p30,360p30",
+        ])
+        from core.stream_manager import migrate_quality
+        idx = self._grid_quality.findText(
+            migrate_quality(config.get("grid_quality", "360p30,160p30,worst")))
         if idx >= 0:
             self._grid_quality.setCurrentIndex(idx)
         f.addRow("Qualité grille :", self._grid_quality)
@@ -276,9 +290,27 @@ class _PageStreams(_PageBase):
         self._max_streams.setValue(config.get("max_active_streams", 20))
         self._max_streams.setFixedWidth(100)
         f2.addRow("Max streams actifs :", self._max_streams)
+
+        # La valeur enregistrée est portée par itemData : elle ne dépend donc
+        # pas de l'ordre des entrées ni de leur libellé.
+        self._grid_sort = QComboBox()
+        for label, value in (
+            ("Par viewers", "viewers"),
+            ("Manuel (glisser-déposer)", "manual"),
+            ("Favoris puis manuel", "favorites"),
+        ):
+            self._grid_sort.addItem(label, value)
+        _cur = self._grid_sort.findData(config.get("grid_sort", "viewers"))
+        self._grid_sort.setCurrentIndex(_cur if _cur >= 0 else 0)
+        f2.addRow("Disposition :", self._grid_sort)
         self._vl.addLayout(f2)
         self._vl.addWidget(_hint(
-            "Nombre maximum de streams lancés simultanément dans la grille."
+            "Nombre maximum de streams lancés simultanément dans la grille.\n"
+            "En disposition « par viewers », les cellules se réordonnent seules "
+            "selon l'audience, favoris en tête. En « manuel », vous les glissez "
+            "où vous voulez et l'ordre est conservé tel quel. En « favoris puis "
+            "manuel », vos favoris restent en tête et le reste se glisse "
+            "librement."
         ))
         self._vl.addStretch()
 
@@ -287,6 +319,7 @@ class _PageStreams(_PageBase):
         config["grid_quality"] = self._grid_quality.currentText()
         config["fullscreen_quality"] = self._fs_quality.currentText()
         config["max_active_streams"] = self._max_streams.value()
+        config["grid_sort"] = self._grid_sort.currentData() or "viewers"
 
 
 class _PageScreens(_PageBase):
@@ -352,106 +385,34 @@ class _PageScreens(_PageBase):
         return True
 
 
-class _PageAPIs(_PageBase):
-    def __init__(self, config: dict, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-
-        self._vl.addWidget(_h2("APIs"))
-        self._vl.addWidget(_sep())
-        self._vl.addWidget(_section_title("Intelligence artificielle"))
-
-        f = self._form()
-
-        _GEMINI_MODELS = [
-            "gemini-2.5-flash-preview-04-17",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-        ]
-        _OPENAI_MODELS = [
-            "gpt-4.1-mini",
-            "gpt-4.1-nano",
-            "gpt-4o-mini",
-            "gpt-4o",
-            "gpt-4.1",
-        ]
-        self._gemini_models = _GEMINI_MODELS
-        self._openai_models = _OPENAI_MODELS
-
-        self._ai_provider = QComboBox()
-        self._ai_provider.addItems(["Gemini", "OpenAI"])
-        current_provider = config.get("ai_provider", "gemini").lower()
-        self._ai_provider.setCurrentIndex(0 if current_provider != "openai" else 1)
-        f.addRow("Fournisseur IA :", self._ai_provider)
-
-        self._ai_model = QComboBox()
-        self._ai_model_row_label = QLabel("Modèle :")
-        f.addRow(self._ai_model_row_label, self._ai_model)
-        self._current_model_cfg = config.get("ai_model", "")
-
-        self._gemini_key = QLineEdit(config.get("gemini_api_key", ""))
-        self._gemini_key.setPlaceholderText("AIza…")
-        self._gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._gemini_key_row_label = QLabel("Clé Gemini :")
-        f.addRow(self._gemini_key_row_label, self._gemini_key)
-
-        self._openai_key = QLineEdit(config.get("openai_api_key", ""))
-        self._openai_key.setPlaceholderText("sk-…")
-        self._openai_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._openai_key_row_label = QLabel("Clé OpenAI :")
-        f.addRow(self._openai_key_row_label, self._openai_key)
-
-        self._vl.addLayout(f)
-
-        self._hint_ai = _hint("")
-        self._vl.addWidget(self._hint_ai)
-
-        self._ai_provider.currentIndexChanged.connect(self._on_provider_changed)
-        self._on_provider_changed(self._ai_provider.currentIndex())
-
-        self._vl.addStretch()
-
-    def _on_provider_changed(self, index: int) -> None:
-        is_gemini = index == 0
-        self._gemini_key.setVisible(is_gemini)
-        self._gemini_key_row_label.setVisible(is_gemini)
-        self._openai_key.setVisible(not is_gemini)
-        self._openai_key_row_label.setVisible(not is_gemini)
-
-        models = self._gemini_models if is_gemini else self._openai_models
-        self._ai_model.blockSignals(True)
-        self._ai_model.clear()
-        self._ai_model.addItems(models)
-        idx = self._ai_model.findText(self._current_model_cfg)
-        self._ai_model.setCurrentIndex(idx if idx >= 0 else 0)
-        self._ai_model.blockSignals(False)
-
-        if is_gemini:
-            self._hint_ai.setText(
-                "Gemini est utilisé pour classifier les moments forts "
-                "quand le score est ambigu. Laisser vide pour désactiver."
-            )
-        else:
-            self._hint_ai.setText(
-                "OpenAI est utilisé pour classifier les moments forts "
-                "quand le score est ambigu. Laisser vide pour désactiver."
-            )
-
-    def collect(self, config: dict) -> None:
-        config["ai_provider"] = "gemini" if self._ai_provider.currentIndex() == 0 else "openai"
-        config["ai_model"] = self._ai_model.currentText()
-        config["gemini_api_key"] = self._gemini_key.text().strip()
-        config["openai_api_key"] = self._openai_key.text().strip()
-
-
 class _PageHype(_PageBase):
     def __init__(self, config: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         hw = config.get("hypewatcher", {})
 
-        self._vl.addWidget(_h2("HypeWatcher"))
+        self._vl.addWidget(_h2("Alertes"))
         self._vl.addWidget(_sep())
-        self._vl.addWidget(_section_title("Activation"))
+        self._vl.addWidget(_section_title("Ce que ZLink vous signale"))
+
+        # Une case par famille : une alerte qu'on ne peut pas éteindre finit
+        # par être subie, et toutes n'intéressent pas tout le monde.
+        from core.alerts import FAMILLES
+        etats = (config.get("alerts") or {})
+        self._alert_boxes: dict[str, QCheckBox] = {}
+        for cle, libelle, defaut, aide in FAMILLES:
+            cb = QCheckBox(libelle)
+            cb.setFont(QFont(_FONT_UI, 11))
+            cb.setChecked(bool(etats.get(cle, defaut)))
+            cb.setToolTip(aide)
+            self._alert_boxes[cle] = cb
+            self._vl.addWidget(cb)
+        self._vl.addWidget(_hint(
+            "Chaque famille se coupe indépendamment. Une alerte désactivée "
+            "n'est pas seulement masquée : elle n'est plus calculée du tout."
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("HypeWatcher"))
 
         row = QHBoxLayout()
         self._enabled_cb = QCheckBox("Activer la détection de moments forts")
@@ -488,7 +449,7 @@ class _PageHype(_PageBase):
         self._score_high.valueChanged.connect(lambda v: self._score_high_lbl.setText(f"{v}%"))
         score_high_row.addWidget(self._score_high, stretch=1)
         score_high_row.addWidget(self._score_high_lbl)
-        f.addRow("Alerte directe ≥ :", score_high_row)
+        f.addRow("Alerte immédiate ≥ :", score_high_row)
 
         score_med_row = QHBoxLayout()
         self._score_med = QSlider(Qt.Orientation.Horizontal)
@@ -501,37 +462,149 @@ class _PageHype(_PageBase):
         self._score_med.valueChanged.connect(lambda v: self._score_med_lbl.setText(f"{v}%"))
         score_med_row.addWidget(self._score_med, stretch=1)
         score_med_row.addWidget(self._score_med_lbl)
-        f.addRow("Appel IA ≥ :", score_med_row)
+        f.addRow("Alerte confirmée ≥ :", score_med_row)
         adv_vl.addLayout(f)
+        adv_vl.addWidget(_hint(
+            "Le score mesure l'écart à l'activité habituelle de la chaîne, pas "
+            "un débit absolu : une petite chaîne et une grosse sont traitées de "
+            "la même façon. Au-dessus du seuil « confirmée », l'alerte demande "
+            "deux mesures consécutives ; au-dessus d'« immédiate », elle part "
+            "sans attendre."
+        ))
 
         adv_vl.addWidget(_sep())
         adv_vl.addWidget(_section_title("Cooldown"))
         f2 = self._form()
         self._cooldown = QSpinBox()
-        self._cooldown.setRange(10, 600)
+        self._cooldown.setRange(30, 3600)
         self._cooldown.setSuffix(" s")
-        self._cooldown.setValue(int(hw.get("cooldown_s", 90)))
+        self._cooldown.setValue(int(hw.get("cooldown_s", 600)))
         self._cooldown.setFixedWidth(100)
-        f2.addRow("Délai entre alertes :", self._cooldown)
+        f2.addRow("Délai entre deux alertes d'une même chaîne :", self._cooldown)
+
+        # Plafond global. Sans lui, un temps fort du ZEvent — où les vingt-cinq
+        # chats s'emballent ensemble — produisait des alertes en continu.
+        self._alerts_hour = QSpinBox()
+        self._alerts_hour.setRange(1, 60)
+        self._alerts_hour.setValue(int(hw.get("alerts_per_hour", 8)))
+        self._alerts_hour.setFixedWidth(100)
+        f2.addRow("Alertes maximum par heure :", self._alerts_hour)
         adv_vl.addLayout(f2)
         adv_vl.addWidget(_hint(
-            "Délai minimum (en secondes) entre deux alertes pour le même streamer."
+            "Le délai empêche une même chaîne de monopoliser les alertes ; le "
+            "plafond horaire vaut pour l'ensemble de la grille. Pendant un "
+            "temps fort du ZEvent, tous les chats s'emballent en même temps : "
+            "seule la chaîne qui se détache nettement des autres déclenche "
+            "alors une alerte."
         ))
 
         self._vl.addWidget(self._advanced)
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Dons"))
+        f3 = self._form()
+        dons = config.get("donations") or {}
+        self._don_threshold = QSpinBox()
+        self._don_threshold.setRange(50, 100_000)
+        self._don_threshold.setSingleStep(100)
+        self._don_threshold.setSuffix(" €")
+        self._don_threshold.setValue(int(dons.get("threshold", 1000)))
+        self._don_threshold.setFixedWidth(120)
+        f3.addRow("Signaler à partir de :", self._don_threshold)
+
+        self._don_per_hour = QSpinBox()
+        self._don_per_hour.setRange(1, 120)
+        self._don_per_hour.setValue(int(dons.get("per_hour", 12)))
+        self._don_per_hour.setFixedWidth(120)
+        f3.addRow("Alertes maximum par heure :", self._don_per_hour)
+        self._vl.addLayout(f3)
+        self._vl.addWidget(_hint(
+            "Le seuil porte sur ce qu'une chaîne reçoit ENTRE DEUX RELEVÉS "
+            "(toutes les 30 s), pas sur un don unique : l'API du ZEvent ne "
+            "publie qu'un cumul par streamer. Une même chaîne ne peut pas "
+            "déclencher deux alertes à moins de cinq minutes d'écart."
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Son"))
+
+        sons = config.get("sounds") or {}
+        self._son_actif = QCheckBox(
+            "Jouer un son bref sur un palier de cagnotte ou un objectif atteint")
+        self._son_actif.setFont(QFont(_FONT_UI, 12))
+        # Désactivé par défaut : un son qu'on n'a pas demandé est une intrusion,
+        # et il se superpose au direct qu'on est en train d'écouter.
+        self._son_actif.setChecked(bool(sons.get("enabled", False)))
+        self._son_actif.stateChanged.connect(self._on_son_toggle)
+        self._vl.addWidget(self._son_actif)
+
+        son_row = QHBoxLayout()
+        son_row.setSpacing(8)
+        self._son_volume = QSlider(Qt.Orientation.Horizontal)
+        self._son_volume.setRange(10, 100)
+        self._son_volume.setValue(int(sons.get("volume", 60)))
+        self._son_vol_lbl = QLabel(f"{self._son_volume.value()} %")
+        self._son_vol_lbl.setFixedWidth(44)
+        self._son_vol_lbl.setFont(QFont(_FONT_MONO, 11, QFont.Weight.Bold))
+        self._son_vol_lbl.setStyleSheet(f"color: {_C_GREEN};")
+        self._son_volume.valueChanged.connect(
+            lambda v: self._son_vol_lbl.setText(f"{v} %"))
+        son_row.addWidget(self._son_volume, stretch=1)
+        son_row.addWidget(self._son_vol_lbl)
+
+        self._son_test = QPushButton("Écouter")
+        self._son_test.setFixedHeight(28)
+        self._son_test.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._son_test.setStyleSheet(
+            f"QPushButton {{ background: {_C_SURFACE}; color: {_C_TEXT};"
+            f" border: 1px solid {_C_BORDER}; border-radius: 6px; padding: 0 14px; }}"
+            f"QPushButton:hover {{ background: #232323; }}")
+        self._son_test.clicked.connect(self._on_son_test)
+        son_row.addWidget(self._son_test)
+        self._son_row_widget = QWidget()
+        self._son_row_widget.setStyleSheet("background: transparent;")
+        self._son_row_widget.setLayout(son_row)
+        self._vl.addWidget(self._son_row_widget)
+        self._vl.addWidget(_hint(
+            "Deux timbres distincts, qu'on reconnaît sans regarder l'écran : "
+            "un arpège montant pour un palier de cagnotte, deux notes plus "
+            "brèves pour un objectif atteint."
+        ))
+        self._son_row_widget.setEnabled(self._son_actif.isChecked())
+
         self._vl.addStretch()
 
         self._on_toggle(None)
+
+    def _on_son_toggle(self) -> None:
+        self._son_row_widget.setEnabled(self._son_actif.isChecked())
+
+    def _on_son_test(self) -> None:
+        """Fait entendre les deux sons au volume choisi, même si coupés."""
+        from core import sounds
+        sounds.configure({"sounds": {"enabled": True,
+                                     "volume": self._son_volume.value()}})
+        sounds.play("milestone", force=True)
+        QTimer.singleShot(1100, lambda: sounds.play("goal", force=True))
 
     def _on_toggle(self, _state: object) -> None:
         self._advanced.setVisible(self._enabled_cb.isChecked())
 
     def collect(self, config: dict) -> None:
+        config["alerts"] = {
+            cle: cb.isChecked() for cle, cb in self._alert_boxes.items()}
         hw = config.setdefault("hypewatcher", {})
         hw["enabled"] = self._enabled_cb.isChecked()
         hw["score_high"] = self._score_high.value() / 100.0
         hw["score_medium"] = self._score_med.value() / 100.0
         hw["cooldown_s"] = self._cooldown.value()
+        hw["alerts_per_hour"] = self._alerts_hour.value()
+        dons = config.setdefault("donations", {})
+        dons["threshold"] = self._don_threshold.value()
+        dons["per_hour"] = self._don_per_hour.value()
+        sons = config.setdefault("sounds", {})
+        sons["enabled"] = self._son_actif.isChecked()
+        sons["volume"] = self._son_volume.value()
 
 
 class _PageClips(_PageBase):
@@ -556,6 +629,7 @@ class _PageClips(_PageBase):
         dur_row.addWidget(self._duration)
         dur_row.addStretch()
         f.addRow("Durée du clip :", dur_row)
+        self._vl_clip_rows = f
 
         # Dossier
         dir_row = QHBoxLayout()
@@ -588,7 +662,47 @@ class _PageClips(_PageBase):
             "Les modifications de durée ne s'appliquent qu'au prochain lancement."
         ))
 
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Depuis la grille"))
+
+        self._grid_clips = QCheckBox(
+            "Permettre de garder un moment depuis une cellule de la grille")
+        self._grid_clips.setFont(QFont(_FONT_UI, 12))
+        self._grid_clips.setChecked(bool(clips.get("grid_enabled", True)))
+        self._vl.addWidget(self._grid_clips)
+        self._vl.addWidget(_hint(
+            "Chaque flux conserve alors les dernières secondes en mémoire. "
+            "C'est un plafond, pas une réservation : à la qualité d'une grille, "
+            "une minute pèse environ 2,5 Mo par flux."
+        ))
+
+        self._auto_clip = QCheckBox(
+            "Enregistrer automatiquement quand HypeWatcher signale un moment")
+        self._auto_clip.setFont(QFont(_FONT_UI, 12))
+        # DÉSACTIVÉ par défaut, et c'est délibéré : une alerte n'est pas
+        # nécessairement un moment qu'on veut garder, et un event génère
+        # largement de quoi remplir un disque sans qu'on l'ait demandé.
+        self._auto_clip.setChecked(bool(clips.get("auto_on_alert", False)))
+        self._auto_clip.stateChanged.connect(self._on_auto_toggle)
+        self._vl.addWidget(self._auto_clip)
+
+        auto_row = self._form()
+        self._auto_max = QSpinBox()
+        self._auto_max.setRange(1, 60)
+        self._auto_max.setValue(int(clips.get("auto_max_per_hour", 6)))
+        self._auto_max.setFixedWidth(100)
+        self._auto_max.setEnabled(self._auto_clip.isChecked())
+        auto_row.addRow("Clips automatiques maximum par heure :", self._auto_max)
+        self._vl.addLayout(auto_row)
+        self._vl.addWidget(_hint(
+            "Sans ce plafond, un soir d'affluence remplirait le dossier de "
+            "fichiers que personne n'a demandés."
+        ))
+
         self._vl.addStretch()
+
+    def _on_auto_toggle(self) -> None:
+        self._auto_max.setEnabled(self._auto_clip.isChecked())
 
     def _browse(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -601,15 +715,138 @@ class _PageClips(_PageBase):
         config.setdefault("clips", {})
         config["clips"]["duration_secs"] = self._duration.value()
         config["clips"]["directory"] = self._directory.text().strip()
+        config["clips"]["grid_enabled"] = self._grid_clips.isChecked()
+        config["clips"]["auto_on_alert"] = self._auto_clip.isChecked()
+        config["clips"]["auto_max_per_hour"] = self._auto_max.value()
 
 
 # ── SettingsPanel ─────────────────────────────────────────────────────────────
 
+# Licences relevées sur les paquets réellement installés (dist-info) et sur
+# le mpv du système, pas de mémoire.
+_THIRD_PARTY: list[tuple[str, str]] = [
+    ("Qt 6",                      "LGPL v3"),
+    ("PyQt6 · PyQt6-WebEngine",   "GPL v3"),
+    ("PyQt6-sip",                 "BSD 2-Clause"),
+    ("mpv / libmpv",              "GPL v2+ et LGPL v2.1+"),
+    ("python-mpv",                "GPL v2+ ou LGPL v2.1+"),
+    ("Streamlink",                "BSD 2-Clause"),
+    ("httpx",                     "BSD 3-Clause"),
+    ("QtAwesome",                 "MIT"),
+    ("Material Design Icons",     "Apache 2.0"),
+    ("PyQtGraph",                 "MIT"),
+    ("NumPy",                     "BSD 3-Clause"),
+    ("lxml",                      "BSD 3-Clause"),
+    ("python-dotenv",             "BSD 3-Clause"),
+    ("pycryptodome",              "BSD et domaine public"),
+    ("Chart.js",                  "MIT"),
+]
+
+
+class _PageCredits(_PageBase):
+    """Page Crédits — sources de données, auteur, licence."""
+
+    _LINK_STYLE = "color: #00ff87; text-decoration: none;"
+
+    def __init__(self, config: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self._vl.addWidget(_h2(f"Crédits — ZLink {display_version()}"))
+        self._vl.addWidget(_sep())
+
+        self._vl.addWidget(_section_title("Données"))
+        self._vl.addWidget(self._link(
+            "InGDoc — gdoc.fr",
+            "https://gdoc.fr",
+            "Programme, participations, objectifs de dons et avatars. "
+            "Merci à l'équipe InGDoc, sans qui ce panel n'aurait rien à afficher.",
+        ))
+        self._vl.addWidget(self._link(
+            "ZEvent — API officielle",
+            "https://zevent.fr",
+            "Cagnotte globale, viewers et état des lives.",
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Projet"))
+        self._vl.addWidget(self._link(
+            "Fabien Millet — fabienmillet",
+            "https://github.com/fabienmillet",
+            "Conception et développement de ZLink.",
+        ))
+        self._vl.addWidget(self._link(
+            "Licence GNU GPL v3 ou ultérieure",
+            "https://github.com/fabienmillet/ZLink/blob/main/LICENSE",
+            "Copyright (C) 2026 Fabien MILLET. Logiciel libre : utilisation, "
+            "étude, modification et redistribution garanties, à condition que "
+            "les versions dérivées restent sous la même licence et que leurs "
+            "sources soient fournies.",
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Logiciels tiers"))
+        self._vl.addWidget(_hint(
+            "ZLink s'appuie sur ces projets. Plusieurs de leurs licences "
+            "imposent de conserver l'avis de copyright en cas de "
+            "redistribution. C'est PyQt6, en GPL v3, qui détermine la licence "
+            "de l'ensemble distribué."
+        ))
+        for name, lic in _THIRD_PARTY:
+            self._vl.addWidget(self._credit_line(name, lic))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_hint(
+            "ZLink n'est pas affilié à l'organisation du ZEvent. "
+            "Les dons se font exclusivement sur zevent.fr."
+        ))
+        self._vl.addStretch()
+
+    def _credit_line(self, name: str, lic: str) -> QWidget:
+        """Une ligne « projet — licence »."""
+        row = QWidget()
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(8)
+        n = QLabel(name)
+        n.setFont(QFont(_FONT_UI, 11))
+        n.setStyleSheet("color: #cccccc;")
+        hl.addWidget(n)
+        l = QLabel(lic)
+        l.setFont(QFont(_FONT_UI, 10))
+        l.setStyleSheet(f"color: {_C_MUTED};")
+        hl.addWidget(l)
+        hl.addStretch()
+        return row
+
+    def _link(self, title: str, url: str, desc: str) -> QWidget:
+        """Bloc titre cliquable + description."""
+        box = QWidget()
+        vl = QVBoxLayout(box)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(2)
+        lbl = QLabel(f'<a href="{url}" style="{self._LINK_STYLE}">{title}</a>')
+        lbl.setFont(QFont(_FONT_UI, 12, QFont.Weight.Bold))
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        # Ouverture dans le navigateur du système, pas dans l'application.
+        lbl.setOpenExternalLinks(True)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        vl.addWidget(lbl)
+        vl.addWidget(_hint(desc))
+        return box
+
+    def collect(self, config: dict) -> None:
+        """Page informative : rien à enregistrer."""
+        return
+
+
 _NAV_ITEMS = [
     ("Streams",      "mdi6.play-circle-outline"),
     ("Écrans",       "mdi6.monitor-multiple"),
-    ("APIs",         "mdi6.key-outline"),
-    ("HypeWatcher",  "mdi6.bell-outline"),    ("Clips",        "mdi6.record-circle-outline"),]
+    ("Alertes",      "mdi6.bell-outline"),
+    ("Clips",        "mdi6.record-circle-outline"),
+    ("Crédits",      "mdi6.heart-outline"),
+]
 
 
 class SettingsPanel(QWidget):
@@ -638,23 +875,16 @@ class SettingsPanel(QWidget):
     # ── persistence ──────────────────────────────────────────────────
 
     def _load_config(self) -> dict:
-        try:
-            if CONFIG_PATH.exists():
-                return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-        return {}
+        return config_store.load()
 
     def _save_config(self) -> None:
-        CONFIG_PATH.write_text(
-            json.dumps(self._config, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        # Le fichier peut contenir des clés API : lisible par le seul propriétaire.
-        try:
-            os.chmod(CONFIG_PATH, 0o600)
-        except OSError as exc:
-            logger.warning("Permissions de %s non restreintes : %s", CONFIG_PATH, exc)
+        """Écrit les réglages en FUSIONNANT avec le fichier actuel.
+
+        `self._config` date de l'ouverture de la fenêtre. Le réécrire tel quel
+        rétablissait tout ce qui avait bougé depuis par un autre chemin :
+        favoris, rappels du programme, choix de l'assistant.
+        """
+        config_store.save_merge(self._config)
 
     # ── build ─────────────────────────────────────────────────────────
 
@@ -716,11 +946,12 @@ class SettingsPanel(QWidget):
 
         self._page_streams = _PageStreams(self._config)
         self._page_screens = _PageScreens(self._config)
-        self._page_apis    = _PageAPIs(self._config)
         self._page_hype    = _PageHype(self._config)
         self._page_clips   = _PageClips(self._config)
+        self._page_credits = _PageCredits(self._config)
 
-        for page in (self._page_streams, self._page_screens, self._page_apis, self._page_hype, self._page_clips):
+        for page in (self._page_streams, self._page_screens, self._page_hype,
+                     self._page_clips, self._page_credits):
             self._pages_stack.addWidget(_scroll_wrap(page))
 
         cl.addWidget(self._pages_stack, stretch=1)
@@ -772,7 +1003,6 @@ class SettingsPanel(QWidget):
 
     def _on_save(self) -> None:
         self._page_streams.collect(self._config)
-        self._page_apis.collect(self._config)
         self._page_hype.collect(self._config)
         self._page_clips.collect(self._config)
 

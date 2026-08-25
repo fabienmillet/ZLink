@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
 """ZLink — Point d'entrée de l'application."""
 
 from __future__ import annotations
@@ -15,8 +19,27 @@ _PROJECT_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _PROJECT_DIR not in os.environ.get("PATH", ""):
     os.environ["PATH"] = _PROJECT_DIR + os.pathsep + os.environ.get("PATH", "")
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QSurfaceFormat
+# mpv n'implémente --wid que sur X11, win32 et Android : en session Wayland
+# native, la vidéo s'ouvrirait dans des fenêtres séparées du reste de l'UI. On
+# bascule donc Qt sur XWayland. À poser AVANT le premier import PyQt6 : Qt lit
+# la variable à la construction de QApplication.
+# QT_QPA_PLATFORM est souvent une LISTE de repli posée par la distribution
+# ("wayland;xcb") : ce n'est pas un choix explicite de l'utilisateur, et Qt en
+# retiendrait la première entrée, donc Wayland. On ne respecte le réglage que
+# s'il ne mène pas à Wayland (xcb, offscreen, minimal… restent intacts).
+# On ne force rien non plus si aucun serveur X n'est joignable : sans XWayland,
+# xcb échouerait à se connecter et l'application ne démarrerait pas du tout.
+_qt_platform = os.environ.get("QT_QPA_PLATFORM", "")
+if (
+    sys.platform.startswith("linux")
+    and os.environ.get("XDG_SESSION_TYPE") == "wayland"
+    and os.environ.get("DISPLAY")
+    and (not _qt_platform or _qt_platform.split(";")[0].strip().startswith("wayland"))
+):
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont, QSurfaceFormat
 from PyQt6.QtWidgets import QApplication
 
 logging.basicConfig(
@@ -123,7 +146,9 @@ def _on_grid_selection_changed_cb(
 
 def main() -> int:
     _mock_mode = "--mock" in sys.argv
-    _clean_argv = [a for a in sys.argv if a != "--mock"]
+    # --setup rejoue l'assistant de première configuration, même déjà passé.
+    _force_setup = "--setup" in sys.argv
+    _clean_argv = [a for a in sys.argv if a not in ("--mock", "--setup")]
     # Obligatoire dès qu'il y a plusieurs QOpenGLWidget dans l'application (les
     # cellules de la grille) et pour QtWebEngine : sans contextes partagés, Qt
     # retombe sur des contextes isolés et chaque widget compose le contenu de
@@ -140,6 +165,101 @@ def main() -> int:
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
 
     app = QApplication(_clean_argv)
+
+    # Avant tout lecteur mpv : une erreur Xlib non gérée termine le processus
+    # depuis le thread qui l'a provoquée. Voir core/x11_guard.
+    from core import x11_guard
+    # Réinstallée en continu : mpv reprend le gestionnaire quand son affichage
+    # démarre, et nos poses ponctuelles laissaient des trous pendant lesquels
+    # une erreur X terminait le processus.
+    # Le QTimer a  pour parent : Qt le maintient en vie.
+    x11_guard.start_watchdog(app, 1000)
+
+    # Menus, infobulles et listes déroulantes ne sont pas peints par nous : ils
+    # suivent la palette du thème du bureau, qui donnait ici du texte noir sur
+    # fond sombre. Voir core/ui_theme.
+    from core.ui_theme import apply_dark_palette
+    apply_dark_palette(app)
+
+    # On ne démonte PAS les lecteurs mpv pour quitter, et c'est délibéré.
+    #
+    # Chaque lecteur tient sa propre connexion X et y présente ses images depuis
+    # ses threads. mpv_terminate_destroy() détruit la fenêtre alors qu'une
+    # requête Present peut encore être en vol : le serveur répond BadWindow ou
+    # BadPixmap, Xlib appelle son gestionnaire par défaut, qui fait exit() —
+    # depuis un thread de rendu. Avec dix-huit lecteurs arrêtés de front, autant
+    # de sorties de processus concurrentes déroulaient le tas en même temps et
+    # glibc abandonnait sur « corrupted double-linked list », laissant
+    # l'application figée que ni le Ctrl+C ni le chien de garde ne rattrapaient.
+    #
+    # Ce démontage n'apporte rien ici : le processus se termine juste après. Le
+    # serveur X libère fenêtres et pixmaps à la fermeture des connexions, et
+    # rien n'est en attente d'écriture (config et cache d'avatars sont écrits de
+    # façon atomique et synchrone, au fil de l'eau). MpvWidget.shutdown() reste
+    # employé quand un lecteur donné disparaît en cours de session — un seul
+    # lecteur, sans course avec dix-sept autres.
+    from widgets.bigscreen_widget import shutdown_avatar_pool as _shutdown_avatars
+    app.aboutToQuit.connect(_shutdown_avatars)
+
+    # Ctrl+C : pendant app.exec() la boucle est tenue par du code C++ et Python
+    # n'exécute aucun bytecode, donc son gestionnaire de signal ne se déclenche
+    # jamais — le SIGINT était purement et simplement avalé. Le QTimer rend la
+    # main à l'interpréteur régulièrement pour que le handler puisse partir.
+    import signal as _signal
+
+    _quit_asked = {"n": 0}
+
+    def _on_signal(_sig, _frm) -> None:
+        _quit_asked["n"] += 1
+        if _quit_asked["n"] == 1:
+            logger.info("Signal reçu — arrêt de ZLink")
+            # mpv restaure le gestionnaire d'erreur Xlib PAR DÉFAUT quand il
+            # démonte un lecteur, et celui-là termine le processus. On reprend
+            # la main avant la phase d'arrêt.
+            x11_guard.install()
+            # Chien de garde : sous xcb, terminer 25 lecteurs mpv peut traîner
+            # et l'application paraissait alors ignorer le Ctrl+C. Quoi qu'il
+            # arrive, on sort.
+            import threading as _th
+            _wd = _th.Timer(4.0, lambda: os._exit(130))
+            _wd.daemon = True
+            _wd.start()
+            app.quit()
+            return
+        # Deuxième Ctrl+C : l'arrêt propre traîne (téléchargement en cours,
+        # sous-processus streamlink…). On sort sans attendre.
+        logger.warning("Second signal — arrêt immédiat")
+        os._exit(130)
+
+    for _sig in (_signal.SIGINT, _signal.SIGTERM):
+        try:
+            _signal.signal(_sig, _on_signal)
+        except (ValueError, OSError):
+            pass  # pas le thread principal, ou signal indisponible
+    _sig_timer = QTimer()
+    _sig_timer.setInterval(200)
+    _sig_timer.timeout.connect(lambda: None)
+    _sig_timer.start()
+
+    # L'UI est dessinée avec "Segoe UI Variable" et "Cascadia Code", absentes
+    # hors Windows : Qt y substituerait une police par défaut arbitraire, d'où
+    # une typographie incohérente sur Linux et macOS. On déclare des chaînes de
+    # repli explicites ; la substitution s'applique aussi bien aux QFont() qu'aux
+    # font-family des feuilles de style, donc à tous les widgets sans les toucher.
+    if sys.platform != "win32":
+        QFont.insertSubstitutions("Segoe UI Variable", [
+            "Segoe UI", "Inter", "SF Pro Text", "Cantarell",
+            "Noto Sans", "DejaVu Sans",
+        ])
+        # Consolas sert aux placeholders d'avatar et au compteur de cagnotte.
+        QFont.insertSubstitutions("Consolas", [
+            "Cascadia Mono", "SF Mono", "JetBrains Mono", "Fira Code",
+            "Source Code Pro", "Noto Sans Mono", "Liberation Mono",
+        ])
+        QFont.insertSubstitutions("Cascadia Code", [
+            "Cascadia Mono", "SF Mono", "JetBrains Mono", "Fira Code",
+            "Source Code Pro", "Noto Sans Mono", "Liberation Mono",
+        ])
 
     # QApplication applique la locale système (setlocale(LC_ALL, "")). libmpv exige
     # LC_NUMERIC="C" et plante sinon — segfault immédiat avec une locale à virgule
@@ -158,6 +278,12 @@ def main() -> int:
         _app_font.setPointSize(10)
         app.setFont(_app_font)
 
+    # --- Première configuration ---
+    # AVANT build_layout : c'est l'assistant qui fixe le nombre d'écrans, et la
+    # disposition est décidée une fois pour toutes au démarrage.
+    from windows.wizard import run_first_run_wizard
+    run_first_run_wizard(force=_force_setup)
+
     # --- Détection écrans et assignation des rôles ---
     layout = build_layout(app)
     logger.info("=== ZLink démarré en mode %s ===", layout.mode.name)
@@ -168,6 +294,14 @@ def main() -> int:
         _startup_config: dict = json.loads(_cfg_path.read_text(encoding="utf-8")) if _cfg_path.exists() else {}
     except Exception:
         _startup_config = {}
+
+    # Sons d'alerte, coupés par défaut. Importé ICI : la connexion de
+    # settings_changed plus bas s'en sert, et un import placé après produisait
+    # un NameError au premier enregistrement des réglages.
+    from core import alerts as _alerts
+    _alerts.configure(_startup_config)
+    from core import sounds as _sounds
+    _sounds.configure(_startup_config)
 
     # --- DataManager ---
     data_manager = DataManager()
@@ -192,6 +326,8 @@ def main() -> int:
         grid       = _shell.grid
         fullscreen.set_clip_config(_startup_config)
         grid.grid.set_max_streams(_startup_config.get("max_active_streams", 20))
+        grid.grid.set_sort_mode(_startup_config.get("grid_sort", "viewers"))
+        grid.set_clip_config(_startup_config)
         panel.stream_selected.connect(
             lambda login: _on_stream_selected(login, fullscreen, data_manager, stream_manager)
         )
@@ -217,6 +353,8 @@ def main() -> int:
             is_dual = layout.mode == DisplayMode.DUAL
             grid = GridWindow(screen=grid_assignment.screen, show_back_button=is_dual)
             grid.grid.set_max_streams(_startup_config.get("max_active_streams", 20))
+            grid.grid.set_sort_mode(_startup_config.get("grid_sort", "viewers"))
+            grid.set_clip_config(_startup_config)
             grid.stream_selected.connect(
                 lambda login: _on_stream_selected(login, fullscreen, data_manager, stream_manager)
             )
@@ -256,9 +394,23 @@ def main() -> int:
         panel.settings_changed.connect(data_manager.reload_config)
         panel.settings_changed.connect(stream_manager.reload_config)
         panel.settings_changed.connect(fullscreen.set_clip_config)
+        panel.settings_changed.connect(_alerts.configure)
+        panel.settings_changed.connect(_sounds.configure)
+        # Un show du programme démarre : proposer d'y aller, sans imposer.
+        panel.show_started.connect(fullscreen.show_show_started)
+        # Le plein écran est la source principale de la console de mixage.
+        panel.main_volume_changed.connect(fullscreen.set_volume)
+        panel.main_mute_changed.connect(fullscreen.set_muted)
+        fullscreen.stream_changed.connect(panel.set_main_stream)
+        panel.set_main_stream(fullscreen.current_login)
+        panel.action_requested.connect(fullscreen.run_action)
         if grid is not None:
             panel.settings_changed.connect(
-                lambda cfg: grid.grid.set_max_streams(cfg.get("max_active_streams", 20))
+                lambda cfg: (
+                    grid.grid.set_max_streams(cfg.get("max_active_streams", 20)),
+                    grid.grid.set_sort_mode(cfg.get("grid_sort", "viewers")),
+                    grid.set_clip_config(cfg),
+                )
             )
 
     # --- Connexions StreamManager → FullscreenWindow ---
@@ -280,21 +432,224 @@ def main() -> int:
         data_manager.streamers_updated.connect(lambda _: grid.refresh_hype_cells())
         grid.hype_alert.connect(fullscreen.show_hype_alert)
         data_manager.goal_accomplished.connect(grid.grid.goal_achieved_flash)
+        # Un palier n'appartient à aucun streamer : toute la grille réagit.
+        data_manager.milestone_reached.connect(
+            lambda _amount, _label, g=grid: g.grid.pulse_all()
+        )
+        # Un afflux de dons concerne UNE chaîne : sa cellule seule réagit.
+        data_manager.big_donation.connect(
+            # Un bombardement dure : sa cellule clignote plus longtemps, le
+            # temps qu'on ait la chance de la voir.
+            lambda login, _d, _a, nature, g=grid: g.grid.pulse_cell(
+                login, "#f5c518", 10.0 if nature == "bombardement" else 6.0)
+        )
+        # L'audio de la grille vient de cellules qu'on ne regarde pas : le plein
+        # écran affiche qui l'on entend.
+        grid.grid.audio_pins_changed.connect(fullscreen.set_pinned_audio)
+        if panel is not None:
+            # La console de mixage ne pilote QUE les chaînes épinglées.
+            grid.grid.audio_pins_changed.connect(panel.set_pinned_audio)
+            panel.cell_volume_changed.connect(grid.grid.set_cell_volume)
+            panel.unpin_requested.connect(grid.grid.unpin_audio)
+            panel.cell_mute_changed.connect(grid.grid.set_cell_muted)
+            # La liste du plein écran doit dire ce qu'on entend VRAIMENT.
+            panel.cell_mute_changed.connect(fullscreen.set_pinned_muted)
+        # Le moment s'est produit sur une cellule, mais c'est le plein écran
+        # qu'on regarde : c'est là que le replay doit s'afficher.
+        grid.grid.replay_requested.connect(fullscreen.start_replay)
+        def _raid_zevent(source: str, cible: str, viewers: int) -> None:
+            """N'annoncer qu'un raid ENTRE participants du ZEvent.
+
+            N'importe quelle chaîne peut raider un participant : un ami, un
+            petit streamer de passage. Ces raids-là n'ont rien à voir avec
+            l'événement — d'où les annonces à quatre spectateurs. On exige donc
+            que la source figure dans la liste des participants.
+            """
+            if source.lower() not in data_manager.participant_logins():
+                logger.debug("Raid ignoré : %s n'est pas un participant", source)
+                return
+            fullscreen.show_raid(source, cible, viewers)
+            if panel is not None:
+                panel.add_feed_event(
+                    "event", cible,
+                    f"{source} raide {cible}"
+                    + (f" avec {viewers:,} spectateurs".replace(",", "\u202f")
+                       if viewers else ""))
+
+        grid.raid_detected.connect(_raid_zevent)
+
+        def _top_entree(login, display, viewers, rang, g=grid) -> None:
+            """N'annoncer que ce qu'on ne voit pas déjà.
+
+            Signaler l'entrée dans le top d'une chaîne déjà à l'écran
+            n'apprendrait rien : on la regarde.
+            """
+            affichees = {c.twitch_login for c in g.grid._cells if c.twitch_login}
+            if login in affichees or login == fullscreen.current_login:
+                return
+            fullscreen.show_top_entry(login, display, viewers, rang)
+            if panel is not None:
+                panel.add_feed_event(
+                    "live", login,
+                    f"{display} entre dans le top {rang} des audiences "
+                    + f"({viewers:,} viewers)".replace(",", "\u202f"))
+
+        data_manager.top_stream_entered.connect(_top_entree)
+
+        # Raccourcis clavier du plein écran qui portent sur la grille : elle
+        # seule connaît l'ordre d'affichage courant.
+        def _cellule(n: int, g=grid) -> str:
+            cells = [c for c in g.grid._cells if c.twitch_login and c.is_online]
+            cells = g.grid._ordered_for_display(cells)
+            return cells[n].twitch_login if 0 <= n < len(cells) else ""
+
+        def _aller_a(n: int) -> None:
+            login = _cellule(n)
+            if login:
+                fullscreen.stream_change_requested.emit(login)
+
+        def _voisin(pas: int, g=grid) -> None:
+            cells = [c for c in g.grid._cells if c.twitch_login and c.is_online]
+            cells = g.grid._ordered_for_display(cells)
+            logins = [c.twitch_login for c in cells]
+            if not logins:
+                return
+            courant = fullscreen.current_login
+            i = logins.index(courant) if courant in logins else -1
+            fullscreen.stream_change_requested.emit(
+                logins[(i + pas) % len(logins)])
+
+        fullscreen.slot_requested.connect(_aller_a)
+        fullscreen.neighbour_requested.connect(_voisin)
+        if panel is not None:
+            # Les alertes n'existaient qu'en toast éphémère : on les archive
+            # aussi dans le fil d'événements de l'Accueil.
+            grid.hype_alert.connect(
+                lambda login, label, _score, _color, excerpt, p=panel:
+                    p.add_feed_event(
+                        "hype", login,
+                        # Le libellé seul (« Bravo », « Moment fort ») ne dit
+                        # pas ce qui s'est passé : on joint le message du chat
+                        # qui a déclenché l'alerte.
+                        f"{login} — {label}" + (f" · « {excerpt} »" if excerpt else ""),
+                    )
+            )
+            data_manager.goal_accomplished.connect(
+                lambda login, goal, p=panel:
+                    p.add_feed_event("goal", login, f"{login} — objectif atteint : {goal}")
+            )
+            data_manager.favorite_live.connect(
+                lambda login, display, p=panel:
+                    p.add_feed_event("live", login,
+                                     f"{display or login} vient de passer en direct")
+            )
+            data_manager.goal_imminent.connect(
+                lambda login, display, goal, reste, p=panel:
+                    p.add_feed_event(
+                        "goal", login,
+                        f"{display} est à {reste:,.0f} € de son objectif "
+                        .replace(",", "\u202f") + f"« {goal} »")
+            )
+            data_manager.big_donation.connect(
+                lambda login, display, amount, nature, p=panel:
+                    p.add_feed_event(
+                        "money", login,
+                        (f"Bombardement de dons sur {display} — "
+                         if nature == "bombardement"
+                         else f"{display} vient de recevoir ")
+                        + f"{amount:,.0f} €".replace(",", "\u202f"))
+            )
+            data_manager.milestone_reached.connect(
+                lambda amount, label, p=panel:
+                    p.add_feed_event("money", "",
+                                     f"La cagnotte vient de dépasser {label}")
+            )
+            data_manager.programme_added.connect(
+                lambda name, when, p=panel:
+                    p.add_feed_event("event", "",
+                                     f"Nouveau au programme : {name}"
+                                     + (f" — {when}" if when else ""))
+            )
+
+    # Un favori qui lance son direct : annoncé aussi sur le plein écran, où
+    # l'utilisateur a les yeux — le fil du panel peut être sur un autre écran.
+    data_manager.favorite_live.connect(fullscreen.show_favorite_live)
+    data_manager.milestone_reached.connect(fullscreen.show_milestone)
+    data_manager.big_donation.connect(fullscreen.show_big_donation)
+    data_manager.goal_imminent.connect(fullscreen.show_goal_imminent)
+
+    # Journal de session : tout est signalé quelque part au moment où ça arrive,
+    # mais rien n'y survit. Voir core/session_log.
+    data_manager.milestone_reached.connect(
+        lambda _a, _l: _sounds.play("milestone"))
+    data_manager.goal_accomplished.connect(
+        lambda _lg, _g: _sounds.play("goal"))
+
+    from core.session_log import SESSION as _SESSION
+    fullscreen.stream_changed.connect(_SESSION.set_current_stream)
+    data_manager.goal_accomplished.connect(_SESSION.add_goal)
+    data_manager.milestone_reached.connect(
+        lambda _amount, label: _SESSION.add_milestone(label))
+    data_manager.global_stats_updated.connect(
+        lambda st: _SESSION.observe_stats(
+            getattr(st, "donation_total", 0.0), getattr(st, "viewers_total", 0)))
+    if grid is not None:
+        grid.hype_alert.connect(
+            lambda login, label, score, _c, _e: _SESSION.add_hype(login, label, score))
+        grid.grid.clip_saved.connect(_SESSION.add_clip)
+
+    # Le récapitulatif est écrit à la fermeture : os._exit court-circuite tout
+    # ce qui suit la boucle Qt, aboutToQuit est le dernier moment utile.
+    from windows.recap import save_summary as _save_recap
+    app.aboutToQuit.connect(lambda: _save_recap())
 
     # --- Démarrage du polling ---
     if _mock_mode:
         # Mode mock : pas de polling réseau, seulement historique + avatars
         import threading as _threading
         _threading.Thread(target=data_manager._history_worker, daemon=True).start()
-        data_manager._start_avatars_fetch()
         _injector = MockInjector(data_manager, parent=app)
+        # MockInjector émet streamers_updated directement, sans repasser par le
+        # chemin DataManager qui précharge les avatars : on le déclenche ici.
+        data_manager._prefetch_avatars(_injector.streamers)
         _injector.start()
     else:
         data_manager.start()
 
+    # --- Vérification de mise à jour (notification seulement) ---
+    if panel is not None:
+        from core.updater import UpdateChecker
+
+        _updater = UpdateChecker()
+
+        def _on_update(version: str, url: str, p=panel) -> None:
+            p.add_feed_event(
+                "event", "",
+                f"ZLink {version} est disponible — ouvrir la page de release",
+            )
+            # Le fil d'événements défile ; le badge de l'en-tête, lui, reste.
+            p.set_update_available(version, url)
+            logger.info("Mise à jour disponible : %s — %s", version, url)
+
+        _updater.update_available.connect(_on_update)
+        # Après le démarrage : ne pas retarder l'affichage pour une requête réseau.
+        QTimer.singleShot(5000, _updater.check)
+
     count = 1 + (1 if panel else 0) + (1 if grid else 0)
     logger.info("%d fenêtre(s) créée(s)", count)
-    return app.exec()
+    code = app.exec()
+
+    # Sortie franche, sans démontage. La boucle Qt est terminée ; les lecteurs
+    # mpv tournent encore et c'est voulu (voir plus haut). os._exit court-circuite
+    # aussi la jonction des threads non-daemon, qui faisait traîner la fermeture.
+    # Rien n'est en attente d'écriture : config.json et le cache d'avatars sont
+    # écrits de façon atomique et synchrone.
+    _xerr = x11_guard.error_count()
+    if _xerr:
+        logger.info("%d erreur(s) X11 absorbée(s) pendant la session", _xerr)
+    logger.info("ZLink arrêté")
+    logging.shutdown()
+    os._exit(code)
 
 
 def _refresh_fullscreen_viewers(
