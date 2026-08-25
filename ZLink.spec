@@ -11,6 +11,8 @@
 # plusieurs secondes avec Qt et WebEngine, et complique la cohabitation avec
 # libmpv et streamlink qui doivent être trouvés à côté de l'exécutable.
 
+import pathlib
+import re
 import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -37,6 +39,25 @@ elif sys.platform == "darwin":
     # notarisation refuse.
     if os.path.exists("libmpv.2.dylib"):
         binaires_extra.append(("libmpv.2.dylib", "."))
+
+# Icône : un seul SVG fait autorité (assets/zevent.svg), scripts/gen_icons.py
+# en dérive les conteneurs. Windows veut un .ico, macOS un .icns ; Linux n'en
+# lit aucun ici, l'icône de fenêtre y est posée par l'application elle-même.
+_ico = os.path.join("assets", "icons", "zlink.ico")
+_icns = os.path.join("assets", "icons", "zlink.icns")
+if sys.platform.startswith("win"):
+    ICONE = _ico if os.path.exists(_ico) else None
+elif sys.platform == "darwin":
+    ICONE = _icns if os.path.exists(_icns) else None
+else:
+    ICONE = None
+
+# La version se lit dans core/version.py plutôt que d'être recopiée : deux
+# endroits à modifier, c'est un endroit oublié le jour d'une publication.
+_VERSION = re.search(
+    r'__version__ = "([^"]+)"',
+    pathlib.Path("core/version.py").read_text(encoding="utf-8"),
+).group(1)
 
 qta_datas, qta_binaires, qta_imports = collect_all("qtawesome")
 donnees += qta_datas
@@ -89,6 +110,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=ICONE,
 )
 
 exe_sl = EXE(
@@ -121,11 +143,11 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="ZLink.app",
-        icon=None,
+        icon=ICONE,
         bundle_identifier="fr.zipname.zlink",
         info_plist={
-            "CFBundleShortVersionString": "0.1.0",
-            "CFBundleVersion": "0.1.0",
+            "CFBundleShortVersionString": _VERSION,
+            "CFBundleVersion": _VERSION,
             "NSHighResolutionCapable": True,
             # L'application n'accède ni au micro ni à la caméra ; on ne déclare
             # que ce qu'elle fait réellement.

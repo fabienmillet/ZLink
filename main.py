@@ -38,7 +38,7 @@ if (
 ):
     os.environ["QT_QPA_PLATFORM"] = "xcb"
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QFont, QSurfaceFormat
 from PyQt6.QtWidgets import QApplication
 
@@ -52,6 +52,8 @@ logger = logging.getLogger("zlink")
 # Avant tout import qui charge libmpv (windows.fullscreen → widgets.mpv_widget) :
 # la DLL est du code natif non signé, on contrôle son empreinte.
 from core.libmpv_check import verify_libmpv
+from core.paths import RESOURCE_ROOT
+from core.version import display_version as _display_version
 
 verify_libmpv()
 
@@ -142,6 +144,27 @@ def _on_grid_selection_changed_cb(
     if streamer_cache:
         if grid is not None:
             grid.grid.update_streamers(streamer_cache, sel)
+
+
+def _icone_application() -> "QIcon":
+    """Icône de l'application, dans toutes les tailles disponibles.
+
+    Charger les PNG plutôt que le SVG : Qt choisit alors la définition exacte
+    demandée par la barre des tâches au lieu de rééchantillonner, et le rendu
+    à 16 pixels reste net. Le SVG reste la source, voir scripts/gen_icons.py.
+    """
+    from PyQt6.QtGui import QIcon
+
+    icone = QIcon()
+    dossier = RESOURCE_ROOT / "assets" / "icons"
+    for taille in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
+        chemin = dossier / f"zlink-{taille}.png"
+        if chemin.is_file():
+            icone.addFile(str(chemin), QSize(taille, taille))
+    if icone.isNull():
+        # Paquet incomplet : une icône générique vaut mieux qu'un plantage.
+        logger.warning("icônes absentes de %s", dossier)
+    return icone
 
 
 def main() -> int:
@@ -269,6 +292,12 @@ def main() -> int:
 
     app.setApplicationName("ZLink")
     app.setApplicationDisplayName("ZLink — ZEvent Viewer")
+    app.setApplicationVersion(_display_version())
+    # Sous Wayland, l'icône d'une fenêtre ne vient pas de setWindowIcon mais du
+    # fichier .desktop portant ce nom : sans cette ligne, Hyprland et GNOME
+    # affichent l'icône générique quoi qu'on fasse.
+    app.setDesktopFileName("zlink")
+    app.setWindowIcon(_icone_application())
 
     # Sur Windows, Qt hérite parfois d'une police système en "pixel size" uniquement.
     # Quand il tente de la convertir en point size il obtient -1 et logue un warning.
