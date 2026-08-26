@@ -292,7 +292,12 @@ class RemoteAPI(QObject):
         if not self._clients:
             return
         trame = json.dumps(self._dernier_etat, ensure_ascii=False)
-        for client in list(self._clients):
+        # Une COPIE de la liste : `sendTextMessage` sur une connexion déjà
+        # rompue fait émettre `disconnected` à Qt, dont le récepteur retire le
+        # client de cette même liste. Itérer l'originale lèverait alors
+        # « list changed size during iteration », au pire moment — pendant la
+        # publication d'un état.
+        for client in list(self._clients):  # NOSONAR
             client.sendTextMessage(trame)
 
 

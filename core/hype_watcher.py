@@ -470,61 +470,19 @@ class HypeWatcher(QThread):
         if not candidates:
             return
 
-        # Budget global : sous une montée générale, on ne garde que les plus
-        # forts plutôt que d'inonder la grille d'alertes simultanées.
-        while self._alert_times and now - self._alert_times[0][0] > _ALERT_BUDGET_WINDOW_S:
-            self._alert_times.popleft()
-        room = max(0, per_hour - len(self._alert_times))
+        room = self._place_dans_le_budget(len(candidates), per_hour, now)
         if room == 0:
-            logger.debug("HypeWatcher: plafond horaire atteint, %d candidat(s) ignoré(s)",
-                         len(candidates))
             return
-        espacement = float(hw_cfg.get("espacement_min_s", _ESPACEMENT_MIN_S))
-        if self._alert_times and now - self._alert_times[-1][0] < espacement:
-            # Trop tôt après la précédente — sauf pour ce qui la DÉPASSE
-            # nettement. Un espacement aveugle donne la place au premier
-            # arrivé, et un moment ordinaire muselait celui, bien plus fort,
-            # qui suivait trente secondes plus tard. Mais laisser passer tout
-            # ce qui franchit le seuil haut revenait à supprimer
-            # l'espacement : ces scores-là sont monnaie courante un soir
-            # d'affluence, et deux alertes tombaient dans la même minute.
-            precedent = self._alert_times[-1][1]
-            barre = max(score_high, precedent * _SURGE_MARGIN)
-            candidates = [c for c in candidates if c[0] >= barre]
-            if not candidates:
-                logger.debug(
-                    "HypeWatcher: %.0f s depuis la dernière alerte, on attend",
-                    now - self._alert_times[-1][0])
-                return
+        candidates = self._apres_espacement(candidates, hw_cfg, score_high, now)
+        if not candidates:
+            return
 
         candidates.sort(key=lambda c: c[0], reverse=True)
         room = self._place_apres_montee(candidates, room, now)
         if room == 0:
             return
         for score, info in candidates[:room]:
-            label, color, excerpt = _classify_local(info.recent(), info.viewers)
-            if not excerpt:
-                # Le chat s'est accéléré sans rien dire de particulier : il n'y
-                # a rien à MONTRER, donc rien à annoncer. « Moment fort 🔥 »
-                # tout seul n'apprend rien et ne se vérifie pas — c'est
-                # précisément ce qui faisait passer le fil pour du bruit.
-                #
-                # Sans exception, même pour un score énorme : un emballement
-                # que le chat ne commente pas est indistinguable d'un raid, du
-                # spam d'un bot ou d'un pic de bruit. On préfère en manquer.
-                logger.debug("HypeWatcher: %s écartée, aucun extrait (score %.2f)",
-                             info.login, score)
-                continue
-            info.mark_alerted()
-            self._alert_times.append((now, score))
-            logger.info(
-                "HypeWatcher: alerte %s score=%.2f label=%s extrait=%r",
-                info.login, score, label, excerpt[:40],
-            )
-            # Le « | » sépare trois champs ; l'extrait vient du chat, on retire
-            # donc ceux qu'il pourrait contenir pour ne pas casser le découpage.
-            safe = excerpt.replace("|", "/")
-            self.alert_triggered.emit(info.cell_idx, f"{color}|{label}|{safe}", score)
+            self._annoncer(score, info, now)
 
         if len(candidates) > room:
             logger.debug("HypeWatcher: %d alerte(s) écartée(s) faute de budget",
@@ -554,6 +512,67 @@ class HypeWatcher(QThread):
         if not info.recent_msgs:
             return None
         return score
+
+    def _place_dans_le_budget(self, combien: int, per_hour: int,
+                              now: float) -> int:
+        """Place restante sous le plafond horaire, après purge des périmées."""
+        while (self._alert_times
+               and now - self._alert_times[0][0] > _ALERT_BUDGET_WINDOW_S):
+            self._alert_times.popleft()
+        room = max(0, per_hour - len(self._alert_times))
+        if room == 0:
+            logger.debug(
+                "HypeWatcher: plafond horaire atteint, %d candidat(s) ignoré(s)",
+                combien)
+        return room
+
+    def _apres_espacement(self, candidates: list, hw_cfg: dict,
+                          score_high: float, now: float) -> list:
+        """Écarte ce qui suit de trop près la dernière alerte.
+
+        Sauf ce qui la DÉPASSE nettement : un espacement aveugle donne la
+        place au premier arrivé, et un moment ordinaire muselait celui, bien
+        plus fort, qui suivait trente secondes plus tard. Mais laisser passer
+        tout ce qui franchit le seuil haut revenait à supprimer l'espacement —
+        ces scores-là sont monnaie courante un soir d'affluence, et deux
+        alertes tombaient dans la même minute.
+        """
+        espacement = float(hw_cfg.get("espacement_min_s", _ESPACEMENT_MIN_S))
+        if not self._alert_times:
+            return candidates
+        depuis = now - self._alert_times[-1][0]
+        if depuis >= espacement:
+            return candidates
+        barre = max(score_high, self._alert_times[-1][1] * _SURGE_MARGIN)
+        retenus = [c for c in candidates if c[0] >= barre]
+        if not retenus:
+            logger.debug(
+                "HypeWatcher: %.0f s depuis la dernière alerte, on attend",
+                depuis)
+        return retenus
+
+    def _annoncer(self, score: float, info: "_CellInfo", now: float) -> None:
+        """Qualifie le moment et l'annonce — s'il y a quelque chose à montrer.
+
+        Un chat qui s'accélère sans rien dire de particulier n'est pas annoncé,
+        même sur un score énorme : rien à MONTRER, donc rien à dire.
+        « Moment fort 🔥 » tout seul ne se vérifie pas, et un emballement que
+        le chat ne commente pas est indistinguable d'un raid, du spam d'un bot
+        ou d'un pic de bruit. On préfère en manquer.
+        """
+        label, color, excerpt = _classify_local(info.recent(), info.viewers)
+        if not excerpt:
+            logger.debug("HypeWatcher: %s écartée, aucun extrait (score %.2f)",
+                         info.login, score)
+            return
+        info.mark_alerted()
+        self._alert_times.append((now, score))
+        logger.info("HypeWatcher: alerte %s score=%.2f label=%s extrait=%r",
+                    info.login, score, label, excerpt[:40])
+        # Le « | » sépare trois champs ; l'extrait vient du chat, on retire
+        # donc ceux qu'il pourrait contenir pour ne pas casser le découpage.
+        safe = excerpt.replace("|", "/")
+        self.alert_triggered.emit(info.cell_idx, f"{color}|{label}|{safe}", score)
 
     def _place_apres_montee(self, candidates: list, room: int,
                             now: float = 0.0) -> int:
