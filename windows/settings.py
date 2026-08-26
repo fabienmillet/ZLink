@@ -48,6 +48,12 @@ except Exception:  # noqa: BLE001
 
 from core.version import display_version
 from core import config_store, domotique, streamdeck_install
+from widgets.screen_picker import (
+    PLAN_NOTES,
+    ROLE_LABELS,
+    ROLES,
+    ScreenPicker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -361,41 +367,45 @@ class _PageStreams(_PageBase):
 
 
 class _PageScreens(_PageBase):
+    """Quel écran affiche quoi.
+
+    C'était une liste de menus déroulants, un par moniteur : il fallait
+    retenir lequel de « Écran 2 » et « Écran 3 » est celui de droite, alors
+    que l'assistant, lui, les DESSINE. Les deux endroits proposent désormais
+    le même schéma — et le même choix de rôles, qui manquait à l'assistant.
+    """
+
     def __init__(self, config: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         screens = sorted(
             QApplication.instance().screens(),  # type: ignore[union-attr]
             key=lambda s: s.geometry().x(),
         )
-        n = len(screens)
-        _default: dict[int, str] = {}
-        if not config.get("screen_assignments"):
-            if n == 1:
-                _default = {0: "fullscreen"}
-            elif n == 2:
-                _default = {0: "panel", 1: "fullscreen"}
-            else:
-                _default = {0: "panel", 1: "fullscreen", 2: "grid"}
+        geos = [(sc.geometry().x(), sc.geometry().y(),
+                 sc.geometry().width(), sc.geometry().height())
+                for sc in screens]
 
         self._vl.addWidget(_h2(_TITRE_ECRANS))
         self._vl.addWidget(_sep())
         self._vl.addWidget(_section_title("Attribution des moniteurs"))
+        self._vl.addWidget(_hint(
+            "Cliquez sur un écran pour choisir son rôle. Le plein écran ne "
+            "s'éteint pas : le donner à un autre moniteur les échange."
+        ))
 
-        f = self._form()
-        self._screen_combos: list[QComboBox] = []
-        screen_cfg: dict[str, str] = config.get("screen_assignments") or {}
-        _role_to_idx = {"disabled": 0, "panel": 1, "fullscreen": 2, "grid": 3}
+        self._picker = ScreenPicker(geos)
+        self._picker.setMinimumHeight(230)
+        self._picker.definir_assignments(config.get("screen_assignments") or {})
+        self._picker.changed.connect(self._rafraichir)
+        self._vl.addWidget(self._picker, stretch=1)
 
-        for i, screen in enumerate(screens):
-            g = screen.geometry()
-            combo = QComboBox()
-            combo.addItems(["— Désactivé", "Panel", "Fullscreen", "Grille"])
-            role_str = screen_cfg.get(str(i)) or _default.get(i, "disabled")
-            combo.setCurrentIndex(_role_to_idx.get(role_str, 0))
-            f.addRow(f"Écran {i + 1}  ({g.width()}×{g.height()}) :", combo)
-            self._screen_combos.append(combo)
+        self._recap = QLabel("")
+        self._recap.setFont(QFont(_FONT_UI, 10))
+        self._recap.setWordWrap(True)
+        self._vl.addWidget(self._recap)
 
-        self._vl.addLayout(f)
+        self._note = _hint("")
+        self._vl.addWidget(self._note)
 
         self._error_lbl = QLabel("")
         self._error_lbl.setStyleSheet(f"color: {_C_DANGER};")
@@ -404,22 +414,39 @@ class _PageScreens(_PageBase):
             "↺ Les modifications d'écrans sont prises en compte au prochain démarrage."
         ))
         self._vl.addStretch()
+        self._rafraichir()
+
+    def _rafraichir(self) -> None:
+        """Redit en toutes lettres ce que le schéma montre.
+
+        Le rectangle porte « DIRECT » faute de place ; la ligne dessous donne
+        le nom complet, dans un ordre fixe — sinon on ne remarque pas qu'un
+        rôle n'est attribué à personne.
+        """
+        roles = self._picker.roles()
+        morceaux = []
+        for role in ROLES:
+            libelle = ROLE_LABELS[role].split(" (")[0]
+            if role in roles:
+                morceaux.append(
+                    f"<span style='color:{_C_GREEN}'>Écran "
+                    f"{roles.index(role) + 1}</span> {libelle}")
+            else:
+                morceaux.append(
+                    f"<span style='color:{_C_MUTED}'>— {libelle}</span>")
+        self._recap.setText("   ·   ".join(morceaux))
+        self._note.setText(PLAN_NOTES.get(len(self._picker.enabled_indexes()), ""))
 
     def collect(self, config: dict) -> bool:
-        _idx_to_role = {0: "disabled", 1: "panel", 2: "fullscreen", 3: "grid"}
-        screen_assignments: dict[str, str] = {}
-        has_fullscreen = False
-        for i, combo in enumerate(self._screen_combos):
-            role = _idx_to_role[combo.currentIndex()]
-            if role != "disabled":
-                screen_assignments[str(i)] = role
-            if role == "fullscreen":
-                has_fullscreen = True
-        if not has_fullscreen:
-            self._error_lbl.setText("⚠ Au moins un écran doit être en Fullscreen.")
+        assignments = self._picker.assignments()
+        if "fullscreen" not in assignments.values():
+            # Le sélecteur l'interdit. Si ça arrive quand même, mieux vaut ne
+            # rien écrire que d'enregistrer une disposition qui ne démarre pas.
+            logger.warning("Attribution sans plein ecran — refus d'enregistrer")
+            self._error_lbl.setText("⚠ Un écran doit afficher le plein écran.")
             return False
         self._error_lbl.setText("")
-        config["screen_assignments"] = screen_assignments
+        config["screen_assignments"] = assignments
         return True
 
 

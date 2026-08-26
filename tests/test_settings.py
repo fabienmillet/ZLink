@@ -25,6 +25,7 @@ import pytest
 
 from core import config_store
 from core.stream_manager import QUALITY_GRID
+from widgets import screen_picker
 from windows import settings
 
 
@@ -176,15 +177,15 @@ def test_streams_qualite_fixe_active_si_adaptatif_coupe_au_chargement(qtbot):
 
 # ── page Écrans ──────────────────────────────────────────────────────────────
 
-def test_ecrans_exige_au_moins_un_fullscreen(qtbot):
-    """Sans écran en Fullscreen, ZLink n'a nulle part où jouer un flux.
+def test_ecrans_exige_au_moins_un_plein_ecran(qtbot):
+    """Sans écran en plein écran, ZLink n'a nulle part où jouer un flux.
 
-    collect() doit alors refuser, expliquer, et surtout ne rien écrire dans la
-    configuration — un refus qui laisserait des traces serait pire que rien.
+    Le schéma l'interdit ; ce test force l'état interdit pour vérifier que le
+    dernier rempart tient : refuser, expliquer, et surtout ne RIEN écrire —
+    un refus qui laisserait des traces serait pire que rien.
     """
     page = _page(qtbot, settings._PageScreens)
-    for combo in page._screen_combos:
-        combo.setCurrentIndex(0)          # « — Désactivé » partout
+    page._picker._roles = ["" for _ in page._picker.roles()]
     config = {"autre_cle": "intacte"}
     assert page.collect(config) is False
     assert "screen_assignments" not in config
@@ -194,46 +195,71 @@ def test_ecrans_exige_au_moins_un_fullscreen(qtbot):
 
 def test_ecrans_accepte_et_efface_le_message_precedent(qtbot):
     page = _page(qtbot, settings._PageScreens)
-    for combo in page._screen_combos:
-        combo.setCurrentIndex(0)
+    page._picker._roles = ["" for _ in page._picker.roles()]
     page.collect({})                       # provoque le message d'erreur
-    page._screen_combos[0].setCurrentIndex(2)   # Fullscreen
+    page._picker._roles[0] = "fullscreen"
     config: dict = {}
     assert page.collect(config) is True
     assert page._error_lbl.text() == ""
     assert config["screen_assignments"]["0"] == "fullscreen"
 
 
-def test_ecrans_desactives_absents_de_la_configuration(qtbot):
-    """Un écran désactivé s'écrit par son ABSENCE, pas par un rôle « disabled ».
+def test_ecrans_sans_role_absents_de_la_configuration(qtbot):
+    """Un écran inutilisé s'écrit par son ABSENCE, pas par un rôle « disabled ».
 
     Sans quoi la relecture au démarrage devrait connaître ce rôle sentinelle.
     """
-    page = _page(qtbot, settings._PageScreens)
-    page._screen_combos[0].setCurrentIndex(2)
-    for combo in page._screen_combos[1:]:
-        combo.setCurrentIndex(0)
+    page = _page_ecrans(qtbot, 3)
+    page._picker._roles = ["fullscreen", "", ""]
     config: dict = {}
     page.collect(config)
-    assert all(role != "disabled"
-               for role in config["screen_assignments"].values())
+    assert config["screen_assignments"] == {"0": "fullscreen"}
 
 
-@pytest.mark.parametrize("role,index", [
-    ("panel", 1), ("fullscreen", 2), ("grid", 3),
-    ("rôle inventé", 0),   # rôle inconnu : désactivé, pas un index au hasard
-])
-def test_ecrans_relit_le_role_enregistre(qtbot, role, index):
-    page = _page(qtbot, settings._PageScreens,
-                 {"screen_assignments": {"0": role}})
-    assert page._screen_combos[0].currentIndex() == index
+@pytest.mark.parametrize("role", ["panel", "fullscreen", "grid"])
+def test_ecrans_relit_le_role_enregistre(qtbot, role):
+    page = _page_ecrans(qtbot, 3, {"screen_assignments": {"0": role}})
+    assert page._picker.roles()[0] == role
 
 
-def test_ecrans_un_seul_moniteur_est_fullscreen_par_defaut(qtbot):
+def test_un_role_inconnu_ne_fait_pas_perdre_la_disposition(qtbot):
+    """config.json s'édite à la main : une faute de frappe ne doit rien casser."""
+    page = _page_ecrans(qtbot, 2, {"screen_assignments": {"0": "rôle inventé"}})
+    assert page._picker.roles() == ["panel", "fullscreen"]
+
+
+def test_ecrans_un_seul_moniteur_est_plein_ecran_par_defaut(qtbot):
     """Avec un seul écran, le défaut doit rester utilisable sans réglage."""
-    page = _page(qtbot, settings._PageScreens)
-    if len(page._screen_combos) == 1:
-        assert page.collect({}) is True
+    page = _page_ecrans(qtbot, 1)
+    config: dict = {}
+    assert page.collect(config) is True
+    assert config["screen_assignments"] == {"0": "fullscreen"}
+
+
+def test_chaque_moniteur_figure_sur_le_schema(qtbot):
+    """Un moniteur absent du schéma ne serait attribuable par personne."""
+    assert len(_page_ecrans(qtbot, 3)._picker.roles()) == 3
+
+
+def test_le_recap_nomme_l_ecran_de_chaque_role(qtbot):
+    """Le rectangle porte « DIRECT » faute de place ; la ligne dessous éclaire."""
+    page = _page_ecrans(qtbot, 3)
+    page._picker.attribuer(2, "fullscreen")     # échange 2 ↔ 1
+    page._rafraichir()
+    texte = page._recap.text()
+    assert "Écran 3</span> Plein écran" in texte
+    assert "Écran 2</span> Grille" in texte
+
+
+def test_le_recap_signale_un_role_sans_ecran(qtbot):
+    """À un seul moniteur, panel et grille n'ont personne : il faut le voir."""
+    page = _page_ecrans(qtbot, 1)
+    assert page._recap.text().count("— ") == 2
+
+
+def test_la_note_decrit_ce_que_donne_la_configuration(qtbot):
+    page = _page_ecrans(qtbot, 2)
+    assert page._note.text() == screen_picker.PLAN_NOTES[2]
 
 
 # ── page Alertes ─────────────────────────────────────────────────────────────
@@ -495,8 +521,8 @@ def test_sauvegarde_bloquee_par_un_ecran_invalide(panneau, config_fichier):
     """
     recu: list[dict] = []
     panneau.settings_changed.connect(recu.append)
-    for combo in panneau._page_screens._screen_combos:
-        combo.setCurrentIndex(0)
+    picker = panneau._page_screens._picker
+    picker._roles = ["" for _ in picker.roles()]
 
     panneau._on_save()
 
@@ -627,11 +653,6 @@ def test_attribution_par_defaut_selon_le_nombre_d_ecrans(
     config: dict = {}
     assert page.collect(config) is True
     assert config["screen_assignments"] == attendu
-
-
-def test_un_combo_par_ecran(qtbot):
-    """Un moniteur absent de la liste ne serait attribuable par personne."""
-    assert len(_page_ecrans(qtbot, 3)._screen_combos) == 3
 
 
 def test_une_attribution_enregistree_prime_sur_le_defaut(qtbot):

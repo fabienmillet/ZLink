@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -37,6 +37,11 @@ from PyQt6.QtWidgets import (
 )
 
 from core import config_store
+from widgets.screen_picker import (
+    PLAN_NOTES,
+    ROLE_LABELS,
+    ScreenPicker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,30 +56,9 @@ _C_GREEN   = "#00ff87"
 
 _FONT = "Segoe UI Variable"
 
-#: Rôles attribués aux écrans selon le nombre retenu. L'ordre suit la
-#: disposition physique gauche → droite, comme core.monitors.build_layout.
-_ROLE_PLAN: dict[int, list[str]] = {
-    1: ["fullscreen"],
-    2: ["panel", "fullscreen"],
-    3: ["panel", "fullscreen", "grid"],
-}
-
-_ROLE_LABELS = {
-    "panel": "Panel (stats, programme, streamers)",
-    "fullscreen": "Plein écran (le direct principal)",
-    "grid": "Grille (tous les flux en mosaïque)",
-}
-
-#: Ce que chaque configuration donne, et comment atteindre le reste. Aucune ne
-#: PRIVE d'une vue : à un écran, une barre escamotable en haut fait passer de
-#: l'une à l'autre ; à deux, la grille s'ouvre depuis le panel. Ne le pas dire
-#: laissait croire qu'on renonçait à la grille ou au panel.
-_PLAN_NOTES: dict[int, str] = {
-    1: "Les trois vues sur cet écran ; une barre en haut fait passer de l'une "
-       "à l'autre.",
-    2: "La grille s'ouvre depuis le panel.",
-    3: "Tout est visible en même temps, rien à basculer.",
-}
+# Le schéma des moniteurs et l'attribution des rôles vivent dans
+# `widgets.screen_picker` : les réglages proposent exactement le même
+# choix, et deux copies auraient divergé.
 
 
 def _title(text: str) -> QLabel:
@@ -256,150 +240,6 @@ class _ChoiceList(QWidget):
         return None
 
 
-class _ScreenPicker(QWidget):
-    """Schéma des moniteurs, à leur position et à leur échelle réelles.
-
-    Trois lignes de texte par configuration, c'était illisible : on décrivait
-    des dispositions au lieu de les montrer. Ici les écrans sont dessinés là où
-    ils sont physiquement, numérotés comme dans les réglages du système, et un
-    clic les active ou les désactive — le geste de Windows.
-
-    Les rôles se répartissent tout seuls, de gauche à droite, sur les écrans
-    actifs, et chaque rectangle affiche le sien : on voit immédiatement ce qu'on
-    obtient, sans avoir à le lire.
-    """
-
-    changed = pyqtSignal()
-
-    _PAD = 10
-    _ROLE_SHORT = {"panel": "PANEL", "fullscreen": "DIRECT", "grid": "GRILLE"}
-
-    def __init__(self, geometries: list[tuple[int, int, int, int]]) -> None:
-        super().__init__()
-        self._geos = geometries or [(0, 0, 1920, 1080)]
-        # Au départ, on retient autant d'écrans qu'on sait en exploiter.
-        self._enabled = [i < 3 for i in range(len(self._geos))]
-        self._rects: list[QRect] = []
-        self.setMinimumHeight(190)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    # -- état ------------------------------------------------------------
-
-    def enabled_indexes(self) -> list[int]:
-        """Indices des écrans retenus, dans l'ordre physique gauche → droite."""
-        idx = [i for i, on in enumerate(self._enabled) if on]
-        idx.sort(key=lambda i: self._geos[i][0])
-        return idx[:3]          # au-delà de trois, il n'y a plus de rôle à donner
-
-    def assignments(self) -> dict[str, str]:
-        """{index d'écran: rôle} tel que le comprend core.monitors."""
-        active = self.enabled_indexes()
-        plan = _ROLE_PLAN.get(len(active), [])
-        return {str(i): role for i, role in zip(active, plan)}
-
-    def _role_of(self, index: int) -> str:
-        return self.assignments().get(str(index), "")
-
-    # -- géométrie -------------------------------------------------------
-
-    def _compute(self) -> None:
-        """Projette les géométries réelles dans le widget, en gardant l'échelle."""
-        xs0 = min(g[0] for g in self._geos)
-        ys0 = min(g[1] for g in self._geos)
-        xs1 = max(g[0] + g[2] for g in self._geos)
-        ys1 = max(g[1] + g[3] for g in self._geos)
-        span_w, span_h = max(1, xs1 - xs0), max(1, ys1 - ys0)
-        avail_w = max(1, self.width() - 2 * self._PAD)
-        avail_h = max(1, self.height() - 2 * self._PAD)
-        # Une seule échelle pour les deux axes : sinon un moniteur vertical
-        # apparaîtrait aussi large qu'un horizontal.
-        scale = min(avail_w / span_w, avail_h / span_h)
-        off_x = self._PAD + (avail_w - span_w * scale) / 2
-        off_y = self._PAD + (avail_h - span_h * scale) / 2
-        self._rects = [
-            QRect(
-                int(off_x + (g[0] - xs0) * scale),
-                int(off_y + (g[1] - ys0) * scale),
-                max(52, int(g[2] * scale) - 6),
-                max(38, int(g[3] * scale) - 6),
-            )
-            for g in self._geos
-        ]
-
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        self._compute()
-
-    # -- interaction -----------------------------------------------------
-
-    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        pos = event.position().toPoint()
-        for i, r in enumerate(self._rects):
-            if not r.contains(pos):
-                continue
-            # Le dernier écran actif ne se désactive pas : le direct doit bien
-            # s'afficher quelque part, et une sélection vide bloquerait la suite
-            # sans que la raison soit visible.
-            if self._enabled[i] and sum(self._enabled) == 1:
-                return
-            self._enabled[i] = not self._enabled[i]
-            self.update()
-            self.changed.emit()
-            return
-
-    # -- rendu -----------------------------------------------------------
-
-    def paintEvent(self, event) -> None:  # type: ignore[override]
-        if not self._rects:
-            self._compute()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for i, r in enumerate(self._rects):
-            self._dessiner_ecran(p, i, r)
-        p.end()
-
-    def _dessiner_ecran(self, p: QPainter, i: int, r: QRect) -> None:
-        """Un rectangle d'écran : cadre, numéro, rôle attribué, définition.
-
-        Un écran désactivé garde sa place mais passe en pointillés grisés :
-        le voir barré vaut mieux que le voir disparaître de la disposition.
-        """
-        on = self._enabled[i]
-        role = self._role_of(i)
-        p.setBrush(QBrush(QColor("#16211b" if on else "#141414")))
-        pen = QPen(QColor(_C_GREEN if on else "#333333"))
-        pen.setWidth(2 if on else 1)
-        if not on:
-            pen.setStyle(Qt.PenStyle.DashLine)
-        p.setPen(pen)
-        p.drawRoundedRect(r, 7, 7)
-
-        # Numéro, comme dans les réglages d'affichage du système.
-        p.setPen(QColor("#ffffff" if on else "#4a4a4a"))
-        f = QFont(_FONT, max(13, min(26, r.height() // 4)), QFont.Weight.Bold)
-        p.setFont(f)
-        num = QRect(r.x(), r.y() + 6, r.width(), r.height() // 2)
-        p.drawText(num, Qt.AlignmentFlag.AlignCenter, str(i + 1))
-
-        # Rôle attribué, ou l'état inactif.
-        p.setPen(QColor(_C_GREEN if on else "#3d3d3d"))
-        p.setFont(QFont(_FONT, 8, QFont.Weight.Bold))
-        lab = QRect(r.x(), r.y() + r.height() // 2, r.width(), r.height() // 2 - 6)
-        p.drawText(lab, Qt.AlignmentFlag.AlignCenter,
-                   self._ROLE_SHORT.get(role, "" if on else "DÉSACTIVÉ"))
-
-        # Définition, seulement si le rectangle est assez grand pour la lire.
-        if r.height() >= 70:
-            p.setPen(QColor("#5a5a5a" if on else "#2f2f2f"))
-            p.setFont(QFont(_FONT, 7))
-            g = self._geos[i]
-            foot = QRect(r.x(), r.bottom() - 16, r.width(), 14)
-            p.drawText(foot, Qt.AlignmentFlag.AlignCenter,
-                       f"{g[2]}\u00d7{g[3]}")
-
-
 class _Step(QWidget):
     """Une étape. `collect` écrit dans la config, `valid` bloque « Suivant »."""
 
@@ -448,19 +288,15 @@ class _StepScreens(_Step):
 
         v = QVBoxLayout(self)
         v.setSpacing(12)
-        v.addWidget(_title("Quels écrans utiliser ?"))
-        v.addWidget(_sub("Cliquez sur un écran pour l'activer ou le désactiver."))
+        v.addWidget(_title("Quel écran fait quoi ?"))
+        v.addWidget(_sub(
+            "Cliquez sur un écran pour choisir son rôle. La répartition "
+            "proposée va de gauche à droite ; rien n'oblige à la garder."
+        ))
 
-        self._picker = _ScreenPicker(geos)
-        # Restaurer la sélection enregistrée, s'il y en a une.
-        saved = config.get("screen_assignments") or {}
-        if saved:
-            keep = {int(k) for k, r in saved.items()
-                    if r and r != "disabled" and k.isdigit()}
-            if keep:
-                self._picker._enabled = [
-                    i in keep for i in range(len(geos))
-                ]
+        self._picker = ScreenPicker(geos)
+        # Restaurer l'attribution enregistrée, s'il y en a une.
+        self._picker.definir_assignments(config.get("screen_assignments") or {})
         self._picker.changed.connect(self._refresh)
         v.addWidget(self._picker, stretch=1)
 
@@ -470,7 +306,7 @@ class _StepScreens(_Step):
 
     def _refresh(self) -> None:
         n = len(self._picker.enabled_indexes())
-        self._note.setText(_PLAN_NOTES.get(n, ""))
+        self._note.setText(PLAN_NOTES.get(n, ""))
 
     def collect(self, config: dict) -> None:
         assigned = self._picker.assignments()
@@ -626,7 +462,7 @@ class _StepSummary(_Step):
         lignes = [
             f"• {len(assigned)} écran" + ("s" if len(assigned) > 1 else "")
             + " : " + ", ".join(
-                f"écran {int(i) + 1} → {_ROLE_LABELS.get(r, r).split(' (')[0]}"
+                f"écran {int(i) + 1} → {ROLE_LABELS.get(r, r).split(' (')[0]}"
                 # Tri NUMERIQUE : par cle texte, l'ecran 10 passerait
                 # avant le 2.
                 for i, r in sorted(assigned.items(), key=lambda kv: int(kv[0]))

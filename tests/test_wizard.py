@@ -17,6 +17,7 @@ from PyQt6.QtCore import QEvent, QPointF, Qt
 from PyQt6.QtGui import QEnterEvent, QMouseEvent, QResizeEvent
 
 from core import config_store
+from widgets import screen_picker as SP
 from windows import wizard as W
 
 
@@ -35,157 +36,8 @@ def _clic(widget, point, bouton=Qt.MouseButton.LeftButton) -> None:
     ))
 
 
-def _picker(geos, largeur=600, hauteur=300):
-    """Sélecteur d'écrans dimensionné, ses rectangles déjà calculés."""
-    p = W._ScreenPicker(geos)
-    p.resize(largeur, hauteur)
-    p._compute()
-    return p
-
-
 #: Deux écrans côte à côte, le second à droite du premier.
 _DEUX = [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)]
-
-
-# ── _ScreenPicker : état et rôles ────────────────────────────────────────────
-
-def test_on_retient_au_depart_autant_d_ecrans_qu_on_sait_en_exploiter(qapp):
-    """Au-delà de trois écrans il n'y a plus de rôle à distribuer."""
-    p = W._ScreenPicker([(i * 100, 0, 100, 100) for i in range(5)])
-    assert p._enabled == [True, True, True, False, False]
-    assert p.enabled_indexes() == [0, 1, 2]
-
-
-def test_les_ecrans_sont_ordonnes_de_gauche_a_droite(qapp):
-    """L'ordre des rôles suit la disposition physique, pas l'ordre système."""
-    p = W._ScreenPicker([(1000, 0, 800, 600), (-500, 0, 800, 600),
-                         (200, 0, 800, 600)])
-    assert p.enabled_indexes() == [1, 2, 0]
-
-
-@pytest.mark.parametrize("nb,attendu", [
-    (1, {"0": "fullscreen"}),
-    (2, {"0": "panel", "1": "fullscreen"}),
-    (3, {"0": "panel", "1": "fullscreen", "2": "grid"}),
-])
-def test_roles_attribues_selon_le_nombre_d_ecrans(qapp, nb, attendu):
-    p = W._ScreenPicker([(i * 1920, 0, 1920, 1080) for i in range(nb)])
-    assert p.assignments() == attendu
-
-
-def test_sans_ecran_actif_aucun_role(qapp):
-    """Une sélection vide ne doit pas produire une config à moitié écrite."""
-    p = W._ScreenPicker(_DEUX)
-    p._enabled = [False, False]
-    assert p.enabled_indexes() == []
-    assert p.assignments() == {}
-
-
-def test_au_dela_de_trois_ecrans_actifs_les_suivants_sont_ignores(qapp):
-    p = W._ScreenPicker([(i * 100, 0, 100, 100) for i in range(5)])
-    p._enabled = [True] * 5
-    assert p.enabled_indexes() == [0, 1, 2]
-    assert set(p.assignments()) == {"0", "1", "2"}
-
-
-def test_aucune_geometrie_donne_un_ecran_par_defaut(qapp):
-    """Sans écran détecté, l'assistant doit rester utilisable."""
-    p = W._ScreenPicker([])
-    assert p._geos == [(0, 0, 1920, 1080)]
-    assert p.assignments() == {"0": "fullscreen"}
-
-
-# ── _ScreenPicker : géométrie ────────────────────────────────────────────────
-
-def test_une_seule_echelle_pour_les_deux_axes(qapp):
-    """Sinon un moniteur vertical apparaîtrait aussi large qu'un horizontal."""
-    p = _picker([(0, 0, 1920, 1080), (1920, 0, 1080, 1920)])
-    paysage, portrait = p._rects
-    assert portrait.width() < paysage.width()
-    assert portrait.height() > paysage.height()
-
-
-def test_les_ecrans_gardent_leur_position_relative(qapp):
-    gauche, droite = _picker(_DEUX)._rects
-    assert gauche.x() < droite.x()
-    assert gauche.y() == droite.y()
-
-
-def test_le_schema_tient_dans_le_widget(qapp):
-    p = _picker(_DEUX, largeur=400, hauteur=200)
-    for r in p._rects:
-        assert r.x() >= 0 and r.y() >= 0
-
-
-def test_un_rectangle_minuscule_garde_une_taille_lisible(qapp):
-    """Un écran réduit à quelques pixels ne montrerait plus ni numéro ni rôle."""
-    r = _picker([(0, 0, 1920, 1080)], largeur=30, hauteur=20)._rects[0]
-    assert (r.width(), r.height()) == (52, 38)
-
-
-def test_le_redimensionnement_recalcule_les_rectangles(qapp):
-    from PyQt6.QtCore import QSize
-    p = _picker(_DEUX, largeur=400, hauteur=200)
-    avant = list(p._rects)
-    p.resize(900, 500)
-    p.resizeEvent(QResizeEvent(QSize(900, 500), QSize(400, 200)))
-    assert p._rects != avant
-
-
-def test_le_schema_se_dessine_sans_lever(qapp):
-    """L'assistant s'ouvre au tout premier lancement : y planter serait fatal.
-
-    Un rendu hors écran suffit à parcourir les deux états d'un rectangle,
-    actif et désactivé, ainsi que la légende réservée aux grands rectangles.
-    """
-    p = _picker([(0, 0, 1920, 1080), (1920, 0, 1080, 1920)],
-                largeur=800, hauteur=400)
-    p._enabled = [True, False]
-    assert p.grab().size().width() == 800
-
-
-def test_le_schema_se_dessine_meme_avant_tout_calcul(qapp):
-    """paintEvent peut précéder le premier resizeEvent."""
-    p = W._ScreenPicker(_DEUX)
-    p.grab()
-    assert len(p._rects) == 2
-
-
-# ── _ScreenPicker : clics ────────────────────────────────────────────────────
-
-def test_un_clic_desactive_un_ecran_puis_le_reactive(qapp):
-    p = _picker(_DEUX)
-    recu = []
-    p.changed.connect(lambda: recu.append(True))
-
-    _clic(p, p._rects[0].center())
-    assert p._enabled == [False, True]
-    assert p.assignments() == {"1": "fullscreen"}, "le rôle se reporte tout seul"
-
-    _clic(p, p._rects[0].center())
-    assert p._enabled == [True, True]
-    assert len(recu) == 2, "chaque bascule prévient l'étape"
-
-
-def test_le_dernier_ecran_actif_ne_se_desactive_pas(qapp):
-    """Une sélection vide bloquerait « Suivant » sans que la raison soit visible."""
-    p = _picker(_DEUX)
-    _clic(p, p._rects[0].center())
-    _clic(p, p._rects[1].center())
-    assert p._enabled == [False, True]
-
-
-def test_un_clic_hors_des_ecrans_ne_change_rien(qapp):
-    from PyQt6.QtCore import QPoint
-    p = _picker(_DEUX)
-    _clic(p, QPoint(0, 0))
-    assert p._enabled == [True, True]
-
-
-def test_le_bouton_droit_est_ignore(qapp):
-    p = _picker(_DEUX)
-    _clic(p, p._rects[0].center(), Qt.MouseButton.RightButton)
-    assert p._enabled == [True, True]
 
 
 # ── _ChoiceCard / _ChoiceList ────────────────────────────────────────────────
@@ -280,25 +132,24 @@ def test_l_etape_ecrans_ecrit_les_roles(qapp):
     assert config["screen_assignments"] == {"0": "fullscreen"}
 
 
-def test_l_etape_ecrans_restaure_la_selection_enregistree(qapp):
+def test_l_etape_ecrans_restaure_l_attribution_enregistree(qapp):
     """Rouvrir l'assistant doit repartir de ce qui était choisi, pas du défaut."""
-    etape = W._StepScreens({"screen_assignments": {"0": "fullscreen"}})
-    assert etape._picker._enabled == [True]
+    etape = W._StepScreens({"screen_assignments": {"0": "panel"}})
+    # Un seul écran hors ligne de commande : le direct lui revient de force,
+    # sans quoi l'assistant proposerait une disposition qui ne démarre pas.
+    assert etape._picker.roles() == ["fullscreen"]
 
 
-@pytest.mark.parametrize("enregistre", [
-    {"0": "disabled"},          # écran explicitement écarté
-    {"0": ""},                  # rôle vide
-    {"abc": "panel"},           # clé qui n'est pas un indice
-])
-def test_une_selection_enregistree_vide_laisse_le_defaut(qapp, enregistre):
-    etape = W._StepScreens({"screen_assignments": enregistre})
-    assert etape._picker._enabled == [True]
+def test_l_etape_ecrans_decrit_ce_que_donne_la_configuration(qapp):
+    """La note sous le schéma dit où retrouver les vues qu'on ne voit pas."""
+    etape = W._StepScreens({})
+    assert etape._note.text() == SP.PLAN_NOTES[1]
 
 
 def test_sans_ecran_actif_l_etape_bloque_et_n_ecrit_rien(qapp):
+    """Le schéma l'interdit ; le garde-fou de l'étape doit tenir quand même."""
     etape = W._StepScreens({})
-    etape._picker._enabled = [False]
+    etape._picker._roles = ["" for _ in etape._picker.roles()]
     etape._refresh()
     config: dict = {}
     etape.collect(config)
@@ -473,7 +324,7 @@ def test_une_etape_invalide_bloque_l_avancement(qtbot):
     qtbot.addWidget(wiz)
     wiz._go_next()                       # → étape des écrans
     ecrans = wiz._steps[1]
-    ecrans._picker._enabled = [False]
+    ecrans._picker._roles = ["" for _ in ecrans._picker.roles()]
     wiz._sync()
     assert wiz._next.isEnabled() is False
     wiz._go_next()
