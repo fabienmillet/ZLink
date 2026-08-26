@@ -35,6 +35,15 @@ FENETRE_S = 3600.0
 #: reste disponible quand le sondage a sauté un tour.
 MEMOIRE_S = 2 * 3600.0
 
+#: Recul minimal entre les deux relevés comparés.
+#:
+#: Cinq minutes, soit une dizaine de sondages : assez pour qu'une variation ne
+#: soit pas le bruit d'un seul relevé, assez peu pour que la colonne se
+#: remplisse pendant qu'on regarde. L'écart publié reste celui qu'on a
+#: réellement observé — la valeur n'est jamais rapportée à l'heure, donc
+#: jamais extrapolée.
+RECUL_MIN_S = 300.0
+
 #: login → relevés (instant, viewers, cagnotte), du plus ancien au plus récent.
 _series: dict[str, deque[tuple[float, int, float]]] = {}
 
@@ -57,9 +66,13 @@ def noter(streamers, maintenant: float | None = None) -> None:
 def _reference(login: str, fenetre: float, maintenant: float):
     """Le relevé le plus ancien encore DANS la fenêtre, et le plus récent.
 
-    Rend None tant qu'il n'y a pas deux relevés distants d'au moins un quart
-    de la fenêtre : sur les premières minutes, un écart mesuré sur trente
-    secondes et rapporté à l'heure donnerait des chiffres absurdes.
+    Rend None tant que les deux relevés ne sont pas assez espacés. Ce qu'on
+    publie est un ÉCART OBSERVÉ, pas une extrapolation : il n'a donc pas
+    besoin d'une heure entière pour valoir quelque chose, seulement d'assez de
+    recul pour ne pas confondre une variation avec le bruit d'un sondage.
+
+    Le seuil était au quart de la fenêtre — quinze minutes — et la colonne
+    restait vide tout ce temps-là, ce qui la faisait passer pour cassée.
     """
     serie = _series.get(login)
     if not serie or len(serie) < 2:
@@ -69,7 +82,7 @@ def _reference(login: str, fenetre: float, maintenant: float):
     if len(anciens) < 2:
         anciens = list(serie)[-2:]
     premier, dernier = anciens[0], anciens[-1]
-    if dernier[0] - premier[0] < fenetre / 4:
+    if dernier[0] - premier[0] < RECUL_MIN_S:
         return None
     return premier, dernier
 

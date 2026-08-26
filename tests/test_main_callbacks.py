@@ -425,3 +425,41 @@ def test_l_etoile_posee_au_boitier_revient_sur_la_carte(telecommande_branchee):
     pieces["plein"].favori_change.emit("theguill84", True)
 
     assert pieces["console"].repeints == ["theguill84"]
+
+
+# ── Quelles chaînes on date ─────────────────────────────────────────────────
+#
+# Le classement des stats en montre trois cents : une colonne « Depuis » trouée
+# sur les trois quarts des lignes passe pour cassée, pas pour économe.
+
+def test_toutes_les_chaines_en_direct_sont_datees():
+    plein = _PleinEcranSignaux()
+    plein.current_login = "zerator"
+    grille = _GrilleSignaux()
+
+    class _Selection:
+        @staticmethod
+        def get_selected():
+            return ["moman"]
+
+    en_ligne = _streamer("aypierre")
+    hors_ligne = _streamer("dart0is", online=False)
+    logins = main._logins_a_dater(grille, plein, _Selection(),
+                                  [en_ligne, hors_ligne])
+
+    assert "aypierre" in logins, "une chaîne en direct doit être datée"
+    assert "dart0is" not in logins, "une chaîne éteinte n'a pas de durée"
+    assert "zerator" in logins and "moman" in logins
+
+
+def test_sans_streamers_on_date_quand_meme_ce_qu_on_regarde():
+    """Le premier sondage n'a pas encore répondu : la grille, elle, est là."""
+    plein = _PleinEcranSignaux()
+    plein.current_login = "zerator"
+
+    class _Selection:
+        @staticmethod
+        def get_selected():
+            return []
+
+    assert main._logins_a_dater(None, plein, _Selection(), None) == ["zerator"]

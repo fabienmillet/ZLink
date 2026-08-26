@@ -52,16 +52,30 @@ def test_un_seul_releve_ne_dit_rien():
 
 
 def test_deux_releves_trop_rapproches_ne_disent_rien():
-    """Un écart sur trente secondes rapporté à l'heure donnerait n'importe quoi."""
+    """Sur trente secondes, une variation ne se distingue pas du bruit d'un
+    sondage : l'API ne rafraîchit ses chiffres que toutes les quelques
+    minutes, et deux relevés consécutifs rendent souvent la même valeur."""
     tendances.noter([_Faux("zerator", 45_000)], T0)
     tendances.noter([_Faux("zerator", 45_600)], T0 + 30)
     assert tendances.viewers("zerator", maintenant=T0 + 30) is None
 
 
-def test_un_quart_de_fenetre_suffit_a_se_prononcer():
+def test_cinq_minutes_de_recul_suffisent_a_se_prononcer():
+    """Le seuil était à quinze minutes : la colonne restait vide tout ce
+    temps-là, ce qui la faisait passer pour cassée. Ce qu'on publie est un
+    écart OBSERVÉ, jamais rapporté à l'heure — il n'a donc pas besoin d'une
+    heure entière pour valoir quelque chose."""
     tendances.noter([_Faux("zerator", 45_000)], T0)
-    tendances.noter([_Faux("zerator", 46_000)], T0 + 900)
-    assert tendances.viewers("zerator", maintenant=T0 + 900) == 1_000
+    tendances.noter([_Faux("zerator", 46_000)], T0 + tendances.RECUL_MIN_S)
+    assert tendances.viewers("zerator",
+                             maintenant=T0 + tendances.RECUL_MIN_S) == 1_000
+
+
+def test_juste_avant_le_recul_minimal_on_se_tait_encore():
+    tendances.noter([_Faux("zerator", 45_000)], T0)
+    tendances.noter([_Faux("zerator", 46_000)], T0 + tendances.RECUL_MIN_S - 1)
+    assert tendances.viewers(
+        "zerator", maintenant=T0 + tendances.RECUL_MIN_S - 1) is None
 
 
 def test_une_chaine_jamais_vue_ne_dit_rien():

@@ -508,16 +508,23 @@ def _brancher_top_audiences(grid, panel, fullscreen, data_manager) -> None:
 _TELECOMMANDE: list = []
 
 
-def _logins_affiches(grid, fullscreen, selection_store) -> list[str]:
-    """Les chaînes actuellement sous les yeux : le plein écran et la grille.
+def _logins_a_dater(grid, fullscreen, selection_store, streamers) -> list[str]:
+    """Les chaînes dont on veut savoir depuis quand elles émettent.
 
-    Le reste du plateau n'est pas demandé — une durée qu'on ne montre nulle
-    part ne vaut pas une requête.
+    Celles qu'on regarde d'abord — plein écran, grille, sélection — puis
+    TOUTES celles en direct : le classement des stats en montre trois cents,
+    et une colonne « Depuis » trouée sur les trois quarts des lignes passe
+    pour cassée plutôt que pour économe.
+
+    Le coût reste modeste : une soixantaine de chaînes en direct un soir
+    d'event, vingt-cinq par requête, et un relevé vaut cinq minutes.
     """
     logins = [fullscreen.current_login] if fullscreen.current_login else []
     logins += list(selection_store.get_selected() or [])
     if grid is not None:
         logins += [c.twitch_login for c in grid.grid._cells if c.twitch_login]
+    logins += [s.twitch_login for s in (streamers or [])
+               if getattr(s, "online", False) and s.twitch_login]
     return logins
 
 
@@ -971,8 +978,8 @@ def main() -> int:
     from core import tendances
     data_manager.streamers_updated.connect(tendances.noter)
     data_manager.streamers_updated.connect(
-        lambda _streamers: data_manager.rafraichir_durees(
-            _logins_affiches(grid, fullscreen, selection_store)))
+        lambda streamers: data_manager.rafraichir_durees(
+            _logins_a_dater(grid, fullscreen, selection_store, streamers)))
     data_manager.durees_updated.connect(fullscreen.rafraichir_duree)
 
     _brancher_panel(
