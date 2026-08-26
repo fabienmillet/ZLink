@@ -271,8 +271,10 @@ def _poster(url: str, charge: dict) -> None:
         with urllib.request.urlopen(requete, timeout=DELAI_S) as reponse:
             logger.debug("Domotique : %s → HTTP %s", charge.get("type"),
                          reponse.status)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         # Box éteinte, URL fausse, réseau coupé : on le note et on continue.
+        # `URLError` n'a pas à figurer ici, elle dérive d'`OSError` ;
+        # `ValueError` si, pour un schéma d'URL qu'urllib ne connaît pas.
         logger.warning("Domotique : « %s » non transmis — %s",
                        charge.get("type"), exc)
 
@@ -316,8 +318,11 @@ def essayer(url: str) -> tuple[bool, str]:
         with urllib.request.urlopen(requete, timeout=DELAI_S) as reponse:
             statut = int(reponse.status)
     except urllib.error.HTTPError as exc:
+        # AVANT le cas général : HTTPError dérive de URLError, donc d'OSError.
+        # Écrite après, elle ne serait jamais atteinte et le code de réponse
+        # — la seule chose utile ici — serait perdu.
         return False, _expliquer(exc.code)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         return False, f"Injoignable : {exc}"
     # Un webhook sans automatisation derrière répond 200 et ne fait rien : on
     # ne peut donc pas promettre que les lampes ont bougé.
