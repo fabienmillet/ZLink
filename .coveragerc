@@ -1,0 +1,16 @@
+[run]
+branch = True
+source = core,widgets,windows,scripts
+omit =
+    */.venv/*
+    */tests/*
+    # Scripts de publication : exécutés par la CI, pas par l'application.
+    scripts/gen_release_key.py
+    scripts/sign_release.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    if __name__ == .__main__.:

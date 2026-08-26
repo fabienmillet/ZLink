@@ -29,7 +29,13 @@ def _read() -> set[str]:
         if not CONFIG_PATH.exists():
             return set()
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        return {str(v).lower() for v in (raw.get(_KEY) or []) if v}
+        valeurs = raw.get(_KEY)
+        # Le type est vérifié, pas seulement la présence : sur une chaîne, la
+        # compréhension itérait les CARACTÈRES et fabriquait des favoris à une
+        # lettre à partir d'un fichier corrompu.
+        if not isinstance(valeurs, list):
+            return set()
+        return {str(v).lower() for v in valeurs if v}
     except Exception as exc:
         logger.warning("Favoris illisibles — %s", exc)
         return set()
@@ -80,5 +86,5 @@ def _save(logins: set[str]) -> None:
                        encoding="utf-8")
         os.replace(tmp, CONFIG_PATH)
         os.chmod(CONFIG_PATH, 0o600)
-    except Exception as exc:
-        logger.error("Sauvegarde des favoris impossible : %s", exc)
+    except Exception:
+        logger.exception("Sauvegarde des favoris impossible")

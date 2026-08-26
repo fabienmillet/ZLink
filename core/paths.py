@@ -60,6 +60,14 @@ DATA_ROOT: pathlib.Path = _dossier_utilisateur() if FROZEN else RESOURCE_ROOT
 # seconde instance sur un autre profil, et indispensable aux tests : sans lui,
 # le moindre banc qui enregistre un réglage écrit dans la configuration réelle
 # de l'utilisateur.
+#: Où atterrissent les clips quand la configuration n'en dit rien.
+#:
+#: Le réglage n'existe dans config.json qu'après un passage par la fenêtre des
+#: réglages : sans repli commun, chaque chemin de sauvegarde choisissait le
+#: sien, et la reprise en pleine qualité écrivait dans le dossier temporaire —
+#: où Windows finit par effacer ce qu'on croyait avoir gardé.
+CLIPS_DEFAUT: pathlib.Path = pathlib.Path.home() / "Videos" / "ZLink"
+
 _ENV_CONFIG = (os.environ.get("ZLINK_CONFIG") or "").strip()
 CONFIG_PATH: pathlib.Path = (
     pathlib.Path(_ENV_CONFIG).expanduser() if _ENV_CONFIG

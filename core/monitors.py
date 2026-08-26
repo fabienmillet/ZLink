@@ -93,6 +93,14 @@ def _apply_screen_config(screens: list[QScreen]) -> DisplayLayout | None:
         ).get("screen_assignments", {})
         if not screen_cfg:
             return None
+        if not isinstance(screen_cfg, dict):
+            # Le type est verifie, pas seulement la presence : une chaine ou une
+            # liste passait le `if not`, puis .get() levait une AttributeError
+            # HORS du try — et l'application ne demarrait plus du tout.
+            logger.warning(
+                "Config ecrans : screen_assignments n'est pas un objet (%s) — "
+                "repli sur l'auto-detection", type(screen_cfg).__name__)
+            return None
     except Exception as exc:
         logger.warning("_apply_screen_config: lecture config impossible — %s", exc)
         return None

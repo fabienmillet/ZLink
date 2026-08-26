@@ -53,3 +53,15 @@ clips/
 
 # Écrit par la chaîne de publication, propre à une construction.
 core/build_info.py
+
+# ─── Tests et analyse ────────────────────────────────────────────────────────
+# Le rapport de couverture est REGENERE a chaque execution ; seule sa
+# configuration est versionnee.
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+# Cache local de SonarLint, propre a la machine.
+.sonarlint/
+

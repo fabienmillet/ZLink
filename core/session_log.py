@@ -145,7 +145,7 @@ def fmt_duration(seconds: float) -> str:
     s = max(0, int(seconds))
     if s < 60:
         return f"{s} s"
-    m, sec = divmod(s, 60)
+    m, _ = divmod(s, 60)
     if m < 60:
         return f"{m} min"
     h, mm = divmod(m, 60)

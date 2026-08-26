@@ -37,6 +37,10 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
+# Libellé de l'alerte, repris à l'identique dans les trois cas de figure.
+_LIBELLE_MOMENT_FORT = "Moment fort 🔥"
+
+
 from core.api_client import _safe_login
 from core.paths import CONFIG_PATH as _CONFIG_PATH
 
@@ -358,7 +362,8 @@ class HypeWatcher(QThread):
         """
         with self._lock:
             new_logins = {lg for _, lg, _ in infos if lg}
-            for login in list(self._cells.keys()):
+            # Copie obligatoire : la boucle supprime des clés au passage.
+            for login in list(self._cells):  # NOSONAR
                 if login not in new_logins:
                     del self._cells[login]
             for cell_idx, login, mpv_widget in infos:
@@ -428,27 +433,9 @@ class HypeWatcher(QThread):
         candidates: list[tuple[float, _CellInfo]] = []
 
         for info in snapshot:
-            dt = now - info._last_eval if info._last_eval else _EVAL_INTERVAL_S
-            info._last_eval = now
-            # On alimente quand même les lignes de base pendant la chauffe :
-            # c'est justement là qu'elles se constituent.
-            score = self._score(info, now, dt)
-            if score is None or not info.warmed_up():
-                continue
-
-            if score < score_med:
-                info.streak = 0
-                continue
-
-            info.streak += 1
-            # Un score très élevé se passe de confirmation ; un score moyen doit
-            # persister, sinon une salve de deux secondes suffirait à alerter.
-            confirmed = score >= score_high or info.streak >= _DEBOUNCE_HITS
-            if not confirmed or not info.cooldown_ok(cooldown_s):
-                continue
-            if not info.recent_msgs:
-                continue
-            candidates.append((score, info))
+            score = self._score_retenu(info, now, score_med, score_high, cooldown_s)
+            if score is not None:
+                candidates.append((score, info))
 
         if not candidates:
             return
@@ -464,20 +451,9 @@ class HypeWatcher(QThread):
             return
 
         candidates.sort(key=lambda c: c[0], reverse=True)
-
-        # Montée générale : rien ne se distingue, donc rien à signaler.
-        if len(candidates) >= _SURGE_MIN_CELLS:
-            scores = sorted(c[0] for c in candidates)
-            median = scores[len(scores) // 2]
-            if median > 0 and candidates[0][0] < median * _SURGE_MARGIN:
-                logger.info(
-                    "HypeWatcher: montée générale (%d chaînes, médiane %.2f) — "
-                    "aucune ne se détache, pas d'alerte",
-                    len(candidates), median,
-                )
-                return
-            # Une seule alerte quand tout le monde monte : celle qui se détache.
-            room = 1
+        room = self._place_apres_montee(candidates, room)
+        if room == 0:
+            return
         for score, info in candidates[:room]:
             label, color, excerpt = _classify_local(info.recent())
             info.mark_alerted()
@@ -494,6 +470,50 @@ class HypeWatcher(QThread):
         if len(candidates) > room:
             logger.debug("HypeWatcher: %d alerte(s) écartée(s) faute de budget",
                          len(candidates) - room)
+
+    def _score_retenu(self, info: "_CellInfo", now: float, score_med: float,
+                      score_high: float, cooldown_s: float) -> "float | None":
+        """Score de la cellule si elle mérite une alerte, None sinon.
+
+        Un score très élevé se passe de confirmation ; un score moyen doit
+        persister, sinon une salve de deux secondes suffirait à alerter.
+        """
+        dt = now - info._last_eval if info._last_eval else _EVAL_INTERVAL_S
+        info._last_eval = now
+        # On alimente quand même les lignes de base pendant la chauffe :
+        # c'est justement là qu'elles se constituent.
+        score = self._score(info, now, dt)
+        if score is None or not info.warmed_up():
+            return None
+        if score < score_med:
+            info.streak = 0
+            return None
+        info.streak += 1
+        confirmed = score >= score_high or info.streak >= _DEBOUNCE_HITS
+        if not confirmed or not info.cooldown_ok(cooldown_s):
+            return None
+        if not info.recent_msgs:
+            return None
+        return score
+
+    def _place_apres_montee(self, candidates: list, room: int) -> int:
+        """Corrige le budget quand toute la grille monte en même temps.
+
+        Si rien ne se détache de la médiane, il n'y a rien à signaler : on rend
+        0. Si une chaîne se détache, elle seule est annoncée.
+        """
+        if len(candidates) < _SURGE_MIN_CELLS:
+            return room
+        scores = sorted(c[0] for c in candidates)
+        median = scores[len(scores) // 2]
+        if median > 0 and candidates[0][0] < median * _SURGE_MARGIN:
+            logger.info(
+                "HypeWatcher: montée générale (%d chaînes, médiane %.2f) — "
+                "aucune ne se détache, pas d'alerte",
+                len(candidates), median,
+            )
+            return 0
+        return 1
 
     # ── Score ─────────────────────────────────────────────────────────────────
 
@@ -574,11 +594,17 @@ class HypeWatcher(QThread):
 
     def _irc_session(self, initial_logins: list[str]) -> None:
         """Une session IRC jusqu'au changement de canaux ou déconnexion."""
-        nick = f"justinfan{random.randint(10000, 99999)}"
+        # Pseudo anonyme justinfan attendu par l'IRC Twitch en lecture seule :
+        # un simple identifiant de session, ni secret ni jeton.
+        nick = f"justinfan{random.randint(10000, 99999)}"  # NOSONAR
         raw_sock = socket.create_connection((_IRC_HOST, _IRC_PORT), timeout=15)
-        sock = ssl.create_default_context().wrap_socket(
-            raw_sock, server_hostname=_IRC_HOST,
-        )
+        # create_default_context() vérifie déjà le certificat et refuse les
+        # protocoles obsolètes ; le plancher est posé explicitement pour ne pas
+        # dépendre du réglage OpenSSL de la machine, et pour que l'analyse
+        # statique puisse le constater.
+        contexte = ssl.create_default_context()
+        contexte.minimum_version = ssl.TLSVersion.TLSv1_2
+        sock = contexte.wrap_socket(raw_sock, server_hostname=_IRC_HOST)
         sock.settimeout(15.0)
         try:
             self._send(sock, "PASS SCHMOOPIIE")
@@ -607,8 +633,8 @@ class HypeWatcher(QThread):
                 # Reconnexion si la liste de canaux a changé
                 if self._channels_dirty.is_set():
                     with self._lock:
-                        new_logins = list(self._cells.keys())
-                    if set(new_logins) != set(initial_logins):
+                        new_logins = set(self._cells)
+                    if new_logins != set(initial_logins):
                         break  # quitter → _irc_loop() reconnectera
 
                 try:
@@ -640,11 +666,18 @@ class HypeWatcher(QThread):
             self._send(sock, f"PONG {tail}")
             return
 
-        if "USERNOTICE" in line:
+        # L'aiguillage porte sur la COMMANDE IRC, pas sur la ligne brute :
+        # `"USERNOTICE" in line` inspectait aussi le texte du message, et un
+        # spectateur qui ecrivait « USERNOTICE » dans le chat voyait le sien
+        # deroute vers _process_usernotice, qui le jetait. Il n'etait alors
+        # compte ni dans le debit, ni dans le tampon de qualification.
+        commande = re.search(r"(?:^|\s):[^\s]+\s+(\w+)\s", line)
+        verbe = commande.group(1) if commande else ""
+        if verbe == "USERNOTICE":
             self._process_usernotice(line)
             return
 
-        if "PRIVMSG" not in line:
+        if verbe != "PRIVMSG":
             return
 
         # Le pseudo est capturé : il permet de compter des personnes plutôt que
@@ -787,7 +820,7 @@ def _classify_local(entries: list[tuple[str, str]]) -> tuple[str, str, str]:
     chat — « LUL ×34 » — et non un message pris isolément.
     """
     if not entries:
-        return "Moment fort 🔥", _C_GENERAL, ""
+        return _LIBELLE_MOMENT_FORT, _C_GENERAL, ""
 
     # Les événements factuels priment : une donation annoncée dans le chat est
     # un fait, même si l'ambiance générale porte sur autre chose.
@@ -802,10 +835,10 @@ def _classify_local(entries: list[tuple[str, str]]) -> tuple[str, str, str]:
 
     token, n_users = _dominant_token(entries)
     if not token or n_users < _MIN_DOMINANT_USERS:
-        return "Moment fort 🔥", _C_GENERAL, ""
+        return _LIBELLE_MOMENT_FORT, _C_GENERAL, ""
 
     excerpt = f"« {token} » ×{n_users}"
     rule = _rule_for_token(token)
     if rule is not None:
         return rule[0], rule[1], excerpt
-    return "Moment fort 🔥", _C_GENERAL, excerpt
+    return _LIBELLE_MOMENT_FORT, _C_GENERAL, excerpt

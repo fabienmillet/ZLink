@@ -237,7 +237,7 @@ class StreamerSheet(QDialog):
 
     def _remplir(self, goals: list, events: list) -> None:
         s = self._s
-        chiffres = [("Cagnotte", s.donation_formatted or f"{s.donation:,.0f} €".replace(",", " "))]
+        chiffres = [("Cagnotte", s.donation_formatted or f"{s.donation:,.0f} €".replace(",", "\u202f"))]
         if s.online:
             chiffres.append(("Audience", f"{s.viewers:,}".replace(",", " ")))
         if s.location:

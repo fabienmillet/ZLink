@@ -63,7 +63,9 @@ def render_text(s: SessionSummary) -> str:
             f"Cagnotte : {fmt_euros(s.donation_start)} → {fmt_euros(s.donation_end)} "
             f"(+{fmt_euros(gagne)} pendant la session)")
     if s.viewers_peak:
-        lignes.append(f"Pic d'audience : {s.viewers_peak:,}".replace(",", " ")
+        # Espace fine insecable, comme fmt_euros juste au-dessus : deux
+        # separateurs differents dans le meme recapitulatif se voyaient.
+        lignes.append(f"Pic d'audience : {s.viewers_peak:,}".replace(",", " ")
                       + " viewers")
     if s.watch:
         lignes += ["", "## Regardé"]
@@ -97,8 +99,8 @@ def save_summary(s: SessionSummary | None = None) -> pathlib.Path | None:
         dest.write_text(render_text(s), encoding="utf-8")
         logger.info("Récapitulatif de session écrit : %s", dest)
         return dest
-    except OSError as exc:
-        logger.error("Récapitulatif non enregistré — %s", exc)
+    except OSError:
+        logger.exception("Récapitulatif non enregistré")
         return None
 
 

@@ -71,8 +71,8 @@ def verify_libmpv() -> bool | None:
             expected[:12], actual[:12],
         )
         return False
-    except Exception as exc:
-        logger.error("Vérification de libmpv-2.dll impossible : %s", exc)
+    except Exception:
+        logger.exception("Vérification de libmpv-2.dll impossible")
         return None
 
 

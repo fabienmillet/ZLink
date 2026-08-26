@@ -41,6 +41,9 @@ FAMILLES: list[tuple[str, str, bool, str]] = [
      "Une chaîne affichée reçoit un raid."),
     ("top_entry", "Entrée dans les 3 plus grosses audiences", True,
      "Seulement pour une chaîne qui n'est pas déjà affichée."),
+    ("ressources", "Saturation du poste", True,
+     "Le processeur ou le décodeur vidéo sature, et ZLink en est la cause : "
+     "conseil de réduire le nombre de flux."),
 ]
 
 _DEFAUTS = {cle: defaut for cle, _lib, defaut, _aide in FAMILLES}

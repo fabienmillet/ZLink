@@ -19,6 +19,14 @@ Il s'adapte au nombre d'écrans. Sur trois, la grille, le plein écran et le pan
 ont chacun le leur. Sur deux, le panel accompagne le plein écran. Sur un seul,
 les trois vues cohabitent et l'on bascule de l'une à l'autre.
 
+<p align="center">
+  <img src="assets/preview.jpg" alt="ZLink sur trois écrans : le panel à gauche, le plein écran au centre, la grille des directs à droite" width="100%">
+</p>
+
+<p align="center">
+  <sub>Le mode trois écrans : panel de régie, plein écran, grille des directs.</sub>
+</p>
+
 ## Ce que ça fait
 
 ### Regarder

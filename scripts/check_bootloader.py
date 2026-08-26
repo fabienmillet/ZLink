@@ -30,7 +30,10 @@ import zipfile
 
 def empreinte_locale(motif: str) -> tuple[pathlib.Path, str]:
     """Bootloader installé dans l'environnement courant, et son empreinte."""
-    import PyInstaller
+    # Dépendance de CONSTRUCTION seulement : absente du venv d'exécution, et
+    # c'est voulu. L'analyseur ne peut donc pas la résoudre ; ce script n'est
+    # lancé que là où PyInstaller est installé.
+    import PyInstaller  # type: ignore[import-not-found]
 
     racine = pathlib.Path(PyInstaller.__file__).parent / "bootloader"
     chemin = next(racine.glob(motif), None)

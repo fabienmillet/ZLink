@@ -86,11 +86,13 @@ def commit() -> str:
     from core.paths import FROZEN, PROJECT_ROOT
     if not FROZEN:
         import subprocess
+
+        from core.sous_processus import sans_fenetre
         try:
             r = subprocess.run(
                 ["git", "rev-parse", "--short=7", "HEAD"],
                 cwd=str(PROJECT_ROOT), capture_output=True, text=True,
-                timeout=2.0,
+                timeout=2.0, **sans_fenetre(),
             )
             if r.returncode == 0:
                 _commit_cache = r.stdout.strip()
@@ -105,7 +107,9 @@ def is_dev_build() -> bool:
     """Vrai pour un lancement depuis les sources, faux pour un paquet publié."""
     from core.paths import FROZEN
     try:
-        import core.build_info  # noqa: F401
+        # Module ÉCRIT À LA CONSTRUCTION, absent des sources : son absence
+        # est précisément ce qui signale un lancement depuis le dépôt.
+        import core.build_info  # type: ignore[import-not-found]  # noqa: F401
         return False
     except Exception:
         return not FROZEN

@@ -28,7 +28,7 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap, QRegion, QScreen
+from PyQt6.QtGui import QAction, QBrush, QColor, QCursor, QDesktopServices, QFont, QFontMetrics, QIcon, QLinearGradient, QMouseEvent, QPainter, QPaintEvent, QPen, QPixmap, QRegion, QScreen
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyledItemDelegate,
     QSlider,
     QSpacerItem,
     QStackedWidget,
@@ -298,6 +299,62 @@ _SS_GREEN_CLEAR  = "color: #00ff87; border: none; background: transparent;"
 _SS_GREY_CLEAR   = "color: #555555; border: none; background: transparent;"
 _SS_BG_DARK      = "background-color: #0a0a0a;"
 
+#: Feuilles de style répétées, nommées une fois. Le nom dit l'INTENTION :
+#: « le vert de marque sur fond transparent » se relit, « la chaîne numéro 3 »
+#: non — et une couleur changée à un seul endroit ne laisse plus les autres
+#: derrière elle.
+#: Ni fond ni bordure : l'étiquette ne pose rien sur ce qu'il y a dessous.
+_SS_NU_SANS_BORDURE = "background: transparent; border: none;"
+#: Fond effacé, bordure laissée telle quelle.
+_SS_NU = "background: transparent;"
+#: Titre de section : vert de marque, lettres espacées.
+_SS_VERT_TITRE = "color: #00ff87; letter-spacing: 2px; background: transparent;"
+#: Le vert de marque, posé sur ce qu'il y a derrière.
+_SS_VERT_NU = "color: #00ff87; background: transparent;"
+#: Gris de second plan — un libellé qu'on lit après le reste.
+_SS_GRIS_NU = "color: #555555; background: transparent;"
+#: Gris le plus effacé : présent, mais qui ne réclame rien.
+_SS_GRIS_EFFACE = "color: #444444; background: transparent;"
+#: Le noir du fond de page, sous les cartes. Il apparaît aussi dans
+#: _SS_SCROLL_NU, où il est écrit en toutes lettres : une feuille de style Qt
+#: n'accepte pas d'interpolation, et la découper pour l'y glisser la rendrait
+#: moins lisible qu'elle ne gagnerait en unicité.
+_SS_FOND_PAGE = "background: #0a0a0a;"
+#: Zone défilante fondue dans la page : son cadre couperait la liste, et la
+#: seconde règle atteint le conteneur interne que Qt insère lui-même — sans
+#: elle, une bande claire restait derrière le contenu.
+_SS_SCROLL_NU = (
+    "QScrollArea { background: #0a0a0a; border: none; }"
+    "QScrollArea > QWidget > QWidget { background: #0a0a0a; }"
+)
+#: Nom d'objet des conteneurs qui ne peignent rien.
+_NU = "conteneurNu"
+
+#: Règle de fond transparent, SCOPÉE sur ce nom d'objet.
+#:
+#: Le sélecteur est indispensable. Une feuille de style sans sélecteur —
+#: « background: transparent; border: none; » — ne s'applique pas qu'au widget
+#: sur lequel on la pose : Qt la fait descendre sur TOUTE sa descendance. Posée
+#: sur le conteneur d'un onglet, elle effaçait le fond et la bordure de chaque
+#: carte qu'il contient, et la page se retrouvait sans aucun cadre.
+_FOND_TRANSPARENT = (
+    f"QWidget#{_NU}, QFrame#{_NU} {{ background: transparent; border: none; }}"
+)
+_FOND_TRANSPARENT_SANS_BORDURE = _FOND_TRANSPARENT
+_FOND_SOMBRE = "background-color: #0f0f0f;"
+
+
+def _conteneur_nu(w: "QWidget") -> "QWidget":
+    """Rend `w` transparent sans toucher au style de ses enfants.
+
+    À utiliser partout où l'on veut qu'un conteneur ne peigne rien : il pose le
+    nom d'objet que la règle scopée attend, et rend le widget pour permettre
+    `layout.addWidget(_conteneur_nu(QWidget()))`.
+    """
+    w.setObjectName(_NU)
+    w.setStyleSheet(_FOND_TRANSPARENT)
+    return w
+
 
 def _bold_font(family: str, size: int) -> "QFont":
     """Retourne QFont(family, size) avec Bold — évite le constructeur 3-args de PyQt6."""
@@ -417,6 +474,9 @@ def _fmt_viewers(n: int) -> str:
 
 from core import favorites
 from core.ui_theme import MENU_QSS
+from core.win_foreground import ceder_premier_plan, remonter_navigateur
+from core.win_fullscreen import mark_fullscreen
+from widgets.command_palette import CommandPalette as _CommandPalette
 from core.paths import CONFIG_PATH as _CFG_PATH
 from core.version import (
     GITHUB_OWNER as _GH_OWNER,
@@ -456,17 +516,35 @@ def _save_reminders(keys: set[str]) -> None:
 def _clear_layout(layout) -> None:  # type: ignore[type-arg]
     """Supprime tous les widgets d'un layout.
 
-    setParent(None) est indispensable : deleteLater() ne fait que PROGRAMMER la
-    destruction. Retiré du layout mais toujours enfant de son parent, le widget
-    continuait de se peindre à sa dernière position — d'où des textes fantômes
-    superposés au contenu reconstruit.
+    Trois gestes, et l'ordre compte :
+
+    - `hide()` D'ABORD. Un widget qu'on détache devient une fenêtre de premier
+      niveau, et un widget de premier niveau VISIBLE est une fenêtre à l'écran.
+      Sans ce masquage, reconstruire une liste de soixante lignes en faisait
+      surgir soixante — mesuré à +124 fenêtres par rafraîchissement sur
+      l'onglet Goals, toutes les trois secondes, jusqu'à faire ramer la
+      machine ;
+    - `setParent(None)` ensuite : `deleteLater()` ne fait que PROGRAMMER la
+      destruction. Retiré du layout mais toujours enfant de son parent, le
+      widget continuait de se peindre à sa dernière position — d'où des textes
+      fantômes superposés au contenu reconstruit ;
+    - `deleteLater()` enfin, pour que Qt le libère à son prochain tour.
+
+    Les sous-layouts sont vidés récursivement : un layout imbriqué n'est pas un
+    widget, `takeAt` le rend tel quel et ses widgets survivaient au nettoyage.
     """
     while layout.count():
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            w.hide()
             w.setParent(None)
             w.deleteLater()
+            continue
+        sous_layout = item.layout()
+        if sous_layout is not None:
+            _clear_layout(sous_layout)
+            sous_layout.deleteLater()
 
 
 
@@ -664,7 +742,6 @@ class _AccueilBanner(QWidget):
 
     def set_context(self, context: dict) -> None:
         """Conservé pour l'appelant : cette bande n'affiche pas de chiffres."""
-        return
 
     def trigger_refresh(self) -> None:
         return
@@ -865,7 +942,25 @@ class _AccueilTimeline(QWidget):
         voyait. On les répartit donc en couloirs, et le clic teste aussi la
         hauteur — ce qu'on voit est ce qu'on ouvre.
         """
-        items = []
+        items = self._evenements_visibles(now, cx, w, px_per_sec)
+        n_lanes = self._repartir_en_couloirs(items)
+
+        band = self._BASELINE_Y - self._CARD_TOP - 4
+        gap = 2 if n_lanes > 1 else 0
+        lane_h = max(12, (band - gap * (n_lanes - 1)) // n_lanes)
+        return [
+            (ev, x, ew, self._CARD_TOP + lane * (lane_h + gap), lane_h)
+            for ev, _s, _e, x, ew, lane in items
+        ]
+
+    def _evenements_visibles(self, now: float, cx: int, w: int,
+                             px_per_sec: float) -> list[list]:
+        """Les événements qui touchent la bande affichée, mesurés en pixels.
+
+        Rend des listes MUTABLES [ev, début, fin, x, largeur, couloir] : le
+        couloir est décidé juste après, sur ces mêmes entrées.
+        """
+        items: list[list] = []
         for ev in self._events:
             s_ts = ev.start_ts if ev.start_ts else self._parse_ts(ev.day, ev.start_local)
             e_ts = ev.end_ts   if ev.end_ts   else self._parse_ts(ev.day, ev.end_local)
@@ -876,29 +971,29 @@ class _AccueilTimeline(QWidget):
             if x > w or x + ew < 0:
                 continue
             items.append([ev, s_ts, e_ts, x, ew, 0])
+        return items
 
-        # Premier couloir libre, en balayant par date de début.
+    @staticmethod
+    def _repartir_en_couloirs(items: list[list]) -> int:
+        """Affecte un couloir à chaque événement. Rend le nombre de couloirs.
+
+        Premier couloir libre, en balayant par date de début : deux événements
+        qui se chevauchent finissent l'un sous l'autre plutôt que l'un SUR
+        l'autre. Les entrées sont modifiées sur place.
+        """
         items.sort(key=lambda it: it[1])
-        lane_ends: list[int] = []
+        fins_de_couloir: list[int] = []
         for it in items:
-            for i, end_x in enumerate(lane_ends):
-                if it[3] >= end_x:
-                    lane_ends[i] = it[3] + it[4]
+            debut, largeur = it[3], it[4]
+            for i, fin_x in enumerate(fins_de_couloir):
+                if debut >= fin_x:
+                    fins_de_couloir[i] = debut + largeur
                     it[5] = i
                     break
             else:
-                lane_ends.append(it[3] + it[4])
-                it[5] = len(lane_ends) - 1
-
-        n_lanes = max(1, len(lane_ends))
-        band = self._BASELINE_Y - self._CARD_TOP - 4
-        gap = 2 if n_lanes > 1 else 0
-        lane_h = max(12, (band - gap * (n_lanes - 1)) // n_lanes)
-        out = []
-        for ev, _s, _e, x, ew, lane in items:
-            y = self._CARD_TOP + lane * (lane_h + gap)
-            out.append((ev, x, ew, y, lane_h))
-        return out
+                fins_de_couloir.append(debut + largeur)
+                it[5] = len(fins_de_couloir) - 1
+        return max(1, len(fins_de_couloir))
 
     def _hit_event(self, mouse_x: int) -> "EventItem | None":
         import time as _t
@@ -977,104 +1072,118 @@ class _AccueilTimeline(QWidget):
     def _draw_event_cards(
         self, p: QPainter, cx: int, w: int, now: float, px_per_sec: float
     ) -> None:
-        R = 4  # border-radius
-
-        for ev, start_x, ev_w, T, H in self._layout_events(now, cx, w, px_per_sec):
+        for ev, start_x, ev_w, haut, hauteur in self._layout_events(
+                now, cx, w, px_per_sec):
             start_ts = ev.start_ts if ev.start_ts else self._parse_ts(ev.day, ev.start_local)
             end_ts   = ev.end_ts   if ev.end_ts   else self._parse_ts(ev.day, ev.end_local)
             if start_ts is None or end_ts is None:
                 continue
 
-            is_past    = end_ts < now
-            is_current = start_ts <= now <= end_ts
-            color_hex  = self._event_color(ev.name or "")
-            color      = QColor(color_hex)
+            palette = self._palette_de_carte(ev, start_ts, end_ts, now)
+            self._peindre_cadre(p, start_x, ev_w, haut, hauteur, palette)
+            self._peindre_texte(p, ev, start_x, ev_w, haut, hauteur, palette)
+            self._peindre_pastille_en_cours(p, start_x, ev_w, haut, hauteur,
+                                            palette)
 
-            card_rect = QRectF(start_x + 1, T, ev_w - 2, H)
+    #: Rayon des coins d'une carte d'événement.
+    _RAYON_CARTE = 4
 
-            if is_past:
-                # passé : fond très sombre, texte grisé
-                bg = QColor("#111111")
-                border = QColor("#2a2a2a")
-                text_col = QColor("#555555")
-                time_col = QColor("#3a3a3a")
-                accent_opacity = 0
-            elif is_current:
-                # en cours : fond coloré semi-transparent + bordure vive + glow
-                bg = QColor(color_hex + "28")
-                border = color
-                text_col = QColor("#ffffff")
-                time_col = QColor(color_hex)
-                accent_opacity = 255
-            else:
-                # futur : fond légèrement visible, bordure colorée
-                bg = QColor("#181818")
-                border = QColor(color_hex + "bb")
-                text_col = QColor("#dddddd")
-                time_col = QColor(color_hex)
-                accent_opacity = 200
+    def _palette_de_carte(self, ev: "EventItem", start_ts: float,
+                          end_ts: float, now: float) -> dict:
+        """Couleurs et états d'une carte, selon qu'elle est passée, en cours,
+        ou à venir. Tout le reste du dessin ne fait que les appliquer."""
+        is_past = end_ts < now
+        is_current = start_ts <= now <= end_ts
+        color_hex = self._event_color(ev.name or "")
+        commun = {"is_past": is_past, "is_current": is_current,
+                  "color": QColor(color_hex)}
+        if is_past:
+            # passé : fond très sombre, texte grisé
+            return {**commun, "bg": QColor("#111111"),
+                    "border": QColor("#2a2a2a"), "text": QColor("#555555"),
+                    "time": QColor("#3a3a3a"), "accent": 0}
+        if is_current:
+            # en cours : fond coloré semi-transparent + bordure vive
+            return {**commun, "bg": QColor(color_hex + "28"),
+                    "border": QColor(color_hex), "text": QColor("#ffffff"),
+                    "time": QColor(color_hex), "accent": 255}
+        # futur : fond légèrement visible, bordure colorée
+        return {**commun, "bg": QColor("#181818"),
+                "border": QColor(color_hex + "bb"), "text": QColor("#dddddd"),
+                "time": QColor(color_hex), "accent": 200}
 
-            # Fond arrondi
+    def _peindre_cadre(self, p: QPainter, start_x: int, ev_w: int, haut: int,
+                       hauteur: int, palette: dict) -> None:
+        """Fond arrondi, bordure, et bande colorée à gauche."""
+        rayon = self._RAYON_CARTE
+        card_rect = QRectF(start_x + 1, haut, ev_w - 2, hauteur)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(palette["bg"]))
+        p.drawRoundedRect(card_rect, rayon, rayon)
+
+        p.setPen(QPen(palette["border"], 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(card_rect.adjusted(0.5, 0.5, -0.5, -0.5),
+                          rayon, rayon)
+
+        # L'accent ne se pose pas sur une carte passée, ni sur une trop étroite
+        # pour qu'il reste de la place au texte.
+        if palette["accent"] > 0 and ev_w > 8:
+            accent = QColor(palette["color"])
+            accent.setAlpha(palette["accent"])
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(bg))
-            p.drawRoundedRect(card_rect, R, R)
+            p.setBrush(QBrush(accent))
+            p.drawRoundedRect(QRectF(start_x + 1, haut, 3, float(hauteur)), 2, 2)
 
-            # Bordure
-            p.setPen(QPen(border, 1))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(card_rect.adjusted(0.5, 0.5, -0.5, -0.5), R, R)
+    def _peindre_texte(self, p: QPainter, ev: "EventItem", start_x: int,
+                       ev_w: int, haut: int, hauteur: int, palette: dict) -> None:
+        """Heure et nom, ou le nom seul quand la carte est trop petite.
 
-            # Bande colorée gauche (accent) — seulement si pas passé
-            if accent_opacity > 0 and ev_w > 8:
-                accent_color = QColor(color)
-                accent_color.setAlpha(accent_opacity)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(accent_color))
-                p.drawRoundedRect(QRectF(start_x + 1, T, 3, float(H)), 2, 2)
+        L'origine du texte est bornée à gauche : sans ça, une carte qui déborde
+        du bord gauche (start_x négatif) écrivait hors du widget.
+        """
+        text_x = max(start_x + 7, 4)
+        visible_w = start_x + ev_w - text_x - 6
+        inner = QRectF(text_x, haut, max(visible_w, 0), hauteur)
 
-            # ── Texte : heure de début (petite) + nom ────────────────
-            # Clip text origin so it never drifts left of the widget when
-            # the card overflows the left edge (start_x < 0).
-            text_x = max(start_x + 7, 4)
-            visible_w = start_x + ev_w - text_x - 6  # remaining width inside card
-            inner = QRectF(text_x, T, max(visible_w, 0), H)
+        if not palette["is_past"] and visible_w > 50 and hauteur >= 28:
+            p.setFont(QFont(_FONT_SEGOE, 8))
+            p.setPen(QPen(palette["time"]))
+            p.drawText(inner.adjusted(0, 1, 0, 0).toRect(),
+                       Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                       _fmt_time_fr(ev.start_local) if ev.start_local else "")
+            police = QFont(_FONT_SEGOE, 9)
+            police.setBold(palette["is_current"])
+            p.setFont(police)
+            p.setPen(QPen(palette["text"]))
+            p.drawText(inner.adjusted(0, 13, 0, 0).toRect(),
+                       Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                       self._nom_elide(p, ev, visible_w))
+        elif visible_w > 30:
+            p.setFont(QFont(_FONT_SEGOE, 9))
+            p.setPen(QPen(palette["text"]))
+            p.drawText(inner.toRect(),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       self._nom_elide(p, ev, visible_w))
 
-            if not is_past and visible_w > 50 and H >= 28:
-                # Heure en haut
-                p.setFont(QFont(_FONT_SEGOE, 8))
-                p.setPen(QPen(time_col))
-                time_str = _fmt_time_fr(ev.start_local) if ev.start_local else ""
-                p.drawText(inner.adjusted(0, 1, 0, 0).toRect(),
-                           Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-                           time_str)
-                # Nom en dessous
-                _nf = QFont(_FONT_SEGOE, 9)
-                _nf.setBold(is_current)
-                p.setFont(_nf)
-                p.setPen(QPen(text_col))
-                fm = QFontMetrics(p.font())
-                max_w = int(visible_w)
-                name = fm.elidedText(ev.name or "", Qt.TextElideMode.ElideRight, max_w)
-                p.drawText(inner.adjusted(0, 13, 0, 0).toRect(),
-                           Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-                           name)
-            elif visible_w > 30:
-                # Pas assez large : juste le nom centré
-                p.setFont(QFont(_FONT_SEGOE, 9))
-                p.setPen(QPen(text_col))
-                fm = QFontMetrics(p.font())
-                name = fm.elidedText(ev.name or "", Qt.TextElideMode.ElideRight, int(visible_w))
-                p.drawText(inner.toRect(),
-                           Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                           name)
+    @staticmethod
+    def _nom_elide(p: QPainter, ev: "EventItem", largeur: float) -> str:
+        """Nom coupé à la largeur disponible, avec la police EN COURS."""
+        return QFontMetrics(p.font()).elidedText(
+            ev.name or "", Qt.TextElideMode.ElideRight, int(largeur))
 
-            # ── Indicateur "EN COURS" — petit point pulsé ────────────
-            if is_current:
-                dot_x = start_x + ev_w - 10
-                dot_y = T + H // 2
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(color))
-                p.drawEllipse(QRectF(dot_x - 3, dot_y - 3, 6, 6))
+    @staticmethod
+    def _peindre_pastille_en_cours(p: QPainter, start_x: int, ev_w: int,
+                                   haut: int, hauteur: int, palette: dict) -> None:
+        """Point coloré à droite : ce qui se passe MAINTENANT se repère seul."""
+        if not palette["is_current"]:
+            return
+        dot_x = start_x + ev_w - 10
+        dot_y = haut + hauteur // 2
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(palette["color"]))
+        p.drawEllipse(QRectF(dot_x - 3, dot_y - 3, 6, 6))
 
     def paintEvent(self, _event: QPaintEvent) -> None:  # type: ignore[override]
         import time as _time
@@ -1354,7 +1463,7 @@ class _AccueilStreamerItem(QWidget):
         # Viewers
         self._v_lbl = QLabel(_fmt_viewers(s.viewers))
         self._v_lbl.setFont(_bold_font(_FONT_SEGOE, 12))
-        self._v_lbl.setStyleSheet("color: #00ff87; background: transparent;")
+        self._v_lbl.setStyleSheet(_SS_VERT_NU)
         h.addWidget(self._v_lbl)
 
     def patch(self, s: StreamerInfo) -> None:
@@ -1396,11 +1505,11 @@ class _AccueilStreamersList(QWidget):
         hdr.setSpacing(0)
         title = QLabel("EN LIVE")
         title.setFont(_bold_font(_FONT_SEGOE, 10))
-        title.setStyleSheet("color: #00ff87; letter-spacing: 2px; background: transparent;")
+        title.setStyleSheet(_SS_VERT_TITRE)
         hdr.addWidget(title)
         self._count_lbl = QLabel("")
         self._count_lbl.setFont(QFont(_FONT_SEGOE, 10))
-        self._count_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._count_lbl.setStyleSheet(_SS_GRIS_NU)
         self._count_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         hdr.addWidget(self._count_lbl, stretch=1)
         root.addLayout(hdr)
@@ -1410,11 +1519,10 @@ class _AccueilStreamersList(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(
-            "QScrollArea { background: #0a0a0a; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: #0a0a0a; }"
+            _SS_SCROLL_NU
         )
         content = QWidget()
-        content.setStyleSheet("background: #0a0a0a;")
+        content.setStyleSheet(_SS_FOND_PAGE)
         self._list_layout = QVBoxLayout(content)
         self._list_layout.setContentsMargins(0, 0, 0, 0)
         self._list_layout.setSpacing(0)
@@ -1435,26 +1543,36 @@ class _AccueilStreamersList(QWidget):
                     item.patch(s)
             return
 
-        # Structure changée (arrivée/depart streamer) — rebuild complet
-        # Arrivee ou depart : on ne touche qu'aux items concernes. Reconstruire
-        # les 220 items (environ 1100 widgets, ~245 ms mesurees) parce qu'un
-        # seul streamer arrive etait le meme travers que dans l'onglet
+        # Structure changée : on ne touche qu'aux items concernés. Reconstruire
+        # les 220 items (environ 1 100 widgets, ~245 ms mesurées) parce qu'un
+        # seul streamer arrive était le même travers que dans l'onglet
         # Streamers.
         self._prev_live = live_logins
-        for lg in [lg for lg in self._item_map if lg not in live_logins]:
+        self._retirer_les_partis(live_logins)
+        self._retirer_stretch_final()
+        self._reordonner(live)
+        self._list_layout.addStretch()
+
+    def _retirer_les_partis(self, encore_en_ligne: frozenset) -> None:
+        """Détruit les items des chaînes qui ne sont plus en direct."""
+        for lg in [lg for lg in self._item_map if lg not in encore_en_ligne]:
             item = self._item_map.pop(lg)
             self._list_layout.removeWidget(item)
+            item.hide()   # avant de détacher : détaché et visible = une fenêtre
             item.setParent(None)
             item.deleteLater()
 
-        # Le stretch final est retire : il doit rester en queue apres insertion.
+    def _retirer_stretch_final(self) -> None:
+        """Retire le ressort de queue : il doit le rester après insertion."""
         while self._list_layout.count():
-            it = self._list_layout.itemAt(self._list_layout.count() - 1)
-            if it is not None and it.widget() is None:
+            dernier = self._list_layout.itemAt(self._list_layout.count() - 1)
+            if dernier is not None and dernier.widget() is None:
                 self._list_layout.takeAt(self._list_layout.count() - 1)
             else:
                 break
 
+    def _reordonner(self, live: list) -> None:
+        """Replace les items dans l'ordre des viewers, en réutilisant l'existant."""
         for idx, s in enumerate(live):
             item = self._item_map.get(s.twitch_login)
             if item is None:
@@ -1462,9 +1580,8 @@ class _AccueilStreamersList(QWidget):
                 self._item_map[s.twitch_login] = item
             else:
                 item.patch(s)
-            # insertWidget replace sans detruire : l'ordre suit les viewers.
+            # insertWidget déplace sans détruire : l'ordre suit les viewers.
             self._list_layout.insertWidget(idx, item)
-        self._list_layout.addStretch()
 
 
 # ── Accueil — goals proches d'atteinte ───────────────────────────────────────
@@ -1498,7 +1615,7 @@ class _AccueilGoalItem(QWidget):
         row1.addWidget(goal_lbl, stretch=1)
         pct_lbl = QLabel(f"{g.pct:.0f}%")
         pct_lbl.setFont(QFont(_FONT_SEGOE, 11))
-        pct_lbl.setStyleSheet("color: #00ff87; background: transparent;")
+        pct_lbl.setStyleSheet(_SS_VERT_NU)
         pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row1.addWidget(pct_lbl)
         root.addLayout(row1)
@@ -1538,11 +1655,11 @@ class _AccueilGoalsWidget(QWidget):
         hdr.setSpacing(0)
         title = QLabel("PROCHAINS OBJECTIFS")
         title.setFont(_bold_font(_FONT_SEGOE, 10))
-        title.setStyleSheet("color: #00ff87; letter-spacing: 2px; background: transparent;")
+        title.setStyleSheet(_SS_VERT_TITRE)
         hdr.addWidget(title)
         self._count_lbl = QLabel("")
         self._count_lbl.setFont(QFont(_FONT_SEGOE, 10))
-        self._count_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._count_lbl.setStyleSheet(_SS_GRIS_NU)
         self._count_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         hdr.addWidget(self._count_lbl, stretch=1)
         root.addLayout(hdr)
@@ -1552,11 +1669,10 @@ class _AccueilGoalsWidget(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(
-            "QScrollArea { background: #0a0a0a; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: #0a0a0a; }"
+            _SS_SCROLL_NU
         )
         self._content = QWidget()
-        self._content.setStyleSheet("background: #0a0a0a;")
+        self._content.setStyleSheet(_SS_FOND_PAGE)
         self._goals_layout = QVBoxLayout(self._content)
         self._goals_layout.setContentsMargins(0, 0, 0, 0)
         self._goals_layout.setSpacing(0)
@@ -1564,7 +1680,7 @@ class _AccueilGoalsWidget(QWidget):
         emp = QLabel("Aucun objectif publié\npour l'instant")
         emp.setAlignment(Qt.AlignmentFlag.AlignCenter)
         emp.setFont(QFont(_FONT_SEGOE, 12))
-        emp.setStyleSheet("color: #444444; background: transparent;")
+        emp.setStyleSheet(_SS_GRIS_EFFACE)
         self._goals_layout.addWidget(emp)
         self._goals_layout.addStretch()
         scroll.setWidget(self._content)
@@ -1589,7 +1705,7 @@ class _AccueilGoalsWidget(QWidget):
             emp = QLabel("Aucun objectif publié\npour l'instant")
             emp.setAlignment(Qt.AlignmentFlag.AlignCenter)
             emp.setFont(QFont(_FONT_SEGOE, 12))
-            emp.setStyleSheet("color: #444444; background: transparent;")
+            emp.setStyleSheet(_SS_GRIS_EFFACE)
             self._goals_layout.addWidget(emp)
             self._goals_layout.addStretch()
             return
@@ -1638,11 +1754,11 @@ class _EventFeed(QWidget):
         hdr.setSpacing(0)
         title = QLabel("FIL D'ÉVÉNEMENTS")
         title.setFont(_bold_font(_FONT_SEGOE, 10))
-        title.setStyleSheet("color: #00ff87; letter-spacing: 2px; background: transparent;")
+        title.setStyleSheet(_SS_VERT_TITRE)
         hdr.addWidget(title)
         self._count_lbl = QLabel("")
         self._count_lbl.setFont(QFont(_FONT_SEGOE, 10))
-        self._count_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._count_lbl.setStyleSheet(_SS_GRIS_NU)
         self._count_lbl.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         hdr.addWidget(self._count_lbl, stretch=1)
@@ -1668,7 +1784,7 @@ class _EventFeed(QWidget):
         self._empty = QLabel("Rien à signaler\npour l'instant")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setFont(QFont(_FONT_SEGOE, 11))
-        self._empty.setStyleSheet("color: #444444; background: transparent;")
+        self._empty.setStyleSheet(_SS_GRIS_EFFACE)
         root.addWidget(self._empty, stretch=1)
 
     def add_event(self, kind: str, login: str, text: str) -> None:
@@ -1906,44 +2022,18 @@ class _AccueilTab(QWidget):
         # Card cagnotte
         self._amt_lbl.setText(stats.donation_formatted)
 
-        # Card viewers + tendance
-        cur_v = stats.viewers_total
-        if cur_v > self._prev_viewers:
-            self._trend_lbl.setText("▲")
-            self._trend_lbl.setStyleSheet(_SS_GREEN_CLEAR)
-        elif cur_v < self._prev_viewers:
-            self._trend_lbl.setText("▼")
-            self._trend_lbl.setStyleSheet("color: #ff4444; border: none; background: transparent;")
-        else:
-            self._trend_lbl.setText("")
-        self._viewers_lbl.setText(_fmt_viewers(cur_v))
-        self._prev_viewers = cur_v
+        self._maj_carte_viewers(stats.viewers_total)
 
-        # Card live
         nb_live = sum(1 for s in streamers if s.online)
         nb_total = len(streamers)
         self._live_count_lbl.setText(f"{nb_live} / {nb_total}")
 
-        # Player cards top 3 par viewers
-        top3 = sorted([s for s in streamers if s.online], key=lambda s: -s.viewers)[:3]
-        max_v = top3[0].viewers if top3 else 1
-        for i, pc in enumerate(self._player_cards):
-            if i < len(top3):
-                pc.set_streamer(top3[i], i + 1, max_v)
-                pc.setVisible(True)
-            else:
-                pc.setVisible(False)
-
-        # Ticker — streamers live en rotation
-        ticker_live = sorted(
-            [s for s in streamers if s.online], key=lambda s: -s.viewers
-        )[:15]
-        self._ticker.set_streamers(ticker_live)
-
-        # Liste streamers live (section centrale)
+        en_direct = sorted([s for s in streamers if s.online],
+                           key=lambda s: -s.viewers)
+        self._maj_podium(en_direct)
+        self._ticker.set_streamers(en_direct[:15])
         self._streamers_list.update_streamers(streamers)
 
-        # Contexte du bandeau
         self._banner.set_context({
             "year": 2025,
             "donation": stats.donation_formatted,
@@ -1952,19 +2042,7 @@ class _AccueilTab(QWidget):
             "total_count": nb_total,
             "_raw_donation": stats.donation_total,
         })
-
-        favs = favorites.get()
-        live_favs = [s.display or s.twitch_login for s in streamers
-                     if s.online and s.twitch_login.lower() in favs]
-        if live_favs:
-            noms = ", ".join(live_favs[:3])
-            reste = len(live_favs) - 3
-            self._banner.set_ambient(
-                "favs", "live",
-                f"Vos favoris en direct : {noms}"
-                + (f" et {reste} autre" + ("s" if reste > 1 else "") if reste > 0 else ""))
-        else:
-            self._banner.set_ambient("favs", "live", "")
+        self._banner.set_ambient("favs", "live", self._phrase_favoris(streamers))
 
         self._prev_live = {s.twitch_login for s in streamers if s.online}
         self._prev_donation = stats.donation_total
@@ -1972,6 +2050,54 @@ class _AccueilTab(QWidget):
         # Rebuild UUID map for timeline click resolution
         self._uuid_to_login = {s.gdoc_id: s.twitch_login for s in streamers if s.gdoc_id}
         self._all_logins = {s.twitch_login for s in streamers}
+
+    def _maj_carte_viewers(self, total: int) -> None:
+        """Audience du moment, avec sa flèche de tendance.
+
+        La flèche compare au RELEVÉ PRÉCÉDENT, pas à une moyenne : ce qu'on
+        veut savoir, c'est si ça monte à l'instant.
+        """
+        if total > self._prev_viewers:
+            self._trend_lbl.setText("▲")
+            self._trend_lbl.setStyleSheet(_SS_GREEN_CLEAR)
+        elif total < self._prev_viewers:
+            self._trend_lbl.setText("▼")
+            self._trend_lbl.setStyleSheet(
+                "color: #ff4444; border: none; background: transparent;")
+        else:
+            self._trend_lbl.setText("")
+        self._viewers_lbl.setText(_fmt_viewers(total))
+        self._prev_viewers = total
+
+    def _maj_podium(self, en_direct: list) -> None:
+        """Les trois plus grosses audiences. Les cartes en trop sont masquées.
+
+        Elles ne sont pas détruites : elles resserviront au prochain
+        rafraîchissement, et les recréer ferait clignoter la rangée.
+        """
+        top3 = en_direct[:3]
+        max_v = top3[0].viewers if top3 else 1
+        for i, carte in enumerate(self._player_cards):
+            if i < len(top3):
+                carte.set_streamer(top3[i], i + 1, max_v)
+                carte.setVisible(True)
+            else:
+                carte.setVisible(False)
+
+    @staticmethod
+    def _phrase_favoris(streamers: list) -> str:
+        """« Vos favoris en direct : … », ou rien s'il n'y en a aucun."""
+        favs = favorites.get()
+        noms_live = [s.display or s.twitch_login for s in streamers
+                     if s.online and s.twitch_login.lower() in favs]
+        if not noms_live:
+            return ""
+        cites = ", ".join(noms_live[:3])
+        reste = len(noms_live) - 3
+        if reste <= 0:
+            return f"Vos favoris en direct : {cites}"
+        pluriel = "s" if reste > 1 else ""
+        return f"Vos favoris en direct : {cites} et {reste} autre{pluriel}"
 
     def _host_login(self, ev: EventItem) -> str:
         """Login du présentateur d'un show, vide si non résolvable."""
@@ -2071,52 +2197,68 @@ class _AccueilTab(QWidget):
         l'impression de suivre quoi que ce soit.
         """
         now = time.time()
+        courant, suivant, debut_suivant = self._en_cours_et_a_venir(now)
 
-        # En cours et à venir.
-        current: EventItem | None = None
-        nxt: EventItem | None = None
-        nxt_start = 0.0
+        self._banner.set_ambient("now", "event", self._phrase_en_cours(courant))
+        self._banner.set_ambient(
+            "next", "next", self._phrase_a_suivre(suivant, debut_suivant, now))
+        self._banner.set_ambient("count", "next", self._phrase_reste_du_jour(now))
+        self._banner.set_ambient("info", "idle", self._phrase_avant_le_coup_d_envoi(now))
+
+    def _en_cours_et_a_venir(self, now: float) -> tuple:
+        """(événement en cours, prochain, heure du prochain) — un seul balayage.
+
+        Le premier en cours gagne : deux shows qui se chevauchent sont rares, et
+        annoncer les deux ferait clignoter le bandeau entre eux.
+        """
+        courant: EventItem | None = None
+        suivant: EventItem | None = None
+        debut_suivant = 0.0
         for ev in self._events:
             start, end = self._ev_bounds(ev)
             if start is None:
                 continue
             if end is not None and start <= now <= end:
-                current = current or ev
-            elif start > now and (nxt is None or start < nxt_start):
-                nxt, nxt_start = ev, start
+                courant = courant or ev
+            elif start > now and (suivant is None or start < debut_suivant):
+                suivant, debut_suivant = ev, start
+        return courant, suivant, debut_suivant
 
-        if current is not None:
-            fin = f" jusqu'à {_fmt_time_fr(current.end_local)}" if current.end_local else ""
-            self._banner.set_ambient(
-                "now", "event", f"En ce moment : {current.name or 'Événement'}{fin}")
-        else:
-            self._banner.set_ambient("now", "event", "")
+    @staticmethod
+    def _phrase_en_cours(ev: "EventItem | None") -> str:
+        if ev is None:
+            return ""
+        fin = f" jusqu'à {_fmt_time_fr(ev.end_local)}" if ev.end_local else ""
+        return f"En ce moment : {ev.name or 'Événement'}{fin}"
 
-        if nxt is not None:
-            heure = _fmt_time_fr(nxt.start_local) if nxt.start_local else ""
-            self._banner.set_ambient(
-                "next", "next",
-                f"À suivre : {nxt.name or 'Événement'} à {heure} "
-                f"({self._delai(nxt_start - now)})")
-        else:
-            self._banner.set_ambient("next", "next", "")
+    def _phrase_a_suivre(self, ev: "EventItem | None", debut: float,
+                         now: float) -> str:
+        if ev is None:
+            return ""
+        heure = _fmt_time_fr(ev.start_local) if ev.start_local else ""
+        return (f"À suivre : {ev.name or 'Événement'} à {heure} "
+                f"({self._delai(debut - now)})")
 
-        # Nombre de shows restants aujourd'hui.
+    def _phrase_reste_du_jour(self, now: float) -> str:
+        """Combien de rendez-vous restent aujourd'hui — tu à partir d'un seul.
+
+        Annoncer « 1 rendez-vous encore » alors qu'il est déjà nommé juste
+        au-dessus n'apprend rien.
+        """
         jour = datetime.now().strftime("%Y-%m-%d")
         reste = sum(1 for ev in self._events
                     if ev.day == jour
                     and (self._ev_bounds(ev)[0] or 0) > now)
-        self._banner.set_ambient(
-            "count", "next",
-            f"{reste} rendez-vous encore au programme aujourd'hui" if reste > 1 else "")
+        if reste <= 1:
+            return ""
+        return f"{reste} rendez-vous encore au programme aujourd'hui"
 
-        # Avant le coup d'envoi, dire quand ça commence.
+    def _phrase_avant_le_coup_d_envoi(self, now: float) -> str:
+        """Avant l'ouverture, le bandeau dit dans combien de temps ça commence."""
         debut = _AccueilTimeline._parse_ts(_PROG_DAYS_ORDERED[0], "18:00")
-        if debut and now < debut:
-            self._banner.set_ambient(
-                "info", "idle", f"Le ZEvent 2026 commence {self._delai(debut - now)}")
-        else:
-            self._banner.set_ambient("info", "idle", "")
+        if not debut or now >= debut:
+            return ""
+        return f"Le ZEvent 2026 commence {self._delai(debut - now)}"
 
     def _refresh_next_show(self) -> None:
         self._refresh_ambient()
@@ -2266,12 +2408,18 @@ def _avatar_cache_key(login: str, profile_url: str) -> str:
     vide et leur avatar est hébergé hors Twitch. Sans clé dérivée, tous
     partageraient le fichier "".png et afficheraient la même image — le dernier
     téléchargé écrasant les autres.
+
+    SHA-256 comme partout ailleurs dans le projet. La clé ne protège rien — un
+    nom de fichier de cache, dérivé d'une URL publique — mais un algorithme
+    réputé faible dans le code invite à le recopier là où ça compterait, et ici
+    il ne coûte rien de plus.
     """
     if login:
         return login
     if not profile_url:
         return ""
-    return "guest_" + hashlib.sha1(profile_url.encode("utf-8")).hexdigest()[:16]
+    return "guest_" + hashlib.sha256(
+        profile_url.encode("utf-8")).hexdigest()[:16]
 
 
 def _infobulle(texte: str) -> str:
@@ -2327,13 +2475,59 @@ def _make_chip(name: str) -> QLabel:
     return lbl
 
 
+def _personne(entree) -> tuple[str, str, str]:
+    """Normalise un intervenant en (nom affiché, login, url d'avatar).
+
+    Les appelants historiques ne passaient qu'un nom ; ceux qui disposent du
+    triplet complet le passent tel quel, et l'avatar suit.
+    """
+    if isinstance(entree, str):
+        return entree, "", ""
+    display, login, purl = (list(entree) + ["", "", ""])[:3]
+    return str(display), str(login or ""), str(purl or "")
+
+
+def _make_person_chip(display: str, login: str = "", profile_url: str = "",
+                      accent: bool = False) -> QWidget:
+    """Puce arrondie : avatar à gauche, nom à droite.
+
+    Un nom seul demande de connaître la personne pour la reconnaître ; la photo
+    se lit d'un coup d'œil. Sans image disponible — les invités d'un show n'ont
+    pas de compte Twitch — la pastille garde les initiales, et la puce conserve
+    la même hauteur pour que la grille reste alignée.
+    """
+    chip = QFrame()
+    chip.setObjectName("personChip")
+    chip.setFixedHeight(26)
+    chip.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    # Sélecteur nommé : sans lui la règle descendrait sur l'avatar et le nom,
+    # qui portent leur propre fond et leur propre bordure.
+    couleurs = ("#00ff87", "#0d1f16", "#00ff87") if accent else \
+               ("#cccccc", "#1e1e1e", "#2a2a2a")
+    texte, fond, bordure = couleurs
+    chip.setStyleSheet(
+        f"QFrame#personChip {{ background: {fond}; border: 1px solid {bordure}; "
+        "border-radius: 13px; }"
+    )
+    h = QHBoxLayout(chip)
+    h.setContentsMargins(3, 0, 9, 0)
+    h.setSpacing(6)
+    h.addWidget(_make_person_avatar(display, login, size=20,
+                                    profile_url=profile_url))
+    nom = QLabel(display)
+    nom.setFont(QFont(_FONT_SEGOE, 10))
+    nom.setStyleSheet(f"color: {texte}; background: transparent; border: none;")
+    h.addWidget(nom)
+    return chip
+
+
 # ── Popup : liste complète des participants ────────────────────────────────
 
 class _ParticipantsDialog(QDialog):
     """Popup modale listant tous les participants d'un événement."""
 
-    def __init__(self, event_name: str, participants: list[str],
-                 hosts: list[str], parent: QWidget | None = None) -> None:
+    def __init__(self, event_name: str, participants: list,
+                 hosts: list, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(event_name)
         self.setModal(True)
@@ -2357,15 +2551,12 @@ class _ParticipantsDialog(QDialog):
             host_lbl.setStyleSheet("color: #555555; letter-spacing: 1px;")
             lay.addWidget(host_lbl)
             hw = QWidget()
-            hw.setStyleSheet("background: transparent;")
+            hw.setStyleSheet(_SS_NU)
             hfl = _FlowLayout(hw, h_spacing=6, v_spacing=6)
-            for name in hosts:
-                chip = _make_chip(name)
-                chip.setStyleSheet(
-                    "color: #00ff87; background: #0d1f16; "
-                    "border: 1px solid #00ff87; border-radius: 10px; padding: 1px 8px;"
-                )
-                hfl.addWidget(chip)
+            for entree in hosts:
+                display, login, purl = _personne(entree)
+                hfl.addWidget(_make_person_chip(display, login, purl,
+                                                accent=True))
             lay.addWidget(hw)
 
         if participants:
@@ -2380,10 +2571,11 @@ class _ParticipantsDialog(QDialog):
             lay.addWidget(part_lbl)
 
             pw = QWidget()
-            pw.setStyleSheet("background: transparent;")
+            pw.setStyleSheet(_SS_NU)
             pfl = _FlowLayout(pw, h_spacing=6, v_spacing=6)
-            for name in participants:
-                pfl.addWidget(_make_chip(name))
+            for entree in participants:
+                display, login, purl = _personne(entree)
+                pfl.addWidget(_make_person_chip(display, login, purl))
             lay.addWidget(pw)
 
         close_btn = QPushButton("Fermer")
@@ -2442,6 +2634,11 @@ class _ReminderToast(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Un rappel s'affiche PENDANT qu'on fait autre chose : sans cet
+        # attribut, la fenêtre flottante active l'application, et ZLink
+        # revenait au premier plan à chaque toast — insupportable en mode
+        # mock, où ils tombent en rafale.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -2449,7 +2646,7 @@ class _ReminderToast(QWidget):
 
         bell = QLabel("🔔")
         bell.setFont(QFont(_FONT_SEGOE, 14))
-        bell.setStyleSheet("background: transparent; border: none;")
+        bell.setStyleSheet(_SS_NU_SANS_BORDURE)
         lay.addWidget(bell)
 
         txt = QLabel(message)
@@ -2671,7 +2868,7 @@ class _ProgrammeTab(QWidget):
         # Paires de cards côte à côte dans des rows QHBoxLayout indépendantes
         for i in range(0, len(day_events), 2):
             row_w = QWidget()
-            row_w.setStyleSheet("background: transparent; border: none;")
+            row_w.setStyleSheet(_SS_NU_SANS_BORDURE)
             row_hl = QHBoxLayout(row_w)
             row_hl.setContentsMargins(0, 0, 0, 0)
             row_hl.setSpacing(8)
@@ -2732,176 +2929,215 @@ class _ProgrammeTab(QWidget):
 
     # ── Card ─────────────────────────────────────────────────────────
 
-    def _event_card(self, ev: EventItem) -> QFrame:
-        key = self._event_key(ev)
-        _ev_logins = getattr(ev, "logins", None)
-        _ev_avatars = getattr(ev, "profile_urls", None)
-        hosts_people = self._resolve_people(ev.host_uuids, ev.names, _ev_logins, _ev_avatars)
-        hosts_names = [d for d, _, _ in hosts_people]
-        parts_people = self._resolve_people(
-            ev.participant_uuids, ev.names, _ev_logins, _ev_avatars
-        )
-        parts_names = [d for d, _, _ in parts_people]
-        is_subscribed = key in self._subscribed_ids
+    #: Au-delà, les intervenants passent dans la popup plutôt que de faire
+    #: déborder la carte sur deux lignes.
+    _MONTRES_SUR_LA_CARTE = 8
 
+    def _event_card(self, ev: EventItem) -> QFrame:
+        """Une carte de show : heure, nom, durée, rappel, puis les intervenants."""
+        key = self._event_key(ev)
+        logins = getattr(ev, "logins", None)
+        avatars = getattr(ev, "profile_urls", None)
+        hotes = self._resolve_people(ev.host_uuids, ev.names, logins, avatars)
+        parts = self._resolve_people(ev.participant_uuids, ev.names, logins,
+                                     avatars)
+
+        card, cl = self._cadre_de_carte()
+        cl.addLayout(self._ligne_titre(ev, key))
+
+        ligne_hotes = self._ligne_hotes(ev, hotes, parts)
+        if ligne_hotes is not None:
+            cl.addLayout(ligne_hotes)
+        ligne_parts = self._ligne_participants(ev, parts, hotes)
+        if ligne_parts is not None:
+            cl.addLayout(ligne_parts)
+
+        if not hotes and not parts:
+            absent = QLabel("Participants non disponibles")
+            absent.setFont(QFont(_FONT_SEGOE, 10))
+            absent.setStyleSheet("color: #444444; background: transparent;"
+                                 " border: none;")
+            cl.addWidget(absent)
+        return card
+
+    @staticmethod
+    def _cadre_de_carte() -> tuple:
+        """(carte, layout de son contenu). La barre verte est posée ici.
+
+        Elle est un frère du contenu, pas une bordure : une bordure gauche de
+        3 px se serait arrondie avec le cadre et aurait pincé aux angles.
+        """
         card = QFrame()
         card.setStyleSheet(
-            "QFrame { background: #111111; border: 1px solid #1e1e1e; border-radius: 6px; }"
+            "QFrame { background: #111111; border: 1px solid #1e1e1e;"
+            " border-radius: 6px; }"
             "QFrame:hover { border-color: #2a2a2a; }"
         )
-        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
-        # Barre verticale colorée à gauche
+        card.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Minimum)
         outer = QHBoxLayout(card)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         accent = QFrame()
         accent.setFixedWidth(3)
-        accent.setStyleSheet("background: #00ff87; border-radius: 2px; border: none;")
-        accent.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        accent.setStyleSheet(
+            "background: #00ff87; border-radius: 2px; border: none;")
+        accent.setSizePolicy(QSizePolicy.Policy.Fixed,
+                             QSizePolicy.Policy.Expanding)
         outer.addWidget(accent)
 
         inner = QWidget()
-        inner.setStyleSheet("background: transparent; border: none;")
+        inner.setStyleSheet(_SS_NU_SANS_BORDURE)
         cl = QVBoxLayout(inner)
         cl.setContentsMargins(10, 10, 10, 10)
         cl.setSpacing(6)
         outer.addWidget(inner, stretch=1)
+        return card, cl
 
-        # ── Ligne 1 : heure + nom + durée + bell ─────────────────────
-        line1 = QHBoxLayout()
-        line1.setSpacing(6)
+    def _ligne_titre(self, ev: EventItem, key: str) -> QHBoxLayout:
+        """Heure, nom, durée, et la cloche de rappel."""
+        ligne = QHBoxLayout()
+        ligne.setSpacing(6)
 
-        time_lbl = QLabel(_fmt_time_fr(ev.start_local) if ev.start_local else "—")
-        time_lbl.setFixedWidth(54)
-        time_lbl.setFont(_bold_font(_FONT_SEGOE, 11))
-        time_lbl.setStyleSheet("color: #00ff87; background: transparent; border: none;")
-        line1.addWidget(time_lbl)
+        heure = QLabel(_fmt_time_fr(ev.start_local) if ev.start_local else "—")
+        heure.setFixedWidth(54)
+        heure.setFont(_bold_font(_FONT_SEGOE, 11))
+        heure.setStyleSheet("color: #00ff87; background: transparent;"
+                            " border: none;")
+        ligne.addWidget(heure)
 
-        name_lbl = QLabel(ev.name or "—")
-        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        name_lbl.setFont(_bold_font(_FONT_SEGOE, 13))
-        name_lbl.setStyleSheet("color: #ffffff; background: transparent; border: none;")
-        name_lbl.setWordWrap(True)
-        line1.addWidget(name_lbl, stretch=1)
+        nom = QLabel(ev.name or "—")
+        nom.setTextFormat(Qt.TextFormat.PlainText)
+        nom.setFont(_bold_font(_FONT_SEGOE, 13))
+        nom.setStyleSheet("color: #ffffff; background: transparent;"
+                          " border: none;")
+        nom.setWordWrap(True)
+        ligne.addWidget(nom, stretch=1)
 
-        dur = _fmt_duration(ev.start_local, ev.end_local)
-        if dur:
-            dur_lbl = QLabel(dur)
-            dur_lbl.setFont(QFont(_FONT_SEGOE, 10))
-            dur_lbl.setStyleSheet("color: #888888; background: transparent; border: none;")
-            dur_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            line1.addWidget(dur_lbl)
-            line1.addSpacing(2)
+        duree = _fmt_duration(ev.start_local, ev.end_local)
+        if duree:
+            lbl = QLabel(duree)
+            lbl.setFont(QFont(_FONT_SEGOE, 10))
+            lbl.setStyleSheet("color: #888888; background: transparent;"
+                              " border: none;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight
+                             | Qt.AlignmentFlag.AlignVCenter)
+            ligne.addWidget(lbl)
+            ligne.addSpacing(2)
 
-        # Bouton rappel. Pas d'emoji : U+1F514/U+1F515 ne rendent aucun glyphe
-        # hors Windows (le bouton apparaissait vide), on passe par qtawesome
-        # comme les boutons du header.
-        bell_btn = QPushButton()
-        bell_btn.setFixedSize(26, 26)
-        bell_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        bell_btn.setToolTip("Désactiver le rappel" if is_subscribed else "Me rappeler 5 min avant")
-        bell_btn.setFont(_bold_font(_FONT_SEGOE, 11))
-        self._style_bell(bell_btn, is_subscribed)
-        bell_btn.clicked.connect(lambda _, k=key, b=bell_btn, e=ev: self._toggle_reminder(k, b, e))
-        line1.addWidget(bell_btn)
-        cl.addLayout(line1)
+        ligne.addWidget(self._bouton_rappel(ev, key))
+        return ligne
 
-        # ── Ligne 2 : hôtes (chips) ───────────────────────────────────
-        if hosts_people:
-            hosts_row = QHBoxLayout()
-            hosts_row.setSpacing(4)
-            host_icon = QLabel()
-            host_icon.setFixedSize(14, 14)
-            host_icon.setStyleSheet("background: transparent; border: none;")
-            host_icon.setToolTip("Animé par")
-            if _QTA_OK:
-                host_icon.setPixmap(
-                    qta.icon("mdi6.microphone", color="#8a8a8a").pixmap(QSize(14, 14))
-                )
+    def _bouton_rappel(self, ev: EventItem, key: str) -> QPushButton:
+        """Cloche de rappel.
+
+        Pas d'emoji : U+1F514/U+1F515 ne rendent aucun glyphe hors Windows — le
+        bouton apparaissait vide — on passe par qtawesome comme le header.
+        """
+        abonne = key in self._subscribed_ids
+        b = QPushButton()
+        b.setFixedSize(26, 26)
+        b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        b.setToolTip("Désactiver le rappel" if abonne
+                     else "Me rappeler 5 min avant")
+        b.setFont(_bold_font(_FONT_SEGOE, 11))
+        self._style_bell(b, abonne)
+        b.clicked.connect(
+            lambda _, k=key, bouton=b, e=ev: self._toggle_reminder(k, bouton, e))
+        return b
+
+    def _ligne_hotes(self, ev: EventItem, hotes: list,
+                     parts: list) -> "QHBoxLayout | None":
+        """Animateurs : avatars cerclés de vert, ou puces s'ils n'ont pas de compte.
+
+        Rend None quand l'événement n'a pas d'animateur : l'appelant n'ajoute
+        alors aucune ligne, plutôt qu'une ligne vide.
+        """
+        if not hotes:
+            return None
+        ligne = QHBoxLayout()
+        ligne.setSpacing(4)
+        ligne.addWidget(self._icone_micro())
+        for display, login, purl in hotes[:self._MONTRES_SUR_LA_CARTE]:
+            if login or purl:
+                # Anneau vert : marque l'animateur face aux participants.
+                ligne.addWidget(_make_person_avatar(display, login,
+                                                    ring="#1a3328",
+                                                    profile_url=purl))
+                continue
+            chip = _make_chip(display)
+            chip.setStyleSheet(
+                "color: #00ff87; background: #0d1f16; border: 1px solid #1a3328; "
+                "border-radius: 10px; padding: 1px 8px;")
+            ligne.addWidget(chip)
+        reste = len(hotes) - self._MONTRES_SUR_LA_CARTE
+        if reste > 0:
+            ligne.addWidget(self._lien_vers_popup(f"+{reste}", "#00ff87",
+                                                  ev, hotes, parts))
+        ligne.addStretch()
+        return ligne
+
+    @staticmethod
+    def _icone_micro() -> QLabel:
+        """Le micro qui annonce « animé par »."""
+        icone = QLabel()
+        icone.setFixedSize(14, 14)
+        icone.setStyleSheet(_SS_NU_SANS_BORDURE)
+        icone.setToolTip("Animé par")
+        if _QTA_OK:
+            icone.setPixmap(
+                qta.icon("mdi6.microphone", color="#8a8a8a").pixmap(QSize(14, 14)))
+        else:
+            icone.setText("\U0001f399")
+        return icone
+
+    def _ligne_participants(self, ev: EventItem, parts: list,
+                            hotes: list) -> "QHBoxLayout | None":
+        """Participants en avatars, nom au survol. None s'il n'y en a aucun.
+
+        Les avatars tiennent bien plus serré que les puces texte : on en montre
+        huit au lieu de trois avant de renvoyer vers la popup.
+        """
+        if not parts:
+            return None
+        ligne = QHBoxLayout()
+        ligne.setSpacing(4)
+        montres = parts[:self._MONTRES_SUR_LA_CARTE]
+        for display, login, purl in montres:
+            if login or purl:
+                ligne.addWidget(_make_person_avatar(display, login,
+                                                    profile_url=purl))
             else:
-                host_icon.setText("\U0001f399")
-            hosts_row.addWidget(host_icon)
-            HOSTS_SHOWN = 8
-            for display, login, purl in hosts_people[:HOSTS_SHOWN]:
-                if login or purl:
-                    # Anneau vert : marque l'animateur face aux participants.
-                    hosts_row.addWidget(
-                        _make_person_avatar(display, login, ring="#1a3328", profile_url=purl)
-                    )
-                    continue
-                chip = _make_chip(display)
-                chip.setStyleSheet(
-                    "color: #00ff87; background: #0d1f16; border: 1px solid #1a3328; "
-                    "border-radius: 10px; padding: 1px 8px;"
-                )
-                hosts_row.addWidget(chip)
-            extra_h = len(hosts_people) - HOSTS_SHOWN
-            if extra_h > 0:
-                more = QPushButton(f"+{extra_h}")
-                more.setFont(QFont(_FONT_SEGOE, 10))
-                more.setFixedHeight(20)
-                more.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                more.setStyleSheet(
-                    "QPushButton { color: #00ff87; background: transparent; border: none; "
-                    "text-decoration: underline; padding: 0 2px; }"
-                    "QPushButton:hover { color: #ffffff; }"
-                )
-                more.clicked.connect(
-                    lambda _, e=ev, h=hosts_names, p=parts_names: self._open_participants_popup(e, h, p)
-                )
-                hosts_row.addWidget(more)
-            hosts_row.addStretch()
-            cl.addLayout(hosts_row)
+                # Intervenant hors ZEvent (artiste, invité) : pas de login donc
+                # pas d'avatar, la puce texte reste la seule option.
+                ligne.addWidget(_make_chip(display))
+        reste = len(parts) - len(montres)
+        if reste > 0:
+            ligne.addWidget(self._lien_vers_popup(
+                f"voir les {reste} autres…", "#888888", ev, hotes, parts))
+        ligne.addStretch()
+        return ligne
 
-        # ── Ligne 3 : participants (avatars, nom au survol) ───────────
-        if parts_people:
-            parts_row = QHBoxLayout()
-            parts_row.setSpacing(4)
-            # Les avatars tiennent bien plus serré que les puces texte : on en
-            # montre 8 au lieu de 3 avant de renvoyer vers la popup.
-            AVATARS_SHOWN = 8
-            shown = parts_people[:AVATARS_SHOWN]
-            for display, login, purl in shown:
-                if login or purl:
-                    parts_row.addWidget(
-                        _make_person_avatar(display, login, profile_url=purl)
-                    )
-                else:
-                    # Intervenant hors ZEvent (artiste, invité) : pas de login
-                    # donc pas d'avatar, la puce texte reste la seule option.
-                    parts_row.addWidget(_make_chip(display))
-            extra_p = len(parts_people) - len(shown)
-            if extra_p > 0:
-                more = QPushButton(f"voir les {extra_p} autres…")
-                more.setFont(QFont(_FONT_SEGOE, 10))
-                more.setFixedHeight(20)
-                more.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                more.setStyleSheet(
-                    "QPushButton { color: #888888; background: transparent; border: none; "
-                    "text-decoration: underline; padding: 0 2px; }"
-                    "QPushButton:hover { color: #00ff87; }"
-                )
-                more.clicked.connect(
-                    lambda _, e=ev, h=hosts_names, p=parts_names: self._open_participants_popup(e, h, p)
-                )
-                parts_row.addWidget(more)
-            parts_row.addStretch()
-            cl.addLayout(parts_row)
-
-        if not hosts_names and not parts_names:
-            na_lbl = QLabel("Participants non disponibles")
-            na_lbl.setFont(QFont(_FONT_SEGOE, 10))
-            na_lbl.setStyleSheet("color: #444444; background: transparent; border: none;")
-            cl.addWidget(na_lbl)
-
-        return card
-
-    # ── Popup participants ────────────────────────────────────────────
+    def _lien_vers_popup(self, libelle: str, couleur: str, ev: EventItem,
+                         hotes: list, parts: list) -> QPushButton:
+        """Le « +N » qui ouvre la liste complète."""
+        b = QPushButton(libelle)
+        b.setFont(QFont(_FONT_SEGOE, 10))
+        b.setFixedHeight(20)
+        b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        survol = "#ffffff" if couleur == "#00ff87" else "#00ff87"
+        b.setStyleSheet(
+            f"QPushButton {{ color: {couleur}; background: transparent;"
+            " border: none; text-decoration: underline; padding: 0 2px; }"
+            f"QPushButton:hover {{ color: {survol}; }}")
+        b.clicked.connect(
+            lambda _, e=ev, h=hotes, p=parts:
+                self._open_participants_popup(e, h, p))
+        return b
 
     def _open_participants_popup(self, ev: EventItem,
-                                  hosts: list[str], parts: list[str]) -> None:
+                                  hosts: list, parts: list) -> None:
         dlg = _ParticipantsDialog(ev.name or "Événement", parts, hosts, parent=self)
         dlg.exec()
 
@@ -2986,28 +3222,307 @@ def _run_coro(coro):  # type: ignore[no-untyped-def]
         loop.close()
 
 
+class _BarreObjectif(QWidget):
+    """Barre de progression d'un objectif, quatre pixels de haut.
+
+    L'ancienne liste n'affichait que le montant visé. « 559 600 € » ne dit pas
+    si l'objectif tombe dans l'heure ou s'il restera lettre morte : c'est la
+    DISTANCE qui intéresse, pas la cible.
+    """
+
+    HAUTEUR = 5
+
+    def __init__(self, part: float, accompli: bool = False,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(self.HAUTEUR)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._part = max(0.0, min(1.0, part))
+        self._accompli = accompli
+
+    def set_part(self, part: float) -> None:
+        """Change la part affichée SANS remplacer le widget.
+
+        Détruire la barre pour en poser une neuve à chaque rafraîchissement la
+        détachait de son parent, et un widget détaché qui n'a pas été masqué
+        est une fenêtre à l'écran.
+        """
+        borne = max(0.0, min(1.0, part))
+        if abs(borne - self._part) < 0.001:
+            return
+        self._part = borne
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor("#1c1c1c"))
+        if self._part > 0:
+            couleur = QColor("#00ff87") if self._accompli else QColor("#38bdf8")
+            # Au-delà de 90 %, l'objectif est à portée : la couleur le dit
+            # avant qu'on ait lu le pourcentage.
+            if not self._accompli and self._part >= 0.9:
+                couleur = QColor("#f5c518")
+            p.fillRect(0, 0, int(w * self._part), h, couleur)
+        p.end()
+
+
+def _part_objectif(cagnotte: float, cible: float) -> float:
+    """Part d'un objectif atteinte, entre 0 et 1.
+
+    Approximation assumée, et la même que partout ailleurs dans ZLink : on
+    rapporte la cagnotte TOTALE du streamer au montant de l'objectif. L'API ne
+    publie pas de compteur par objectif ; c'est le seul proxy disponible, et il
+    vaut surtout pour situer un ordre de grandeur.
+    """
+    if cible <= 0:
+        return 0.0
+    return max(0.0, min(1.0, cagnotte / cible))
+
+
+class _LigneObjectif(QFrame):
+    """Un objectif : son état, son nom, sa catégorie, et où il en est."""
+
+    def __init__(self, goal: DonationGoal, cagnotte: float,
+                 prefixe: tuple[str, str, str] | None = None,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("eventRow")
+        self._goal = goal
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(5)
+        v.addLayout(self._ligne_titre(goal, prefixe))
+        if not goal.accomplished:
+            v.addWidget(_BarreObjectif(_part_objectif(cagnotte, goal.amount)))
+            v.addWidget(self._ligne_distance(goal, cagnotte))
+
+    def _ligne_titre(self, goal: DonationGoal,
+                     prefixe: tuple[str, str, str] | None) -> QHBoxLayout:
+        h = QHBoxLayout()
+        h.setSpacing(10)
+        etat = QLabel("✓" if goal.accomplished else "○")
+        etat.setFont(_bold_font(_FONT_SEGOE, 13))
+        etat.setStyleSheet(_SS_GREEN if goal.accomplished else _SS_GREY)
+        etat.setFixedWidth(16)
+        h.addWidget(etat)
+
+        if prefixe is not None:
+            # Vue « toutes les chaînes » : l'objectif ne veut rien dire sans
+            # savoir de qui il est.
+            display, login, purl = prefixe
+            h.addWidget(_make_person_avatar(display, login, size=22,
+                                            profile_url=purl))
+            qui = QLabel(display)
+            qui.setTextFormat(Qt.TextFormat.PlainText)
+            qui.setFont(_bold_font(_FONT_SEGOE, 11))
+            qui.setStyleSheet("color: #cccccc; background: transparent;"
+                              " border: none;")
+            h.addWidget(qui)
+
+        nom = QLabel(goal.name or "Objectif sans nom")
+        nom.setTextFormat(Qt.TextFormat.PlainText)
+        nom.setFont(QFont(_FONT_SEGOE, 12))
+        nom.setStyleSheet(_SS_MUTED if goal.accomplished else _SS_WHITE)
+        nom.setWordWrap(True)
+        h.addWidget(nom, stretch=1)
+
+        if goal.category:
+            h.addWidget(_etiquette_categorie(goal.category))
+        for lien in goal.links[:2]:
+            bouton = _bouton_lien(lien)
+            if bouton is not None:
+                h.addWidget(bouton)
+
+        montant = QLabel(_fmt_euros(goal.amount))
+        montant.setFont(_bold_font(_FONT_MONO, 11))
+        montant.setStyleSheet(_SS_GREEN if goal.accomplished else _SS_MUTED)
+        h.addWidget(montant)
+        return h
+
+    @staticmethod
+    def _ligne_distance(goal: DonationGoal, cagnotte: float) -> QLabel:
+        """Le pourcentage et, surtout, ce qu'il reste à réunir."""
+        part = _part_objectif(cagnotte, goal.amount)
+        reste = max(0.0, goal.amount - cagnotte)
+        texte = f"{part * 100:.1f} %".replace(".", ",")
+        if reste > 0:
+            texte += f"  ·  plus que {_fmt_euros(reste)}"
+        lbl = QLabel(texte)
+        lbl.setFont(QFont(_FONT_MONO, 10))
+        lbl.setStyleSheet(
+            f"color: {'#f5c518' if part >= 0.9 else '#777777'};"
+            " background: transparent; border: none;")
+        return lbl
+
+
+def _etiquette_categorie(categorie: str) -> QLabel:
+    """Petite pastille grise portant la catégorie déclarée par l'API."""
+    lbl = QLabel(str(categorie)[:18])
+    lbl.setTextFormat(Qt.TextFormat.PlainText)
+    lbl.setFont(QFont(_FONT_SEGOE, 9))
+    lbl.setStyleSheet(
+        "color: #888888; background: #1a1a1a; border: 1px solid #262626;"
+        " border-radius: 8px; padding: 1px 7px;")
+    lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+    return lbl
+
+
+def _bouton_lien(url: str) -> QPushButton | None:
+    """Ouvre un lien attaché à un objectif, ou None si l'URL n'est pas sûre.
+
+    Ces liens viennent d'une API communautaire et pointent où leurs auteurs
+    veulent : on n'y applique donc PAS l'allowlist des dons, qui n'a rien à
+    voir, mais on refuse tout ce qui n'est pas du https — un `file://` ou un
+    `javascript:` n'a aucune raison d'arriver jusqu'au système.
+    """
+    texte = str(url or "").strip()
+    if not texte.lower().startswith("https://"):
+        return None
+    b = QPushButton("🔗")
+    b.setFixedSize(22, 22)
+    b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+    b.setToolTip(_infobulle(texte))
+    b.setStyleSheet(
+        "QPushButton { background: transparent; border: none; color: #666666; }"
+        "QPushButton:hover { color: #00ff87; }")
+    b.clicked.connect(lambda: _ouvrir_lien_objectif(texte))
+    return b
+
+
+def _ouvrir_lien_objectif(url: str) -> None:
+    """Ouvre le lien dans le navigateur, premier plan cédé."""
+    ceder_premier_plan()
+    QDesktopServices.openUrl(QUrl(url))
+    for delai in (400, 1200):
+        QTimer.singleShot(delai, remonter_navigateur)
+
+
+class _EnteteStreamer(QFrame):
+    """Ce qu'on veut savoir avant de lire la liste : qui, combien, où il en est."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("card")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(8)
+
+        haut = QHBoxLayout()
+        haut.setSpacing(12)
+        self._avatar = QLabel()
+        self._avatar.setFixedSize(44, 44)
+        self._avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._avatar.setStyleSheet(
+            "border-radius: 22px; background-color: #1e1e1e; color: #8a8a8a;"
+            " font-size: 12px; font-weight: bold; border: none;")
+        haut.addWidget(self._avatar)
+
+        colonne = QVBoxLayout()
+        colonne.setSpacing(2)
+        self._nom = QLabel("—")
+        self._nom.setTextFormat(Qt.TextFormat.PlainText)
+        self._nom.setFont(_bold_font(_FONT_SEGOE, 15))
+        self._nom.setStyleSheet(_SS_WHITE)
+        colonne.addWidget(self._nom)
+        self._sous_titre = QLabel("")
+        self._sous_titre.setFont(QFont(_FONT_SEGOE, 10))
+        self._sous_titre.setStyleSheet(_SS_MUTED)
+        colonne.addWidget(self._sous_titre)
+        haut.addLayout(colonne, stretch=1)
+
+        self._cagnotte = QLabel("")
+        self._cagnotte.setFont(_bold_font(_FONT_MONO, 17))
+        self._cagnotte.setStyleSheet(
+            "color: #00ff87; background: transparent; border: none;")
+        haut.addWidget(self._cagnotte, 0, Qt.AlignmentFlag.AlignVCenter)
+        v.addLayout(haut)
+
+        self._barre = _BarreObjectif(0.0, accompli=True)
+        v.addWidget(self._barre)
+
+    def montrer(self, s: StreamerInfo, goals: list) -> None:
+        self._nom.setText(s.display)
+        self._avatar.setText(s.display[:2].upper())
+        from widgets.bigscreen_widget import load_avatar_into_label as _load_av
+        _load_av(self._avatar, s.twitch_login, s.display, 44, s.profile_url)
+        self._cagnotte.setText(_fmt_euros(s.donation))
+        faits = sum(1 for g in goals if g.accomplished)
+        total = len(goals)
+        self._sous_titre.setText(self._compte_objectifs(faits, total))
+        self._barre.set_part(faits / total if total else 0.0)
+
+    @staticmethod
+    def _compte_objectifs(faits: int, total: int) -> str:
+        """« 2 objectifs atteints sur 5 », ou le cas où il n'y en a aucun."""
+        if not total:
+            return "aucun objectif publié"
+        pluriel = "s" if faits > 1 else ""
+        return f"{faits} objectif{pluriel} atteint{pluriel} sur {total}"
+
+
 class _GoalsTab(QWidget):
+    """Onglet Goals — les objectifs d'une chaîne, ou les plus proches de tomber.
+
+    L'ancienne version listait des noms et des montants. Il y manquait la seule
+    chose qu'on cherche vraiment : la DISTANCE. Chaque objectif porte donc sa
+    barre, son pourcentage et ce qu'il reste à réunir, et une seconde vue
+    rassemble tous les objectifs connus, le plus proche en tête.
+    """
+
     _sig_goals = pyqtSignal(str, list)  # login, goals — cross-thread
+
+    #: Plafond de la vue « toutes les chaînes ». Au-delà, on ne lit plus.
+    _MAX_TOUS = 60
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._streamers: list[StreamerInfo] = []
         self._cache: dict[str, list[DonationGoal]] = {}  # login → goals
         self._pending_login: str = ""
+        self._vue: str = "streamer"
+        #: Empreinte de ce qui est actuellement affiché. Le mock réémet ses
+        #: données toutes les trois secondes et l'application toutes les
+        #: trente : reconstruire soixante lignes identiques à chaque fois ne
+        #: change rien à l'écran et fait ramer la machine pour rien.
+        self._empreinte: tuple = ()
         self._sig_goals.connect(self._on_goals_arrived)
         self._build()
 
+    # -- construction ---------------------------------------------------------
+
     def _build(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+        root.addLayout(self._build_barre_outils())
 
-        # Sélecteur streamer
-        hdr = QHBoxLayout()
+        self._entete = _EnteteStreamer()
+        root.addWidget(self._entete)
+
+        self._goals_scroll = QScrollArea()
+        self._goals_scroll.setWidgetResizable(True)
+        self._goals_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._goals_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }")
+        self._goals_content = QWidget()
+        _conteneur_nu(self._goals_content)
+        self._goals_layout = QVBoxLayout(self._goals_content)
+        self._goals_layout.setContentsMargins(0, 0, 2, 0)
+        self._goals_layout.setSpacing(0)
+        self._goals_scroll.setWidget(self._goals_content)
+        root.addWidget(self._goals_scroll, stretch=1)
+
+        self._show_placeholder("Sélectionner un streamer pour voir ses objectifs")
+
+    def _build_barre_outils(self) -> QHBoxLayout:
+        h = QHBoxLayout()
+        h.setSpacing(8)
         lbl = QLabel("Streamer :")
         lbl.setFont(QFont(_FONT_SEGOE, 11))
         lbl.setStyleSheet(_SS_MUTED)
-        hdr.addWidget(lbl)
+        h.addWidget(lbl)
 
         self._combo = QComboBox()
         self._combo.setFont(QFont(_FONT_SEGOE, 11))
@@ -3016,29 +3531,91 @@ class _GoalsTab(QWidget):
         # pousse le reste à droite plutôt que d'étirer le champ.
         self._combo.setFixedWidth(280)
         self._combo.currentIndexChanged.connect(self._on_streamer_changed)
-        hdr.addWidget(self._combo)
-        hdr.addStretch(1)
-        root.addLayout(hdr)
+        h.addWidget(self._combo)
+        h.addStretch(1)
 
-        # Zone d'affichage des objectifs
-        self._goals_scroll = QScrollArea()
-        self._goals_scroll.setWidgetResizable(True)
-        self._goals_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._boutons_vue: dict[str, QPushButton] = {}
+        for cle, libelle in (("streamer", "Ce streamer"),
+                             ("tous", "Les plus proches")):
+            b = QPushButton(libelle)
+            b.setFont(QFont(_FONT_SEGOE, 10))
+            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.setFixedHeight(26)
+            b.clicked.connect(lambda _=False, k=cle: self._changer_vue(k))
+            self._boutons_vue[cle] = b
+            h.addWidget(b)
+        self._peindre_vues()
+        return h
 
-        self._goals_content = QWidget()
-        self._goals_layout = QVBoxLayout(self._goals_content)
-        self._goals_layout.setContentsMargins(0, 0, 2, 0)
-        self._goals_layout.setSpacing(0)
-        self._goals_scroll.setWidget(self._goals_content)
-        root.addWidget(self._goals_scroll, stretch=1)
+    # -- vues -----------------------------------------------------------------
 
-        # Placeholder initial
-        ph = QLabel("Sélectionner un streamer pour voir ses objectifs")
-        ph.setObjectName("placeholder")
-        ph.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ph.setWordWrap(True)
-        self._goals_layout.addStretch()
-        self._goals_layout.addWidget(ph)
+    def _changer_vue(self, cle: str) -> None:
+        self._vue = cle
+        self._empreinte = ()      # on change de contenu : tout est à refaire
+        self._peindre_vues()
+        self._rafraichir()
+
+    def _peindre_vues(self) -> None:
+        for cle, bouton in self._boutons_vue.items():
+            actif = cle == self._vue
+            bouton.setStyleSheet(
+                "QPushButton { border-radius: 13px; padding: 2px 14px; "
+                + ("background: #16341f; color: #00ff87;"
+                   " border: 1px solid #00ff87; }"
+                   if actif else
+                   "background: #161616; color: #888888;"
+                   " border: 1px solid #262626; }")
+                + "QPushButton:hover { color: #ffffff; }")
+
+    def _rafraichir(self) -> None:
+        """Réaffiche la vue courante depuis ce qu'on sait déjà."""
+        self._entete.setVisible(self._vue == "streamer")
+        self._combo.setEnabled(self._vue == "streamer")
+        if self._vue == "tous":
+            self._montrer_tous()
+        else:
+            self._on_streamer_changed(self._combo.currentIndex())
+
+    def _montrer_tous(self) -> None:
+        """Tous les objectifs connus, le plus proche de tomber en tête.
+
+        On ne montre que ce qui est déjà en cache : aller chercher les
+        objectifs des trois cents participants ferait trois cents requêtes pour
+        une page qu'on parcourt en diagonale.
+        """
+        dons = {s.twitch_login: s for s in self._streamers}
+        lignes = []
+        for login, goals in self._cache.items():
+            s = dons.get(login)
+            if s is None:
+                continue
+            for g in goals:
+                if g.accomplished or g.amount <= 0:
+                    continue
+                lignes.append((_part_objectif(s.donation, g.amount), s, g))
+        if not lignes:
+            self._show_placeholder(
+                "Aucun objectif à afficher pour l'instant.\n"
+                "Ils apparaîtront au fil des chaînes consultées.")
+            return
+        lignes.sort(key=lambda t: -t[0])
+        retenues = lignes[:self._MAX_TOUS]
+        empreinte = ("tous", len(lignes),
+                     tuple((round(part, 4), s.twitch_login, g.name, g.amount)
+                           for part, s, g in retenues))
+        if empreinte == self._empreinte:
+            return          # rien n'a bougé : ne pas reconstruire pour rien
+        self._empreinte = empreinte
+        _clear_layout(self._goals_layout)
+        self._ajouter_entete(f"LES PLUS PROCHES ({len(retenues)})", "#f5c518")
+        for _part, s, g in retenues:
+            self._goals_layout.addWidget(_LigneObjectif(
+                g, s.donation,
+                prefixe=(s.display, s.twitch_login, s.profile_url)))
+        if len(lignes) > len(retenues):
+            self._ajouter_entete(
+                f"… et {len(lignes) - len(retenues)} autres non affichés",
+                "#555555")
         self._goals_layout.addStretch()
 
     # -- public ---------------------------------------------------------------
@@ -3057,19 +3634,40 @@ class _GoalsTab(QWidget):
         self._combo.blockSignals(False)
 
         if self._combo.count() > 0:
-            self._on_streamer_changed(self._combo.currentIndex())
+            self._rafraichir()
 
     # -- slots ----------------------------------------------------------------
 
     def seed_cache(self, cache: dict) -> None:
-        """Pré-remplit le cache local depuis le prefetch DataManager (top N streamers)."""
+        """Pré-remplit le cache local depuis le prefetch DataManager.
+
+        Le prefetch arrive APRÈS la liste des streamers : au moment où l'onglet
+        a sélectionné son premier participant, le cache était encore vide et il
+        a affiché « Aucun objectif trouvé ». Remplir sans réafficher laissait
+        donc ce message figé sur des objectifs désormais connus.
+        """
+        if not cache:
+            return
         self._cache.update(cache)
+        if self._vue == "tous":
+            self._montrer_tous()
+            return
+        courant: StreamerInfo | None = self._combo.currentData()
+        if courant is not None and courant.twitch_login in cache:
+            # L'en-tête compte les objectifs : il était calculé avant l'arrivée
+            # du cache et annonçait « 0 sur 0 » sur une chaîne qui en avait.
+            goals = self._cache[courant.twitch_login]
+            self._entete.montrer(courant, goals)
+            self._show_goals(goals)
 
     def _on_streamer_changed(self, idx: int) -> None:
-        if idx < 0:
+        if idx < 0 or self._vue != "streamer":
             return
         s: StreamerInfo | None = self._combo.itemData(idx)
-        if s is None or not s.participation_id:
+        if s is None:
+            return
+        self._entete.montrer(s, self._cache.get(s.twitch_login, []))
+        if not s.participation_id:
             self._show_placeholder("Ce streamer n'a pas d'objectifs publiés")
             return
         self._load_goals(s.participation_id, s.twitch_login)
@@ -3091,19 +3689,32 @@ class _GoalsTab(QWidget):
         """Worker thread — fetch les goals et émet le signal cross-thread."""
         try:
             goals = _run_coro(fetch_donation_goals(participation_id))
-        except Exception as exc:
-            logger.error("_do_fetch(%s): %s", participation_id, exc)
+        except Exception:
+            logger.exception("_do_fetch(%s)", participation_id)
             goals = []
         self._sig_goals.emit(login, goals)
 
     def _on_goals_arrived(self, login: str, goals: list) -> None:
-        """Slot main-thread — met en cache et affiche si le streamer est encore sélectionné."""
-        self._cache[login] = goals
+        """Slot main-thread — met en cache et affiche si le streamer est encore là.
+
+        Une réponse vide n'écrase pas un cache garni : le prefetch peut avoir
+        répondu entre-temps, et une requête qui échoue ne prouve pas que le
+        streamer n'a pas d'objectifs.
+        """
+        if goals or not self._cache.get(login):
+            self._cache[login] = goals
+        else:
+            goals = self._cache[login]
+        if self._vue == "tous":
+            self._montrer_tous()
+            return
         current: StreamerInfo | None = self._combo.currentData()
         if current is not None and current.twitch_login == login:
+            self._entete.montrer(current, goals)
             self._show_goals(goals)
 
     def _show_placeholder(self, text: str) -> None:
+        self._empreinte = ("placeholder", text, 0.0, ())
         _clear_layout(self._goals_layout)
         ph = QLabel(text)
         ph.setObjectName("placeholder")
@@ -3113,69 +3724,44 @@ class _GoalsTab(QWidget):
         self._goals_layout.addWidget(ph)
         self._goals_layout.addStretch()
 
+    def _ajouter_entete(self, texte: str, couleur: str) -> None:
+        hdr = QLabel(texte)
+        hdr.setFont(_bold_font(_FONT_SEGOE, 10))
+        hdr.setStyleSheet(
+            f"color: {couleur}; letter-spacing: 1px; padding: 8px 0 4px 0;"
+            " background: transparent; border: none;")
+        self._goals_layout.addWidget(hdr)
+
     def _show_goals(self, goals: list[DonationGoal]) -> None:
+        courant: StreamerInfo | None = self._combo.currentData()
+        cagnotte = courant.donation if courant is not None else 0.0
+        empreinte = ("streamer",
+                     courant.twitch_login if courant is not None else "",
+                     round(cagnotte, 2),
+                     tuple((g.name, g.amount, g.accomplished) for g in goals))
+        if empreinte == self._empreinte:
+            return          # rien n'a bougé : ne pas reconstruire pour rien
+        self._empreinte = empreinte
         _clear_layout(self._goals_layout)
         if not goals:
             self._show_placeholder("Aucun objectif trouvé")
             return
 
-        accomplished = [g for g in goals if g.accomplished]
-        pending = [g for g in goals if not g.accomplished]
+        # Les plus proches d'abord : c'est l'ordre dans lequel ils tomberont.
+        pending = sorted((g for g in goals if not g.accomplished),
+                         key=lambda g: -_part_objectif(cagnotte, g.amount))
+        accomplished = sorted((g for g in goals if g.accomplished),
+                              key=lambda g: g.amount)
 
         if pending:
-            hdr = QLabel(f"À ACCOMPLIR ({len(pending)})")
-            hdr.setFont(_bold_font(_FONT_SEGOE, 10))
-            hdr.setStyleSheet("color: #888888; letter-spacing: 1px; padding: 4px 0;")
-            self._goals_layout.addWidget(hdr)
+            self._ajouter_entete(f"À ACCOMPLIR ({len(pending)})", "#888888")
             for g in pending:
-                self._goals_layout.addWidget(self._goal_row(g))
-
+                self._goals_layout.addWidget(_LigneObjectif(g, cagnotte))
         if accomplished:
-            hdr2 = QLabel(f"ACCOMPLIS ({len(accomplished)})")
-            hdr2.setFont(_bold_font(_FONT_SEGOE, 10))
-            hdr2.setStyleSheet("color: #00ff87; letter-spacing: 1px; padding: 8px 0 4px 0;")
-            self._goals_layout.addWidget(hdr2)
+            self._ajouter_entete(f"ACCOMPLIS ({len(accomplished)})", "#00ff87")
             for g in accomplished:
-                self._goals_layout.addWidget(self._goal_row(g))
-
+                self._goals_layout.addWidget(_LigneObjectif(g, cagnotte))
         self._goals_layout.addStretch()
-
-    def _goal_row(self, g: DonationGoal) -> QFrame:
-        row = QFrame()
-        row.setObjectName("eventRow")
-        h = QHBoxLayout(row)
-        h.setContentsMargins(8, 8, 8, 8)
-        h.setSpacing(12)
-
-        status = QLabel("✓" if g.accomplished else "○")
-        status.setFont(_bold_font(_FONT_SEGOE, 14))
-        status.setStyleSheet(
-            _SS_GREEN if g.accomplished else _SS_GREY
-        )
-        status.setFixedWidth(20)
-        h.addWidget(status)
-
-        info = QVBoxLayout()
-        info.setSpacing(2)
-        nm = QLabel(g.name)
-        nm.setTextFormat(Qt.TextFormat.PlainText)
-        nm.setFont(QFont(_FONT_SEGOE, 12))
-        nm.setStyleSheet(
-            _SS_MUTED if g.accomplished else _SS_WHITE
-        )
-        nm.setWordWrap(True)
-        info.addWidget(nm)
-
-        amt_str = f"{g.amount:,.0f} €".replace(",", "\u00a0")
-        amt = QLabel(amt_str)
-        amt.setFont(_bold_font(_FONT_MONO, 11))
-        amt.setStyleSheet(
-            _SS_GREEN if g.accomplished else _SS_MUTED
-        )
-        info.addWidget(amt)
-        h.addLayout(info, stretch=1)
-
-        return row
 
 
 # ---------------------------------------------------------------------------
@@ -3229,11 +3815,24 @@ class _StreamerCard(QFrame):
     # -- construction ----------------------------------------------------------
 
     def _build(self, s: StreamerInfo) -> None:
+        """Assemble la carte. Chaque partie a sa méthode : la rangée du haut,
+        les textes, et les trois boutons posés en surimpression."""
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 14, 12, 10)
         root.setSpacing(4)
 
-        # ── Ligne avatar + badges ─────────────────────────────────
+        root.addLayout(self._ligne_avatar(s))
+        root.addSpacing(14)
+        self._ajouter_textes(root, s)
+        root.addStretch()
+
+        self._construire_bouton_favori()
+        self._construire_bouton_don(s)
+        self._ajouter_bouton_fiche()
+        self._construire_badge_slot()
+
+    def _ligne_avatar(self, s: StreamerInfo) -> QHBoxLayout:
+        """Avatar, badge viewers en surimpression, badge LAN/Online à droite."""
         av_row = QHBoxLayout()
         av_row.setSpacing(0)
         av_row.setContentsMargins(0, 0, 0, 0)
@@ -3241,7 +3840,7 @@ class _StreamerCard(QFrame):
         # Conteneur avatar + badge viewers superposés via positions absolues
         av_container = QWidget()
         av_container.setFixedSize(_AVATAR_SZ + 4, _AVATAR_SZ + 4)
-        av_container.setStyleSheet("background: transparent;")
+        av_container.setStyleSheet(_SS_NU)
 
         self._avatar_lbl = QLabel(av_container)
         self._avatar_lbl.setFixedSize(_AVATAR_SZ, _AVATAR_SZ)
@@ -3264,41 +3863,91 @@ class _StreamerCard(QFrame):
             _eff.setOpacity(0.35)
             av_container.setGraphicsEffect(_eff)
 
-        # Badge viewers (coin bas-droite de l'avatar)
-        if s.online and s.viewers:
-            vbadge = QLabel(_fmt_viewers(s.viewers), av_container)
-            vbadge.setFont(_bold_font(_FONT_MONO, 7))
-            vbadge.setStyleSheet(
-                "background-color: rgba(0,0,0,210); color: #00ff87; "
-                "border-radius: 6px; padding: 1px 4px; border: none;"
-            )
-            vbadge.adjustSize()
-            vbadge.move(_AVATAR_SZ + 4 - vbadge.width(), _AVATAR_SZ + 4 - vbadge.height())
-            self._viewers_badge = vbadge
-        else:
-            self._viewers_badge = None
+        self._viewers_badge = self._badge_viewers(s, av_container)
 
         av_row.addWidget(av_container)
         av_row.addStretch()
 
-        # Badge type LAN / Online (coin haut-droit)
-        loc = (s.location or "").upper()
-        if loc == "LAN":
-            badge_css = (
+        libelle, css = self._style_badge_type(s)
+        type_badge = QLabel(libelle)
+        type_badge.setFont(_bold_font(_FONT_SEGOE, 8))
+        type_badge.setStyleSheet(css)
+        type_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        av_row.addWidget(type_badge, 0, Qt.AlignmentFlag.AlignTop)
+        return av_row
+
+    @staticmethod
+    def _badge_viewers(s: StreamerInfo, hote: QWidget):
+        """Audience en pastille, dans le coin bas-droit de l'avatar."""
+        if not (s.online and s.viewers):
+            return None
+        vbadge = QLabel(_fmt_viewers(s.viewers), hote)
+        vbadge.setFont(_bold_font(_FONT_MONO, 7))
+        vbadge.setStyleSheet(
+            "background-color: rgba(0,0,0,210); color: #00ff87; "
+            "border-radius: 6px; padding: 1px 4px; border: none;"
+        )
+        vbadge.adjustSize()
+        vbadge.move(_AVATAR_SZ + 4 - vbadge.width(),
+                    _AVATAR_SZ + 4 - vbadge.height())
+        return vbadge
+
+    @staticmethod
+    def _style_badge_type(s: StreamerInfo) -> tuple:
+        """(libellé, feuille de style) du badge LAN / Online."""
+        if (s.location or "").upper() == "LAN":
+            return "LAN", (
                 f"background-color: #451a03; color: {_COL_LAN}; "
                 f"border: 1px solid {_COL_LAN}; border-radius: 6px; padding: 0px 5px;"
             )
-            badge_text = "LAN"
-        else:
-            badge_css = (
-                f"background-color: {_COL_ONLINE_BG}; color: {_COL_ONLINE}; "
-                f"border: 1px solid {_COL_ONLINE}55; border-radius: 6px; padding: 0px 5px;"
-            )
-            badge_text = "Online"
+        return "Online", (
+            f"background-color: {_COL_ONLINE_BG}; color: {_COL_ONLINE}; "
+            f"border: 1px solid {_COL_ONLINE}55; border-radius: 6px; padding: 0px 5px;"
+        )
 
-        # Étoile favori : enfant DIRECT de la carte, posée en bas à droite par
-        # resizeEvent. Dans la rangée du haut elle se disputait la place avec le
-        # badge LAN/Online, et l'angle libre en bas de carte est plus lisible.
+    def _ajouter_textes(self, root: QVBoxLayout, s: StreamerInfo) -> None:
+        """Nom, jeu et cagnotte, élidés à la largeur de carte.
+
+        Jeu et cagnotte sont omis quand ils sont vides plutôt qu'affichés à
+        blanc : la carte se resserre au lieu de garder des lignes creuses.
+        """
+        name_lbl = QLabel(s.display)
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        name_lbl.setFont(_bold_font(_FONT_SEGOE, 12))
+        name_lbl.setStyleSheet(
+            f"color: {'#e8e8e8' if s.online else '#505050'};"
+            " background: transparent; border: none;")
+        fm = QFontMetrics(name_lbl.font())
+        name_lbl.setText(fm.elidedText(s.display, Qt.TextElideMode.ElideRight,
+                                       _CARD_W))
+        root.addWidget(name_lbl)
+
+        if s.game:
+            game_lbl = QLabel(s.game)
+            game_lbl.setTextFormat(Qt.TextFormat.PlainText)
+            game_lbl.setFont(QFont(_FONT_SEGOE, 10))
+            game_lbl.setStyleSheet(
+                f"color: {'#888888' if s.online else '#3a3a3a'};"
+                " background: transparent; border: none;")
+            fm2 = QFontMetrics(game_lbl.font())
+            game_lbl.setText(fm2.elidedText(s.game, Qt.TextElideMode.ElideRight,
+                                            _CARD_W))
+            root.addWidget(game_lbl)
+
+        if s.donation > 0:
+            don_lbl = QLabel(f"\u2665 {s.donation_formatted}")
+            don_lbl.setFont(QFont(_FONT_SEGOE, 9))
+            don_lbl.setStyleSheet(
+                f"color: {'#3d9970' if s.online else '#2a2a2a'};"
+                " background: transparent; border: none;")
+            root.addWidget(don_lbl)
+
+    def _construire_bouton_favori(self) -> None:
+        """Étoile favori : enfant DIRECT de la carte, posée en bas à droite.
+
+        Dans la rangée du haut elle se disputait la place avec le badge
+        LAN/Online ; l'angle libre en bas de carte est plus lisible.
+        """
         self._fav_btn = QPushButton(self)
         self._fav_btn.setFixedSize(26, 26)
         self._fav_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -3306,69 +3955,35 @@ class _StreamerCard(QFrame):
         self._refresh_fav_btn()
         self._fav_btn.raise_()
 
-        # Donner à CE streamer. L'URL est relevée par l'API pour chacun, mais
-        # elle ne servait jusqu'ici qu'au plein écran, pour la chaîne en cours.
+    def _construire_bouton_don(self, s: StreamerInfo) -> None:
+        """Bouton « donner à CE streamer », s'il a une URL de don.
+
+        L'URL est relevée par l'API pour chacun, mais elle ne servait jusqu'ici
+        qu'au plein écran, pour la chaîne en cours.
+        """
         self._don_url = getattr(s, "donation_url", "") or ""
         self._don_btn = None
-        if self._don_url:
-            b = QPushButton(self)
-            b.setFixedSize(26, 26)
-            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            b.setToolTip(_infobulle(f"Donner à {s.display}"))
-            if _QTA_OK:
-                b.setIcon(qta.icon("mdi6.hand-heart-outline", color="#00ff87"))
-                b.setIconSize(QSize(16, 16))
-            else:
-                b.setText("\u2665")
-            b.setStyleSheet(
-                "QPushButton { background: transparent; border: none;"
-                " color: #00ff87; font-size: 15px; }"
-                "QPushButton:hover { background: #0f1a14; border-radius: 4px; }"
-            )
-            b.clicked.connect(self._on_donate)
-            self._don_btn = b
+        if not self._don_url:
+            return
+        b = QPushButton(self)
+        b.setFixedSize(26, 26)
+        b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        b.setToolTip(_infobulle(f"Donner à {s.display}"))
+        if _QTA_OK:
+            b.setIcon(qta.icon("mdi6.hand-heart-outline", color="#00ff87"))
+            b.setIconSize(QSize(16, 16))
+        else:
+            b.setText("\u2665")
+        b.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " color: #00ff87; font-size: 15px; }"
+            "QPushButton:hover { background: #0f1a14; border-radius: 4px; }"
+        )
+        b.clicked.connect(self._on_donate)
+        self._don_btn = b
 
-        type_badge = QLabel(badge_text)
-        type_badge.setFont(_bold_font(_FONT_SEGOE, 8))
-        type_badge.setStyleSheet(badge_css)
-        type_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        av_row.addWidget(type_badge, 0, Qt.AlignmentFlag.AlignTop)
-
-        root.addLayout(av_row)
-        root.addSpacing(14)
-
-        # ── Nom ───────────────────────────────────────────────────
-        name_lbl = QLabel(s.display)
-        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        name_color = "#e8e8e8" if s.online else "#505050"
-        name_lbl.setFont(_bold_font(_FONT_SEGOE, 12))
-        name_lbl.setStyleSheet(f"color: {name_color}; background: transparent; border: none;")
-        fm = QFontMetrics(name_lbl.font())
-        name_lbl.setText(fm.elidedText(s.display, Qt.TextElideMode.ElideRight, _CARD_W))
-        root.addWidget(name_lbl)
-
-        # ── Jeu ───────────────────────────────────────────────────
-        if s.game:
-            game_lbl = QLabel(s.game)
-            game_lbl.setTextFormat(Qt.TextFormat.PlainText)
-            game_lbl.setFont(QFont(_FONT_SEGOE, 10))
-            game_color = "#888888" if s.online else "#3a3a3a"
-            game_lbl.setStyleSheet(f"color: {game_color}; background: transparent; border: none;")
-            fm2 = QFontMetrics(game_lbl.font())
-            game_lbl.setText(fm2.elidedText(s.game, Qt.TextElideMode.ElideRight, _CARD_W))
-            root.addWidget(game_lbl)
-
-        # ── Cagnotte ──────────────────────────────────────────────
-        if s.donation > 0:
-            don_lbl = QLabel(f"\u2665 {s.donation_formatted}")
-            don_lbl.setFont(QFont(_FONT_SEGOE, 9))
-            don_color = "#3d9970" if s.online else "#2a2a2a"
-            don_lbl.setStyleSheet(f"color: {don_color}; background: transparent; border: none;")
-            root.addWidget(don_lbl)
-
-        root.addStretch()
-
-        # ── Badge slot (cercle vert, overlay absolu coin haut-gauche) ─
+    def _construire_badge_slot(self) -> None:
+        """Cercle vert du numéro de slot, en surimpression coin haut-gauche."""
         self._slot_lbl = QLabel(self)
         self._slot_lbl.setFixedSize(24, 24)
         self._slot_lbl.setFont(_bold_font(_FONT_SEGOE, 10))
@@ -3379,6 +3994,7 @@ class _StreamerCard(QFrame):
         )
         self._slot_lbl.move(8, 8)
         self._update_slot_badge()
+
 
     # -- favori ----------------------------------------------------------------
 
@@ -3418,12 +4034,42 @@ class _StreamerCard(QFrame):
         m = 8
         btn.move(self.width() - btn.width() - m, self.height() - btn.height() - m)
         btn.raise_()
-        don = getattr(self, "_don_btn", None)
-        if don is not None:
-            # Juste à gauche de l'étoile : deux gestes du même coin, distincts.
-            don.move(self.width() - btn.width() - don.width() - m - 4,
-                     self.height() - don.height() - m)
-            don.raise_()
+        # Les boutons secondaires s'alignent de droite à gauche, dans l'ordre
+        # où on les rencontre. Chacun ne se pose que s'il existe : le don n'a
+        # de bouton que si l'API donne son URL.
+        x = self.width() - btn.width() - m
+        for nom in ("_don_btn", "_fiche_btn"):
+            autre = getattr(self, nom, None)
+            if autre is None:
+                continue
+            x -= autre.width() + 4
+            autre.move(x, self.height() - autre.height() - m)
+            autre.raise_()
+
+    def _ajouter_bouton_fiche(self) -> None:
+        """Ouvre la fiche du participant, d'un clic qu'on voit.
+
+        La fiche n'était atteignable qu'au clic DROIT sur la carte : personne
+        ne le découvre, et une fonction qu'on ne trouve pas n'existe pas. Le
+        clic droit reste, pour qui le connaît.
+        """
+        b = QPushButton(self)
+        b.setFixedSize(26, 26)
+        b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        b.setToolTip(_infobulle("Voir la fiche et les statistiques"))
+        if _QTA_OK:
+            b.setIcon(qta.icon("mdi6.chart-box-outline", color="#8a8a8a"))
+            b.setIconSize(QSize(17, 17))
+        else:
+            b.setText("\u2261")
+        b.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            " color: #8a8a8a; font-size: 15px; }"
+            "QPushButton:hover { background: #1a1a1a; border-radius: 4px;"
+            " color: #ffffff; }"
+        )
+        b.clicked.connect(lambda: self.sheet_requested.emit(self._login))
+        self._fiche_btn = b
 
     def _on_donate(self) -> None:
         from windows.fullscreen import ouvrir_page_de_don
@@ -3518,7 +4164,7 @@ class _SectionHeader(QWidget):
 
         self._count_lbl = QLabel(str(count))
         self._count_lbl.setFont(QFont(_FONT_SEGOE, 10))
-        self._count_lbl.setStyleSheet("color: #444444; background: transparent;")
+        self._count_lbl.setStyleSheet(_SS_GRIS_EFFACE)
         root.addWidget(self._count_lbl)
 
         sep = QFrame()
@@ -3770,14 +4416,14 @@ class _MixerTab(QWidget):
             "vous épinglez l'audio\n(clic droit sur une cellule de la grille).")
         self._vide.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._vide.setFont(QFont(_FONT_SEGOE, 11))
-        self._vide.setStyleSheet("color: #555555; background: transparent;")
+        self._vide.setStyleSheet(_SS_GRIS_NU)
         root.addWidget(self._vide, 1)
 
         self._rangee = QHBoxLayout()
         self._rangee.setSpacing(10)
         self._rangee.setContentsMargins(0, 0, 0, 0)
         self._conteneur = QWidget()
-        self._conteneur.setStyleSheet("background: transparent;")
+        self._conteneur.setStyleSheet(_SS_NU)
         self._conteneur.setLayout(self._rangee)
         root.addWidget(self._conteneur, 1)
         self._conteneur.setVisible(False)
@@ -3816,6 +4462,7 @@ class _MixerTab(QWidget):
             item = self._rangee.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()   # avant de détacher : détaché et visible = une fenêtre
                 w.setParent(None)
                 w.deleteLater()
         self._strips.clear()
@@ -3843,10 +4490,16 @@ class _MixerTab(QWidget):
         # touche un curseur : une chaîne rappelée doit retrouver son niveau.
         for lg, strip in self._strips.items():
             self.volume_changed.emit(lg, strip.volume())
-        self._compte.setText(f"· {len(logins)} source" + ("s" if len(logins) > 1 else "")
-                             if logins else "")
+        self._compte.setText(self._compte_sources(len(logins)))
         self._vide.setVisible(not logins)
         self._conteneur.setVisible(bool(logins))
+
+    @staticmethod
+    def _compte_sources(combien: int) -> str:
+        """« · 3 sources », ou rien du tout quand la console est vide."""
+        if not combien:
+            return ""
+        return f"· {combien} source" + ("s" if combien > 1 else "")
 
     def _on_mute(self, login: str, muet: bool) -> None:
         self._muets[login] = muet
@@ -3854,6 +4507,37 @@ class _MixerTab(QWidget):
             self.main_mute_changed.emit(muet)
         else:
             self.mute_changed.emit(login, muet)
+
+    def set_main_volume(self, valeur: int) -> None:
+        """Repose la tranche du plein écran sans relancer l'aller-retour.
+
+        Les signaux de la tranche sont bloqués le temps du réglage : les
+        laisser passer renverrait la valeur au plein écran, qui la
+        réappliquerait, et le curseur se battrait contre lui-même dès qu'on le
+        déplace.
+        """
+        valeur = max(0, min(100, int(valeur)))
+        self._volumes[self._MAIN] = valeur
+        strip = self._strips.get(self._MAIN)
+        if strip is None:
+            return
+        bloque = strip._slider.blockSignals(True)
+        strip._slider.setValue(valeur)
+        strip._slider.blockSignals(bloque)
+        strip._val.setText(str(valeur))
+
+    def set_main_muted(self, muet: bool) -> None:
+        """Repose la coupure du plein écran, même règle de non-retour."""
+        muet = bool(muet)
+        self._muets[self._MAIN] = muet
+        strip = self._strips.get(self._MAIN)
+        if strip is None or strip._muet == muet:
+            return
+        bloque = strip._mute.blockSignals(True)
+        strip._mute.setChecked(muet)
+        strip._mute.blockSignals(bloque)
+        strip._muet = muet
+        strip._refresh_mute()
 
     def _on_volume(self, login: str, v: int) -> None:
         strip = self._strips.get(login)
@@ -3976,7 +4660,7 @@ class _StreamersTab(QWidget):
         self._empty_lbl = QLabel("Aucun streamer ne correspond à ce filtre.")
         self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_lbl.setFont(QFont(_FONT_SEGOE, 12))
-        self._empty_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._empty_lbl.setStyleSheet(_SS_GRIS_NU)
         self._empty_lbl.setFixedHeight(48)
         self._empty_lbl.setVisible(False)
         root.addWidget(self._empty_lbl)
@@ -3992,12 +4676,11 @@ class _StreamersTab(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
-            "QScrollArea { background: #0a0a0a; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: #0a0a0a; }"
+            _SS_SCROLL_NU
         )
 
         self._scroll_content = QWidget()
-        self._scroll_content.setStyleSheet("background: #0a0a0a;")
+        self._scroll_content.setStyleSheet(_SS_FOND_PAGE)
         self._scroll_vl = QVBoxLayout(self._scroll_content)
         self._scroll_vl.setContentsMargins(0, 4, 0, 8)
         self._scroll_vl.setSpacing(4)
@@ -4020,14 +4703,24 @@ class _StreamersTab(QWidget):
         self._content_stack.setCurrentIndex(1)
         root.addWidget(self._content_stack, stretch=1)
 
-        # Grilles par section (créées une fois, repeuplées)
-        self._grid_lan    = _CardsGrid()
-        self._grid_online = _CardsGrid()
-        self._grid_off    = _CardsGrid()
+        # Grilles par section (créées une fois, repeuplées).
+        #
+        # Le parent est donné DÈS LA CONSTRUCTION, et ce n'est pas un détail de
+        # style : sans parent, ces six widgets sont des fenêtres de premier
+        # niveau. `_rebuild_cards` les rendait visibles AVANT de les insérer
+        # dans le layout — six fenêtres nues surgissaient sur le bureau à
+        # chaque réagencement, et un réagencement a lieu dès qu'un streamer
+        # change d'état. Tracé sur l'application réelle : _SectionHeader et
+        # _CardsGrid, sans parent, rendus visibles depuis _rebuild_cards.
+        hote = self._scroll_content
+        self._grid_lan    = _CardsGrid(hote)
+        self._grid_online = _CardsGrid(hote)
+        self._grid_off    = _CardsGrid(hote)
 
-        self._hdr_lan    = _SectionHeader("LAN")
-        self._hdr_online = _SectionHeader("EN LIGNE")
-        self._hdr_off    = _SectionHeader("HORS LIGNE")
+        # `parent=` nommé : le deuxième paramètre positionnel est le compteur.
+        self._hdr_lan    = _SectionHeader("LAN", parent=hote)
+        self._hdr_online = _SectionHeader("EN LIGNE", parent=hote)
+        self._hdr_off    = _SectionHeader("HORS LIGNE", parent=hote)
 
     # -- public ---------------------------------------------------------------
 
@@ -4148,7 +4841,7 @@ class _StreamersTab(QWidget):
     def _make_filter_bar(self) -> QWidget:
         """Recherche libre + bascules. Tout se fait en mémoire, sans requête."""
         bar = QWidget()
-        bar.setStyleSheet("background: transparent;")
+        bar.setStyleSheet(_SS_NU)
         h = QHBoxLayout(bar)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
@@ -4252,6 +4945,69 @@ class _StreamersTab(QWidget):
         return bool(self._query or self._only_online or self._only_lan
                     or self._only_fav or self._game)
 
+    def _purger_cartes_obsoletes(self, voulus: dict) -> None:
+        """Détruit les cartes qui n'ont plus lieu d'être, et vide le layout.
+
+        Une carte porte sa couleur, son curseur et son badge selon l'état en
+        ligne : celle dont l'état a basculé doit être refaite, pas retouchée.
+        """
+        perimees = [
+            lg for lg, card in self._card_map.items()
+            if lg not in voulus or card._online != voulus[lg].online
+        ]
+        for lg in perimees:
+            card = self._card_map.pop(lg)
+            card.hide()   # avant de détacher : détaché et visible = une fenêtre
+            card.setParent(None)  # type: ignore[arg-type]
+            card.deleteLater()
+
+        # Les grilles et les en-têtes, eux, sont RÉUTILISÉS : on les retire du
+        # layout sans les détruire.
+        while self._scroll_vl.count():
+            self._scroll_vl.takeAt(0)
+
+    def _cartes_pour(self, items: list, sel_set: set) -> list:
+        """Les cartes d'une section, réutilisées quand elles existent déjà."""
+        cartes = []
+        for s in items:
+            slot = (self._selected.index(s.twitch_login) + 1
+                    if s.twitch_login in sel_set else None)
+            card = self._card_map.get(s.twitch_login)
+            if card is None:
+                card = _StreamerCard(s, slot)
+                card.toggled.connect(self._on_card_toggled)
+                card.sheet_requested.connect(self.sheet_requested)
+                self._card_map[s.twitch_login] = card
+            else:
+                # Réutilisée : seuls le slot et les viewers peuvent avoir bougé,
+                # et set_slot ne repolit que si la valeur change.
+                card.set_slot(slot)
+                card.update_viewers(s.viewers)
+            cartes.append(card)
+        return cartes
+
+    def _poser_section(self, section: list, entete, grille, sel_set: set) -> None:
+        """Insère une section dans le layout, ou la masque si elle est vide.
+
+        L'ordre n'est pas cosmétique : `addWidget` REPARENTE le widget, et
+        `setVisible(True)` doit venir après. L'inverse affiche un widget sans
+        parent — c'est-à-dire une fenêtre nue sur le bureau, et il y en avait
+        six à chaque réagencement.
+        """
+        if not section:
+            # Retirée du layout par takeAt() mais toujours parentée : sans ce
+            # masquage elle continuerait de se peindre à sa dernière position,
+            # et les titres se superposaient.
+            entete.hide()
+            grille.hide()
+            return
+        entete.set_count(len(section))
+        self._scroll_vl.addWidget(entete)
+        entete.setVisible(True)
+        grille.populate(self._cartes_pour(section, sel_set))
+        self._scroll_vl.addWidget(grille)
+        grille.setVisible(True)
+
     def _rebuild_cards(self) -> None:
         """Réagence les cartes selon le tri courant, en réutilisant l'existant.
 
@@ -4261,84 +5017,25 @@ class _StreamersTab(QWidget):
         cartes réellement concernées : celles qui apparaissent, celles qui
         disparaissent, et celles dont l'état en ligne a basculé.
         """
-        wanted = {s.twitch_login: s for s in self._streamers if s.twitch_login}
-
-        # Cartes devenues inutiles, ou dont l'état en ligne ne correspond plus :
-        # une carte porte sa couleur, son curseur et son badge selon cet état.
-        stale = [
-            lg for lg, card in self._card_map.items()
-            if lg not in wanted or card._online != wanted[lg].online
-        ]
-        for lg in stale:
-            card = self._card_map.pop(lg)
-            card.setParent(None)  # type: ignore[arg-type]
-            card.deleteLater()
-
-        # Supprimer tout du scroll_vl (ne pas détruire les grilles/headers — réutilisés)
-        while self._scroll_vl.count():
-            self._scroll_vl.takeAt(0)
+        self._purger_cartes_obsoletes(
+            {s.twitch_login: s for s in self._streamers if s.twitch_login})
 
         sel_set = set(self._selected)
-
         visibles = [s for s in self._streamers if self._matches(s)]
-        lan_streamers    = self._sorted_streamers([s for s in visibles if s.online and (s.location or "").upper() == "LAN"])
-        online_streamers = self._sorted_streamers([s for s in visibles if s.online and (s.location or "").upper() != "LAN"])
-        off_streamers    = self._sorted_streamers([s for s in visibles if not s.online])
 
-        def _make_cards(items: list[StreamerInfo]) -> list[_StreamerCard]:
-            cards: list[_StreamerCard] = []
-            for s in items:
-                slot: int | None = None
-                if s.twitch_login in sel_set:
-                    slot = self._selected.index(s.twitch_login) + 1
-                card = self._card_map.get(s.twitch_login)
-                if card is None:
-                    card = _StreamerCard(s, slot)
-                    card.toggled.connect(self._on_card_toggled)
-                    card.sheet_requested.connect(self.sheet_requested)
-                    self._card_map[s.twitch_login] = card
-                else:
-                    # Réutilisée : seuls le slot et les viewers peuvent avoir
-                    # bougé, et set_slot ne repolit que si la valeur change.
-                    card.set_slot(slot)
-                    card.update_viewers(s.viewers)
-                cards.append(card)
-            return cards
+        def _lan(s):
+            return (s.location or "").upper() == "LAN"
 
-        # Un en-tête ou une grille dont la section est vide n'est PAS réinséré
-        # dans le layout — mais takeAt() ne l'a pas déparenté : il continue de
-        # se peindre à sa dernière position, et les titres se superposaient.
-        for section, entete, grille in (
-            (lan_streamers, self._hdr_lan, self._grid_lan),
-            (online_streamers, self._hdr_online, self._grid_online),
-            (off_streamers, self._hdr_off, self._grid_off),
-        ):
-            entete.setVisible(bool(section))
-            grille.setVisible(bool(section))
-
-        # Section LAN
-        if lan_streamers:
-            self._hdr_lan.set_count(len(lan_streamers))
-            self._scroll_vl.addWidget(self._hdr_lan)
-            cards_lan = _make_cards(lan_streamers)
-            self._grid_lan.populate(cards_lan)
-            self._scroll_vl.addWidget(self._grid_lan)
-
-        # Section Online
-        if online_streamers:
-            self._hdr_online.set_count(len(online_streamers))
-            self._scroll_vl.addWidget(self._hdr_online)
-            cards_online = _make_cards(online_streamers)
-            self._grid_online.populate(cards_online)
-            self._scroll_vl.addWidget(self._grid_online)
-
-        # Section Hors ligne
-        if off_streamers:
-            self._hdr_off.set_count(len(off_streamers))
-            self._scroll_vl.addWidget(self._hdr_off)
-            cards_off = _make_cards(off_streamers)
-            self._grid_off.populate(cards_off)
-            self._scroll_vl.addWidget(self._grid_off)
+        sections = (
+            (self._sorted_streamers([s for s in visibles if s.online and _lan(s)]),
+             self._hdr_lan, self._grid_lan),
+            (self._sorted_streamers([s for s in visibles if s.online and not _lan(s)]),
+             self._hdr_online, self._grid_online),
+            (self._sorted_streamers([s for s in visibles if not s.online]),
+             self._hdr_off, self._grid_off),
+        )
+        for section, entete, grille in sections:
+            self._poser_section(section, entete, grille, sel_set)
 
         self._scroll_vl.addStretch()
 
@@ -4349,11 +5046,10 @@ class _StreamersTab(QWidget):
             card.setVisible(login in gardees)
 
         total = len(self._streamers)
-        if self._filter_active():
-            self._filter_count.setText(f"{len(visibles)} / {total}")
-        else:
-            self._filter_count.setText("")
-        self._empty_lbl.setVisible(bool(visibles) is False and total > 0)
+        self._filter_count.setText(
+            f"{len(visibles)} / {total}" if self._filter_active() else "")
+        self._empty_lbl.setVisible(not visibles and total > 0)
+
 
     def _renumber_slots(self) -> None:
         """Resynchronise les numéros de slot sur toutes les cartes.
@@ -4436,134 +5132,480 @@ JOURS_FR = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
 PARIS = timedelta(hours=2)
 
 
-class LanOnlineWidget(QWidget):
-    """Barres verticales LAN vs Online (viewers + count) — dessin custom QPainter."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._lan_count: int = 0
-        self._online_count: int = 0
-        self._lan_viewers: int = 0
-        self._online_viewers: int = 0
-        self.setFixedHeight(200)
-
-    def update_data(self, streamers: list[StreamerInfo]) -> None:
-        lan = [s for s in streamers if s.online and s.location == "LAN"]
-        online = [s for s in streamers if s.online and s.location != "LAN"]
-        self._lan_count = len(lan)
-        self._online_count = len(online)
-        self._lan_viewers = sum(s.viewers for s in lan)
-        self._online_viewers = sum(s.viewers for s in online)
-        self.update()
-
-    def paintEvent(self, event: QPaintEvent) -> None:  # type: ignore[override]
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor("#0f0f0f"))
-
-        max_v = max(self._lan_viewers, self._online_viewers, 1)
-        bar_w = min(w // 3, 120)
-        bar_max_h = h - 60
-
-        # LAN bar
-        lan_h = int(self._lan_viewers / max_v * bar_max_h)
-        lan_x = w // 4 - bar_w // 2
-        p.fillRect(lan_x, h - 40 - lan_h, bar_w, lan_h, QColor("#00ff87"))
-        p.setPen(QPen(QColor("#ffffff")))
-        p.setFont(QFont(_FONT_SEGOE, 10))
-        p.drawText(lan_x, h - 40 - lan_h - 5, f"{self._lan_count} LAN")
-        lan_v_str = f"{self._lan_viewers // 1000}k" if self._lan_viewers > 999 else str(self._lan_viewers)
-        p.setPen(QPen(QColor("#00ff87")))
-        p.drawText(lan_x, h - 25, lan_v_str)
-        p.setPen(QPen(QColor("#888888")))
-        p.drawText(lan_x, h - 10, "viewers")
-
-        # Online bar
-        online_h = int(self._online_viewers / max_v * bar_max_h)
-        online_x = 3 * w // 4 - bar_w // 2
-        p.fillRect(online_x, h - 40 - online_h, bar_w, online_h, QColor("#3b82f6"))
-        p.setPen(QPen(QColor("#ffffff")))
-        p.drawText(online_x, h - 40 - online_h - 5, f"{self._online_count} Online")
-        online_v_str = f"{self._online_viewers // 1000}k" if self._online_viewers > 999 else str(self._online_viewers)
-        p.setPen(QPen(QColor("#3b82f6")))
-        p.drawText(online_x, h - 25, online_v_str)
-        p.setPen(QPen(QColor("#888888")))
-        p.drawText(online_x, h - 10, "viewers")
-
-
 # ---------------------------------------------------------------------------
 # Tab: Stats — 5 graphes en layout 2 colonnes
 # ---------------------------------------------------------------------------
 
+#: Feuille de style du classement. Deux règles y sont indispensables et
+#: manquaient : sans `:selected`, Qt retombe sur la palette du système, le
+#: texte prend la couleur « highlighted text » — identique au fond de
+#: sélection sur ce thème sombre — et la ligne choisie s'affichait VIDE,
+#: cerclée du rectangle de focus.
+_STYLE_CLASSEMENT = """
+    QTableWidget {
+        outline: none;
+        background-color: #0f0f0f;
+        alternate-background-color: #121212;
+        color: #dddddd;
+        font-family: "Segoe UI Variable";
+        font-size: 11px;
+        border: none;
+    }
+    QTableWidget::item { padding: 2px 6px; border: none; }
+    QTableWidget::item:selected {
+        background-color: #16341f;
+        color: #ffffff;
+    }
+    QTableWidget::item:hover { background-color: #161616; }
+    QHeaderView::section {
+        background-color: #111111;
+        color: #00ff87;
+        font-size: 10px;
+        border: none;
+        padding: 5px 6px;
+    }
+    QHeaderView::section:hover { color: #ffffff; }
+"""
+
+class _Tuile(QFrame):
+    """Un chiffre, son libellé, et rien d'autre.
+
+    Les quatre nombres qu'on regarde en premier méritaient mieux que d'être
+    déduits d'un tableau de trois cents lignes.
+    """
+
+    def __init__(self, libelle: str, couleur: str = "#ffffff") -> None:
+        super().__init__()
+        self.setObjectName("card")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 10, 14, 10)
+        v.setSpacing(2)
+        titre = QLabel(libelle)
+        titre.setFont(_bold_font(_FONT_SEGOE, 9))
+        titre.setStyleSheet("color: #666666; letter-spacing: 2px; "
+                            "background: transparent; border: none;")
+        v.addWidget(titre)
+        self._valeur = QLabel("—")
+        self._valeur.setFont(_bold_font(_FONT_MONO, 20))
+        self._valeur.setStyleSheet(
+            f"color: {couleur}; background: transparent; border: none;")
+        v.addWidget(self._valeur)
+        self._detail = QLabel("")
+        self._detail.setFont(QFont(_FONT_SEGOE, 9))
+        self._detail.setStyleSheet("color: #666666; background: transparent; "
+                                   "border: none;")
+        v.addWidget(self._detail)
+
+    def set_valeur(self, valeur: str, detail: str = "") -> None:
+        self._valeur.setText(valeur)
+        self._detail.setText(detail)
+
+
+class _BarreDeCellule(QStyledItemDelegate):
+    """Peint une barre proportionnelle DERRIÈRE la valeur d'une cellule.
+
+    Un graphe séparé disait déjà ce que la colonne dit : deux endroits à lire
+    pour une seule information, et un axe écrasé par les trois plus gros. La
+    barre dans la cellule compare sur place, et le nombre reste exact.
+
+    Volontairement très transparente : c'est un repère de grandeur, le texte
+    par-dessus doit rester le premier lu.
+    """
+
+    #: Rôle où la cellule range sa part, entre 0 et 1.
+    PART = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, couleur: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._couleur = QColor(couleur)
+        self._couleur.setAlpha(45)
+
+    def paint(self, painter, option, index) -> None:  # type: ignore[override]
+        super().paint(painter, option, index)
+        try:
+            part = float(index.data(self.PART) or 0.0)
+        except (TypeError, ValueError):
+            return
+        if part <= 0.0:
+            return
+        r = option.rect
+        largeur = max(2, int(r.width() * min(1.0, part)))
+        painter.fillRect(r.left(), r.top() + 4, largeur, r.height() - 8,
+                         self._couleur)
+
+
+class _CelluleNombre(QTableWidgetItem):
+    """Cellule qui se compare par son nombre, pas par son texte.
+
+    « 11.9k » est inférieur à « 617 » dans l'ordre alphabétique.
+    """
+
+    def __init__(self, texte: str, valeur: float) -> None:
+        super().__init__(texte)
+        self.valeur = valeur
+
+    def __lt__(self, autre) -> bool:  # type: ignore[override]
+        if isinstance(autre, _CelluleNombre):
+            return self.valeur < autre.valeur
+        return super().__lt__(autre)
+
+
+def _est_sur_place(location: str) -> bool:
+    """LAN, Ankama, Villa : tout ce qui n'est pas « à distance ».
+
+    L'API nomme plusieurs lieux physiques selon l'édition ; les énumérer un par
+    un vieillirait. On prend le complément de ce qui est explicitement distant.
+    """
+    lieu = (location or "").strip().lower()
+    return bool(lieu) and lieu not in ("online", "remote", "distance")
+
+
 class _StatsTab(QWidget):
-    """Onglet Stats — évolution cagnotte, viewers (Chart.js), LAN/Online, ranking, top viewers."""
+    """Onglet Stats — chiffres clés, courbes, et un seul classement lisible.
+
+    L'ancienne disposition disait trois fois la même chose : un graphe des top
+    viewers, un tableau des cagnottes et deux barres LAN/Online. On garde un
+    seul tableau, trié comme on veut, où chaque colonne porte sa propre échelle
+    de comparaison.
+    """
+
+    #: Colonnes du classement : (titre, clé de tri, alignement à droite).
+    _COLS = [
+        ("#", "", False),
+        ("Streamer", "nom", False),
+        ("Lieu", "lieu", False),
+        ("Jeu", "jeu", False),
+        ("Viewers", "viewers", True),
+        ("Cagnotte", "cagnotte", True),
+    ]
+
+    #: Largeur maximale du contenu. Au-delà, l'œil perd la ligne entre le nom
+    #: et le chiffre qui lui correspond — le défaut de l'ancienne version, où
+    #: mille deux cents pixels de vide séparaient les deux.
+    _LARGEUR_MAX = 1500
+
+    _AVATAR = 22
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._g5_bars: pg.BarGraphItem | None = None
         self._charts_view: QWebEngineView | None = None
         self._charts_ready = False
-        self._charts_payload: str | None = None   # derniere serie non encore poussee
+        self._charts_payload: str | None = None   # dernière série non poussée
+        self._streamers: list[StreamerInfo] = []
+        self._filtre: str = "tous"
+        self._tri: str = "cagnotte"
+        self._decroissant: bool = True
         self._build()
 
-    def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+    # -- construction ---------------------------------------------------------
 
-        # Row 0 — courbes cagnotte + viewers. Hors event elles n'ont aucun point
-        # à tracer : 420 px d'axes vides mangeaient la moitié de la page. On
-        # affiche alors un message compact à la place.
+    def _build(self) -> None:
+        exterieur = QHBoxLayout(self)
+        exterieur.setContentsMargins(12, 12, 12, 12)
+        exterieur.addStretch()
+
+        colonne = QWidget()
+        colonne.setMaximumWidth(self._LARGEUR_MAX)
+        _conteneur_nu(colonne)
+        exterieur.addWidget(colonne, stretch=1)
+        exterieur.addStretch()
+
+        root = QVBoxLayout(colonne)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+        root.addWidget(self._build_bandeau())
+        root.addWidget(self._build_courbes())
+        root.addWidget(self._build_classement(), stretch=1)
+
+    def _build_bandeau(self) -> QWidget:
+        bandeau = QWidget()
+        _conteneur_nu(bandeau)
+        h = QHBoxLayout(bandeau)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(10)
+        self._t_cagnotte = _Tuile("CAGNOTTE", "#00ff87")
+        self._t_viewers = _Tuile("VIEWERS", "#38bdf8")
+        self._t_direct = _Tuile("EN DIRECT", "#ffffff")
+        self._t_lieux = _Tuile("SUR PLACE / À DISTANCE", "#f5c518")
+        for tuile in (self._t_cagnotte, self._t_viewers,
+                      self._t_direct, self._t_lieux):
+            h.addWidget(tuile, stretch=1)
+        return bandeau
+
+    def _build_courbes(self) -> QWidget:
+        """Les courbes, et à leur place une seule ligne quand il n'y a rien.
+
+        Hors event elles n'ont aucun point à tracer : 420 px d'axes vides
+        mangeaient la moitié de la page, et le pavé de repli en occupait
+        encore quatre-vingts.
+        """
+        boite = QWidget()
+        _conteneur_nu(boite)
+        v = QVBoxLayout(boite)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
         self._charts_view = QWebEngineView()
         self._charts_view.setFixedHeight(420)
         self._charts_view.loadFinished.connect(self._on_charts_loaded)
-        # Fichier ecrit une fois : setHtml() prive la page d'une URL de base, ce
-        # qui compliquerait tout ajout de ressource locale par la suite.
+        # Fichier écrit une fois : setHtml() prive la page d'une URL de base,
+        # ce qui compliquerait tout ajout de ressource locale par la suite.
         shell = _CHARTJS_PATH.parent / "stats_chart.html"
         try:
             shell.write_text(self._build_charts_html(), encoding="utf-8")
             self._charts_view.setUrl(QUrl.fromLocalFile(str(shell)))
         except OSError as exc:
-            logger.warning("Page des graphiques non ecrite — %s", exc)
-        root.addWidget(self._charts_view, stretch=2)
-
-        self._charts_empty = QLabel(
-            "Les courbes de cagnotte et de viewers apparaîtront\n"
-            "dès les premières données de l'édition."
-        )
-        self._charts_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._charts_empty.setFont(QFont(_FONT_SEGOE, 12))
-        self._charts_empty.setFixedHeight(80)
-        self._charts_empty.setStyleSheet(
-            "color: #555555; background-color: #0f0f0f; border: 1px solid #1a1a1a; "
-            "border-radius: 6px;"
-        )
-        root.addWidget(self._charts_empty)
+            logger.warning("Page des graphiques non écrite — %s", exc)
+        v.addWidget(self._charts_view)
         self._charts_view.setVisible(False)
 
-        # Row 1 — LAN/Online + Top viewers (fixed height)
-        middle = QWidget()
-        middle.setFixedHeight(220)
-        hbox = QHBoxLayout(middle)
-        hbox.setContentsMargins(0, 0, 0, 0)
-        hbox.setSpacing(8)
-        self._lan_online = LanOnlineWidget()
-        hbox.addWidget(self._lan_online)
-        hbox.addWidget(self._build_g5_top_viewers())
-        root.addWidget(middle)
+        self._charts_empty = QLabel(
+            "Les courbes apparaîtront dès les premières données de l'édition."
+        )
+        self._charts_empty.setFont(QFont(_FONT_SEGOE, 10))
+        self._charts_empty.setStyleSheet(
+            "color: #555555; background: transparent; border: none;")
+        v.addWidget(self._charts_empty)
+        return boite
 
-        # Row 2 — Ranking
-        root.addWidget(self._build_g4_ranking(), stretch=1)
+    def _build_classement(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
+        vl = QVBoxLayout(frame)
+        vl.setContentsMargins(10, 8, 10, 8)
+        vl.setSpacing(8)
+        vl.addLayout(self._build_entete_classement())
 
-    # -- helpers --------------------------------------------------------------
+        self._ranking_table = QTableWidget(0, len(self._COLS))
+        self._ranking_table.setHorizontalHeaderLabels([c[0] for c in self._COLS])
+        self._configurer_table()
+        vl.addWidget(self._ranking_table, stretch=1)
+        return frame
 
-    def _make_frame(self) -> QFrame:
-        f = QFrame()
-        f.setObjectName("card")
-        return f
+    def _build_entete_classement(self) -> QHBoxLayout:
+        ligne = QHBoxLayout()
+        ligne.setSpacing(8)
+        titre = QLabel("CLASSEMENT")
+        titre.setFont(_bold_font(_FONT_SEGOE, 10))
+        titre.setStyleSheet(_SS_GREEN_SPACED)
+        ligne.addWidget(titre)
+        self._compte_lbl = QLabel("")
+        self._compte_lbl.setFont(QFont(_FONT_SEGOE, 10))
+        self._compte_lbl.setStyleSheet("color: #555555; background: transparent;"
+                                       " border: none;")
+        ligne.addWidget(self._compte_lbl)
+        ligne.addStretch()
+        self._boutons_filtre: dict[str, QPushButton] = {}
+        for cle, libelle in (("tous", "Tous"), ("lan", "Sur place"),
+                             ("remote", "À distance")):
+            b = QPushButton(libelle)
+            b.setFont(QFont(_FONT_SEGOE, 10))
+            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.setFixedHeight(24)
+            b.clicked.connect(lambda _=False, k=cle: self._appliquer_filtre(k))
+            self._boutons_filtre[cle] = b
+            ligne.addWidget(b)
+        self._peindre_filtres()
+        return ligne
 
-    # -- chart HTML builder ---------------------------------------------------
+    def _configurer_table(self) -> None:
+        table = self._ranking_table
+        hh = table.horizontalHeader()
+        hh.setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        hh.setSectionsClickable(True)
+        hh.sectionClicked.connect(self._sur_clic_entete)
+        # Ce sont les DEUX colonnes chiffrées qui s'étirent, pas le texte :
+        # elles portent une barre, et la place en trop devient de la longueur
+        # de barre, donc de la comparaison lisible. Étirer le nom ou le jeu
+        # rouvrait le gouffre de l'ancienne version — cinq cents pixels de vide
+        # entre le pseudo et le chiffre qui lui correspond.
+        for colonne in (4, 5):
+            hh.setSectionResizeMode(colonne, QHeaderView.ResizeMode.Stretch)
+        table.setColumnWidth(0, 38)
+        table.setColumnWidth(1, 230)
+        table.setColumnWidth(2, 110)
+        table.setColumnWidth(3, 240)
+        for col in (4, 5):
+            item = table.horizontalHeaderItem(col)
+            if item is not None:
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(30)
+        # Sans ça un libellé trop long pour sa colonne passe à la ligne et
+        # double la hauteur de la rangée, cassant l'alignement de la grille.
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        table.setIconSize(QSize(self._AVATAR, self._AVATAR))
+        table.setShowGrid(False)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        # Le rectangle de focus se dessine PAR-DESSUS la ligne, en pointillés
+        # clairs : illisible sur fond sombre, et redondant avec la sélection.
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setItemDelegateForColumn(4, _BarreDeCellule("#38bdf8", table))
+        table.setItemDelegateForColumn(5, _BarreDeCellule("#00ff87", table))
+        table.setStyleSheet(_STYLE_CLASSEMENT)
+
+    # -- interactions ---------------------------------------------------------
+
+    def _appliquer_filtre(self, cle: str) -> None:
+        self._filtre = cle
+        self._peindre_filtres()
+        self._remplir()
+
+    def _peindre_filtres(self) -> None:
+        for cle, bouton in self._boutons_filtre.items():
+            actif = cle == self._filtre
+            bouton.setStyleSheet(
+                "QPushButton { border-radius: 12px; padding: 2px 12px; "
+                + ("background: #16341f; color: #00ff87; "
+                   "border: 1px solid #00ff87; }"
+                   if actif else
+                   "background: #161616; color: #888888; "
+                   "border: 1px solid #262626; }")
+                + "QPushButton:hover { color: #ffffff; }"
+            )
+
+    def _sur_clic_entete(self, colonne: int) -> None:
+        """Trie sur la colonne cliquée, et inverse si c'est déjà la sienne."""
+        if not 0 <= colonne < len(self._COLS):
+            return
+        cle = self._COLS[colonne][1]
+        if not cle:
+            return          # la colonne du rang n'est pas un critère
+        if cle == self._tri:
+            self._decroissant = not self._decroissant
+        else:
+            self._tri = cle
+            # Un nom se lit de A à Z, un nombre se regarde par le haut.
+            self._decroissant = cle not in ("nom", "jeu", "lieu")
+        self._marquer_entetes()
+        self._remplir()
+
+    def _marquer_entetes(self) -> None:
+        """Une flèche sur la colonne qui trie : sinon rien ne dit d'où vient
+        l'ordre affiché."""
+        fleche = " ▼" if self._decroissant else " ▲"
+        for i, (titre, cle, _droite) in enumerate(self._COLS):
+            item = self._ranking_table.horizontalHeaderItem(i)
+            if item is not None:
+                item.setText(titre + (fleche if cle and cle == self._tri else ""))
+
+    # -- données --------------------------------------------------------------
+
+    def update_streamers(self, streamers: list[StreamerInfo]) -> None:
+        """Rafraîchit les chiffres clés et le classement."""
+        self._streamers = list(streamers)
+        self._mettre_a_jour_bandeau()
+        self._marquer_entetes()
+        self._remplir()
+
+    def _mettre_a_jour_bandeau(self) -> None:
+        s = self._streamers
+        en_direct = [x for x in s if x.online]
+        sur_place = [x for x in s if _est_sur_place(x.location)]
+        cagnotte = sum(x.donation for x in s)
+        viewers = sum(x.viewers for x in en_direct)
+        self._t_cagnotte.set_valeur(_fmt_euros(cagnotte),
+                                    "cumul des participants")
+        self._t_viewers.set_valeur(f"{viewers:,}".replace(",", " "),
+                                   "cumulés sur les directs")
+        self._t_direct.set_valeur(str(len(en_direct)),
+                                  f"sur {len(s)} participants")
+        self._t_lieux.set_valeur(f"{len(sur_place)} / {len(s) - len(sur_place)}",
+                                 "sur place / à distance")
+
+    def _selection(self) -> list[StreamerInfo]:
+        """La liste filtrée puis triée, telle qu'elle sera affichée."""
+        if self._filtre == "lan":
+            retenus = [s for s in self._streamers if _est_sur_place(s.location)]
+        elif self._filtre == "remote":
+            retenus = [s for s in self._streamers
+                       if not _est_sur_place(s.location)]
+        else:
+            retenus = list(self._streamers)
+        cles = {
+            "nom": lambda s: s.display.lower(),
+            "lieu": lambda s: (s.location or "").lower(),
+            "jeu": lambda s: (s.game or "").lower(),
+            "viewers": lambda s: (s.viewers, s.donation),
+            # Avant l'event toutes les cagnottes valent zéro : le tri rendait
+            # alors l'ordre alphabétique de l'API, illisible. Les viewers
+            # départagent, eux.
+            "cagnotte": lambda s: (s.donation, s.viewers),
+        }
+        return sorted(retenus, key=cles.get(self._tri, cles["cagnotte"]),
+                      reverse=self._decroissant)
+
+    def _remplir(self) -> None:
+        retenus = self._selection()
+        table = self._ranking_table
+        table.setRowCount(len(retenus))
+        self._compte_lbl.setText(f"· {len(retenus)}")
+        max_v = max((s.viewers for s in retenus), default=0) or 1
+        max_d = max((s.donation for s in retenus), default=0.0) or 1.0
+        for i, s in enumerate(retenus):
+            self._ecrire_ligne(i, s, max_v, max_d)
+
+    def _ecrire_ligne(self, i: int, s: StreamerInfo,
+                      max_v: int, max_d: float) -> None:
+        table = self._ranking_table
+        rang = QTableWidgetItem(str(i + 1))
+        rang.setForeground(QBrush(QColor("#555555")))
+        table.setItem(i, 0, rang)
+        table.setItem(i, 1, self._cellule_nom(s))
+
+        sur_place = _est_sur_place(s.location)
+        lieu = QTableWidgetItem("sur place" if sur_place else "à distance")
+        lieu.setForeground(QBrush(QColor("#f5c518" if sur_place else "#666666")))
+        table.setItem(i, 2, lieu)
+
+        jeu = QTableWidgetItem(s.game if s.online else "hors ligne")
+        jeu.setForeground(QBrush(QColor("#999999" if s.online else "#555555")))
+        table.setItem(i, 3, jeu)
+
+        vue = _CelluleNombre(_fmt_viewers(s.viewers) if s.online else "—",
+                             float(s.viewers))
+        vue.setData(_BarreDeCellule.PART, s.viewers / max_v if s.online else 0.0)
+        vue.setForeground(QBrush(QColor("#38bdf8" if s.online else "#555555")))
+        vue.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(i, 4, vue)
+
+        don = _CelluleNombre(s.donation_formatted or _fmt_euros(s.donation),
+                             s.donation)
+        don.setData(_BarreDeCellule.PART, s.donation / max_d)
+        don.setForeground(QBrush(QColor("#00ff87" if s.donation else "#555555")))
+        don.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(i, 5, don)
+
+    def _cellule_nom(self, s: StreamerInfo) -> QTableWidgetItem:
+        nom = QTableWidgetItem(s.display)
+        nom.setIcon(QIcon(self._photo(s)))
+        if favorites.is_favorite(s.twitch_login):
+            # Coloré : on doit repérer ses favoris d'un coup d'œil dans une
+            # liste de trois cents lignes.
+            nom.setText(f"★  {s.display}")
+            nom.setForeground(QBrush(QColor("#f5c518")))
+        elif not s.online:
+            nom.setForeground(QBrush(QColor("#777777")))
+        return nom
+
+    def _photo(self, s: StreamerInfo) -> QPixmap:
+        """Photo du streamer, ou un pixmap vide en attendant qu'elle arrive.
+
+        Les données repassent toutes les 30 s : la ligne se corrige d'elle-même
+        sans qu'on ait à réveiller la table.
+        """
+        from widgets.bigscreen_widget import _avatar_cache
+        av = _avatar_cache.get(s.twitch_login, s.display, self._AVATAR,
+                               None, s.profile_url)
+        return av if av is not None else QPixmap()
 
     def _build_charts_html(self) -> str:
         """Page squelette : Chart.js et deux graphes VIDES, construite une fois.
@@ -4687,87 +5729,6 @@ window.zlUpdate = function (payload) {{
 
     # -- chart builders -------------------------------------------------------
 
-    def _build_g4_ranking(self) -> QFrame:
-        frame = self._make_frame()
-        vl = QVBoxLayout(frame)
-        vl.setContentsMargins(8, 8, 8, 8)
-        vl.setSpacing(6)
-
-        hdr = QLabel("CLASSEMENT CAGNOTTES · TOP 20")
-        hdr.setFont(_bold_font(_FONT_SEGOE, 10))
-        hdr.setStyleSheet("color: #00ff87; letter-spacing: 2px;")
-        vl.addWidget(hdr)
-
-        self._ranking_table = QTableWidget(0, 4)
-        self._ranking_table.setHorizontalHeaderLabels(["#", "Streamer", "Cagnotte", "Viewers"])
-        hh = self._ranking_table.horizontalHeader()
-        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        # Les en-têtes étaient centrés alors que les valeurs sont alignées à
-        # gauche : « Streamer » flottait au milieu d'une colonne vide, loin des
-        # noms. On aligne chaque en-tête sur son contenu.
-        hh.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for col in (2, 3):
-            item = self._ranking_table.horizontalHeaderItem(col)
-            if item is not None:
-                item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                )
-        self._ranking_table.setColumnWidth(0, 34)
-        self._ranking_table.setColumnWidth(2, 120)
-        self._ranking_table.setColumnWidth(3, 80)
-        self._ranking_table.verticalHeader().setVisible(False)
-        self._ranking_table.setShowGrid(False)
-        self._ranking_table.setAlternatingRowColors(True)
-        self._ranking_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._ranking_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._ranking_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #0f0f0f;
-                alternate-background-color: #111111;
-                color: #ffffff;
-                font-family: "Segoe UI Variable";
-                font-size: 11px;
-                border: none;
-            }
-            QTableWidget::item { padding: 4px; border: none; }
-            QHeaderView::section {
-                background-color: #111111;
-                color: #00ff87;
-                font-size: 10px;
-                border: none;
-                padding: 4px;
-            }
-        """)
-        vl.addWidget(self._ranking_table, stretch=1)
-        return frame
-
-    def _build_g5_top_viewers(self) -> QFrame:
-        frame = self._make_frame()
-        vl = QVBoxLayout(frame)
-        vl.setContentsMargins(4, 4, 4, 4)
-        vl.setSpacing(4)
-
-        title = QLabel("TOP VIEWERS")
-        title.setFont(_bold_font(_FONT_SEGOE, 9))
-        title.setStyleSheet(_SS_GREEN_SPACED)
-        vl.addWidget(title)
-
-        self._g5_plot = pg.PlotWidget()
-        self._g5_plot.setBackground("#0f0f0f")
-        self._g5_plot.setMouseEnabled(x=False, y=False)
-        self._g5_plot.setMenuEnabled(False)
-        self._g5_plot.hideButtons()
-        self._g5_plot.showGrid(x=True, y=False, alpha=0.15)
-        for axis_name in ("left", "bottom"):
-            ax = self._g5_plot.getAxis(axis_name)
-            ax.setStyle(tickFont=QFont(_FONT_MONO, 8))
-            ax.setTextPen("#888888")
-            ax.setPen("#333333")
-        vl.addWidget(self._g5_plot)
-        return frame
-
-    # -- public API -----------------------------------------------------------
-
     def update_history(self, history: HistoryStore) -> None:
         """Met à jour les graphes Chart.js cagnotte et viewers."""
         ts_d, vals_d = history.get_donation_series()
@@ -4816,70 +5777,6 @@ window.zlUpdate = function (payload) {{
         view.page().runJavaScript(
             f"window.zlUpdate({json.dumps(self._charts_payload)})"
         )
-
-    def update_streamers(self, streamers: list[StreamerInfo]) -> None:
-        """Rafraîchit LAN/Online, ranking et top viewers."""
-        # LAN vs Online
-        self._lan_online.update_data(streamers)
-
-        # Classement : avant l'event toutes les cagnottes valent 0, et le tri
-        # rendait alors l'ordre alphabétique de l'API — illisible. On retombe
-        # sur les viewers, qui eux discriminent.
-        sorted_s = sorted(streamers, key=lambda x: (-x.donation, -x.viewers))[:20]
-        self._ranking_table.setRowCount(len(sorted_s))
-        for i, s in enumerate(sorted_s):
-            rank_item = QTableWidgetItem(str(i + 1))
-            rank_item.setForeground(QBrush(QColor("#00ff87")))
-            self._ranking_table.setItem(i, 0, rank_item)
-            name_item = QTableWidgetItem(s.display)
-            if favorites.is_favorite(s.twitch_login):
-                # Marqué et coloré : on doit repérer ses favoris d'un coup d'œil
-                # dans une liste de vingt lignes.
-                name_item.setText(f"★  {s.display}")
-                name_item.setForeground(QBrush(QColor("#f5c518")))
-            self._ranking_table.setItem(i, 1, name_item)
-            amt_item = QTableWidgetItem(s.donation_formatted)
-            amt_item.setForeground(QBrush(QColor("#00ff87")))
-            amt_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            self._ranking_table.setItem(i, 2, amt_item)
-            v_item = QTableWidgetItem(
-                f"{s.viewers / 1000:.1f}k" if s.viewers > 999 else str(s.viewers)
-            )
-            v_item.setForeground(QBrush(QColor("#00ff87" if s.online else "#555555")))
-            v_item.setTextAlignment(
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-            )
-            self._ranking_table.setItem(i, 3, v_item)
-
-        # Top 10 viewers — barres horizontales
-        top10 = sorted([s for s in streamers if s.online], key=lambda x: -x.viewers)[:10]
-        self._g5_plot.clear()
-        self._g5_bars = None
-        if not top10:
-            return
-        y = list(range(len(top10)))
-        x = [s.viewers for s in top10]
-        names = [s.display[:12] for s in top10]
-        self._g5_bars = pg.BarGraphItem(
-            x0=0, y=y, height=0.6, width=x,
-            brush=pg.mkBrush("#00ff87"),
-            pen=pg.mkPen(None),
-        )
-        self._g5_plot.addItem(self._g5_bars)
-        ax = self._g5_plot.getAxis("left")
-        ax.setTicks([list(zip(y, names))])
-        ax.setStyle(tickFont=QFont(_FONT_MONO, 8))
-        # pyqtgraph ne recalcule pas la largeur de l'axe après setTicks : elle
-        # restait à 35 px, trop étroite pour la plupart des pseudos, et les
-        # libellés étaient donc silencieusement abandonnés. On la dimensionne
-        # sur le plus long nom réellement affiché.
-        fm = QFontMetrics(QFont(_FONT_MONO, 8))
-        ax.setWidth(max(40, min(120, max(fm.horizontalAdvance(n) for n in names) + 12)))
-        max_v = max(x) if x else 1
-        self._g5_plot.setXRange(0, max_v * 1.1)
-        self._g5_plot.setYRange(-0.5, len(top10) - 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -4933,174 +5830,6 @@ class _TabButton(QPushButton):
 # _SplashOverlay — écran de chargement au démarrage
 # ---------------------------------------------------------------------------
 
-class _CommandPalette(QWidget):
-    """Recherche instantanée au clavier (Ctrl+K).
-
-    Avec près de 300 participants, atteindre un streamer précis imposait
-    d'ouvrir l'onglet Streamers et de faire défiler. Ici on tape trois lettres
-    et on ouvre le flux, l'ajoute à la grille ou saute à un onglet.
-    """
-
-    stream_requested = pyqtSignal(str)   # twitch_login
-    grid_requested   = pyqtSignal(str)   # twitch_login
-    tab_requested    = pyqtSignal(str)   # nom d'onglet
-    action_requested = pyqtSignal(str)   # identifiant d'action
-
-    #: Actions atteignables au clavier. Les mêmes gestes que les raccourcis du
-    #: plein écran, pour qui préfère les chercher par leur nom.
-    _ACTIONS = [
-        ("clip",   "Garder le moment en cours"),
-        ("replay", "Revoir les dernières secondes"),
-        ("recap",  "Récapitulatif de session"),
-    ]
-
-    _MAX_RESULTS = 9
-
-    def __init__(self, parent: QWidget, tab_names: list[str]) -> None:
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet("background-color: rgba(0, 0, 0, 190);")
-        self._streamers: list[StreamerInfo] = []
-        self._tab_names = tab_names
-        self._results: list[tuple[str, str, str]] = []   # (type, clé, libellé)
-        self._build()
-        self.hide()
-
-    def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 120, 0, 0)
-        root.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-
-        box = QFrame()
-        box.setFixedWidth(620)
-        box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
-        box.setStyleSheet(
-            "QFrame { background-color: #141414; border: 1px solid #2a2a2a; "
-            "border-radius: 8px; }"
-        )
-        bl = QVBoxLayout(box)
-        bl.setContentsMargins(10, 10, 10, 10)
-        bl.setSpacing(6)
-
-        self._input = QLineEdit()
-        self._input.setFont(QFont(_FONT_SEGOE, 14))
-        self._input.setPlaceholderText("Rechercher un streamer, un onglet…")
-        self._input.setStyleSheet(
-            "QLineEdit { background: #0d0d0d; color: #ffffff; border: none; "
-            "border-radius: 5px; padding: 8px 10px; }"
-        )
-        self._input.textChanged.connect(self._refilter)
-        self._input.installEventFilter(self)
-        bl.addWidget(self._input)
-
-        self._list = QListWidget()
-        self._list.setFont(QFont(_FONT_SEGOE, 12))
-        # Hauteur ajustée au contenu : sans cela la boîte s'étirait jusqu'en bas
-        # de la fenêtre, quel que soit le nombre de résultats.
-        self._list.setFixedHeight(self._MAX_RESULTS * 30)
-        self._list.setStyleSheet(
-            "QListWidget { background: transparent; border: none; color: #cccccc; }"
-            "QListWidget::item { padding: 6px 8px; border-radius: 4px; }"
-            "QListWidget::item:selected { background: #0d1f16; color: #00ff87; }"
-        )
-        self._list.itemActivated.connect(lambda _i: self._activate())
-        bl.addWidget(self._list)
-
-        hint = QLabel("↑↓ naviguer · Entrée ouvrir · Ctrl+Entrée ajouter à la grille · Échap fermer")
-        hint.setFont(QFont(_FONT_SEGOE, 9))
-        hint.setStyleSheet("color: #555555; background: transparent; border: none;")
-        bl.addWidget(hint)
-
-        root.addWidget(box)
-
-    # -- données ---------------------------------------------------------------
-
-    def set_streamers(self, streamers: list[StreamerInfo]) -> None:
-        self._streamers = streamers
-
-    # -- ouverture / fermeture -------------------------------------------------
-
-    def open(self) -> None:
-        self.resize(self.parentWidget().size())
-        self._input.clear()
-        self._refilter("")
-        self.show()
-        self.raise_()
-        self._input.setFocus()
-
-    def eventFilter(self, obj, event):  # type: ignore[override]
-        if obj is self._input and event.type() == event.Type.KeyPress:
-            key = event.key()
-            if key == Qt.Key.Key_Escape:
-                self.hide()
-                return True
-            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
-                row = self._list.currentRow()
-                row += 1 if key == Qt.Key.Key_Down else -1
-                self._list.setCurrentRow(max(0, min(self._list.count() - 1, row)))
-                return True
-            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                to_grid = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-                self._activate(to_grid)
-                return True
-        return super().eventFilter(obj, event)
-
-    # -- filtrage --------------------------------------------------------------
-
-    def _refilter(self, text: str) -> None:
-        q = text.strip().lower()
-        self._results = []
-        # Les onglets ne remontent que sur une recherche explicite : à vide, la
-        # liste doit proposer ce qu'on cherche neuf fois sur dix, des streamers.
-        if q:
-            for name in self._tab_names:
-                if q in name.lower():
-                    self._results.append(("tab", name, f"Onglet · {name}"))
-            for cle, libelle in self._ACTIONS:
-                if q in libelle.lower() or q in cle:
-                    self._results.append(("action", cle, f"Action · {libelle}"))
-        # Favoris d'abord, puis les live, puis les plus suivis.
-        favs = favorites.get()
-        ordered = sorted(
-            self._streamers,
-            key=lambda x: (x.twitch_login.lower() not in favs, not x.online, -x.viewers),
-        )
-        for s in ordered:
-            if len(self._results) >= self._MAX_RESULTS:
-                break
-            hay = f"{s.twitch_login} {s.display}".lower()
-            if q and q not in hay:
-                continue
-            state = f"{s.viewers:,}".replace(",", "\u202f") + " viewers" if s.online else "hors ligne"
-            game = f" · {s.game}" if s.game else ""
-            star = "★ " if s.twitch_login.lower() in favs else ""
-            self._results.append(
-                ("streamer", s.twitch_login, f"{star}{s.display}{game} — {state}")
-            )
-        self._results = self._results[:self._MAX_RESULTS]
-
-        self._list.clear()
-        for _kind, _key, label in self._results:
-            self._list.addItem(label)
-        if self._results:
-            self._list.setCurrentRow(0)
-
-    def _activate(self, to_grid: bool = False) -> None:
-        row = self._list.currentRow()
-        if not (0 <= row < len(self._results)):
-            return
-        kind, key, _label = self._results[row]
-        self.hide()
-        if kind == "tab":
-            self.tab_requested.emit(key)
-        elif kind == "action":
-            self.action_requested.emit(key)
-        elif to_grid:
-            self.grid_requested.emit(key)
-        else:
-            self.stream_requested.emit(key)
-
-
 class _SplashOverlay(QWidget):
     """Overlay plein-fenêtre affiché jusqu'au premier fetch API réussi."""
 
@@ -5117,7 +5846,7 @@ class _SplashOverlay(QWidget):
 
         logo = QLabel("ZLink")
         logo.setFont(_bold_font(_FONT_SEGOE, 52))
-        logo.setStyleSheet("color: #00ff87; background: transparent;")
+        logo.setStyleSheet(_SS_VERT_NU)
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vl.addWidget(logo)
 
@@ -5131,7 +5860,7 @@ class _SplashOverlay(QWidget):
 
         self._status_lbl = QLabel("Connexion aux APIs")
         self._status_lbl.setFont(QFont(_FONT_SEGOE, 11))
-        self._status_lbl.setStyleSheet("color: #444444; background: transparent;")
+        self._status_lbl.setStyleSheet(_SS_GRIS_EFFACE)
         self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vl.addWidget(self._status_lbl)
 
@@ -5244,6 +5973,14 @@ class PanelWindow(QMainWindow):
         self._target_screen = screen
         self._show_grid_tab = show_grid_tab
         self.setWindowTitle("ZLink — Panel")
+        # Sans cadre, comme les deux autres fenêtres. showFullScreen() seul
+        # laisse la bordure d'un pixel que DWM dessine autour d'une fenêtre
+        # décorée : mesuré, et c'est ce liseré qui donnait à l'écran l'air
+        # d'être « en fenêtre » plutôt qu'en plein écran.
+        #
+        # Posé AVANT le premier show() : changer les drapeaux d'une fenêtre
+        # déjà affichée détruit et recrée son handle natif.
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setStyleSheet(PANEL_STYLE)
 
         self._tab_btns: list[_TabButton] = []
@@ -5323,7 +6060,10 @@ class PanelWindow(QMainWindow):
         self._version_lbl.adjustSize()
 
     def _open_version_page(self) -> None:
+        ceder_premier_plan()
         QDesktopServices.openUrl(QUrl(self._version_url))
+        for delai in (400, 1200):
+            QTimer.singleShot(delai, remonter_navigateur)
 
     def set_update_available(self, version: str, url: str) -> None:
         """Signale dans l'en-tête qu'une version plus récente existe."""
@@ -5518,6 +6258,9 @@ class PanelWindow(QMainWindow):
         if handle is not None:
             handle.setScreen(screen)
         self.showFullScreen()
+        # Déclare la fenêtre comme plein écran auprès du shell : sans ça, la
+        # barre des tâches de son écran reste par-dessus.
+        mark_fullscreen(self)
         logger.info("Panel ouverte sur %s (%dx%d)", screen.name(), g.width(), g.height())
 
     # -- public API -----------------------------------------------------------
@@ -5636,6 +6379,14 @@ class PanelWindow(QMainWindow):
         """Flux affiché en plein écran : première tranche de la console."""
         self._mixer_tab.set_main_stream(login)
 
+    def set_main_volume(self, valeur: int) -> None:
+        """Volume du plein écran, réglé ailleurs qu'à la console."""
+        self._mixer_tab.set_main_volume(valeur)
+
+    def set_main_muted(self, muet: bool) -> None:
+        """Coupure du plein écran, décidée ailleurs qu'à la console."""
+        self._mixer_tab.set_main_muted(muet)
+
     def add_feed_event(self, kind: str, login: str, text: str) -> None:
         """Ajoute une entrée au fil d'événements de l'Accueil."""
         self._accueil_tab.add_feed_event(kind, login, text)
@@ -5680,6 +6431,14 @@ class PanelWindow(QMainWindow):
         """Ajoute un login à la grille depuis le clic timeline."""
         self._streamers_tab.add_login(login)
 
+    def ajouter_a_la_grille(self, login: str) -> None:
+        """Ajoute une chaîne à la grille, demandé depuis une autre fenêtre.
+
+        Le plein écran et la grille ont eux aussi leur palette de commandes,
+        mais c'est l'onglet Streamers du panel qui détient la sélection.
+        """
+        self._on_add_to_grid(login)
+
     # -- tabs -----------------------------------------------------------------
 
     def _on_tab(self) -> None:
@@ -5696,6 +6455,7 @@ class PanelWindow(QMainWindow):
         if idx < len(self._tab_btns) and self._tab_btns[idx].text() == "Grille":
             if self._grid_window is not None:
                 self._grid_window.showFullScreen()
+                mark_fullscreen(self._grid_window)
                 self.hide()
             return
         self._stack.setCurrentIndex(idx)

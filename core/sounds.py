@@ -18,6 +18,7 @@ ne produit aucun son.
 from __future__ import annotations
 
 import logging
+import math
 
 from PyQt6.QtCore import QUrl
 from PyQt6.QtMultimedia import QSoundEffect
@@ -40,10 +41,21 @@ _volume: float = 0.6
 def configure(config: dict) -> None:
     """Applique la configuration. `sounds.enabled` vaut faux par défaut."""
     global _actif, _volume
-    cfg = (config or {}).get("sounds") or {}
+    cfg = (config or {}).get("sounds")
+    # Le TYPE est verifie, pas seulement la presence : `{"sounds": "oui"}` dans
+    # un config.json abime faisait lever AttributeError sur le .get() suivant,
+    # au lancement — l'application ne demarrait plus au lieu de perdre ses sons.
+    # core.alerts fait deja cette verification ; l'oubli etait ici.
+    if not isinstance(cfg, dict):
+        cfg = {}
     _actif = bool(cfg.get("enabled", False))
     try:
-        _volume = max(0.0, min(1.0, float(cfg.get("volume", 60)) / 100.0))
+        brut = float(cfg.get("volume", 60)) / 100.0
+        # NaN seulement, pas isfinite : les infinis se bornent tres bien
+        # (-inf -> 0.0, +inf -> 1.0). NaN, lui, traverse le bornage — toute
+        # comparaison avec lui etant fausse, max(0.0, min(1.0, nan)) rend 1.0,
+        # soit le volume MAXIMUM. json.loads accepte le litteral NaN.
+        _volume = 0.6 if math.isnan(brut) else max(0.0, min(1.0, brut))
     except (TypeError, ValueError):
         _volume = 0.6
     for eff in _effets.values():

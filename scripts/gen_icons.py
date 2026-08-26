@@ -126,7 +126,9 @@ def main() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6.QtGui import QGuiApplication
 
-    app = QGuiApplication(sys.argv[:1])  # noqa: F841 - requis par QPainter
+    # Jamais relue, mais QPainter exige qu'une QGuiApplication existe et
+    # reste en vie : la lier a un nom est le seul moyen de la retenir.
+    app = QGuiApplication(sys.argv[:1])  # noqa: F841  # NOSONAR
 
     SORTIE.mkdir(parents=True, exist_ok=True)
     rendus: dict[int, bytes] = {}

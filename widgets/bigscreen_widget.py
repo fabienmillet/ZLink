@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import pathlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -59,6 +60,11 @@ if TYPE_CHECKING:
 
 _AVATAR_CACHE_DIR = pathlib.Path.home() / ".zlink" / "avatars"
 _AVATAR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Fragments de feuille de style et police repetes.
+_POLICE_UI = "Segoe UI"
+_FOND_TRANSPARENT = "background: transparent;"
+_TEXTE_VERT_SANS_BORDURE = "color: #00ff87; background: transparent; border: none;"
 
 _GREEN = QColor("#00ff87")
 _BG = QColor("#0a0a0a")
@@ -201,6 +207,61 @@ from core import avatar_cache as _avatar_disk
 
 logger = logging.getLogger(__name__)
 
+# ── Instrumentation de cadence ───────────────────────────────────────────────
+# Activée par ZLINK_PERF=1, sinon strictement inerte (un test de booléen par
+# image). Sert à savoir si un widget dépasse son budget, ou si c'est la boucle
+# d'événements qui est engorgée par autre chose — les deux ne se corrigent pas
+# au même endroit.
+_PERF = os.environ.get("ZLINK_PERF") == "1"
+
+
+class _Cadence:
+    """Durées de peinture et retards de réveil, résumés toutes les 5 s."""
+
+    def __init__(self, nom: str, budget_ms: float) -> None:
+        self._nom = nom
+        self._budget = budget_ms
+        self._peintures: list[float] = []
+        self._retards: list[float] = []
+        self._t_resume = time.perf_counter()
+        self._attendu = 0.0
+
+    def reveil(self) -> None:
+        """Appelé au début du tick : mesure le retard du timer."""
+        now = time.perf_counter()
+        if self._attendu:
+            self._retards.append((now - self._attendu) * 1000.0)
+        self._attendu = now + self._budget / 1000.0
+
+    def peinture(self, ms: float) -> None:
+        self._peintures.append(ms)
+        if time.perf_counter() - self._t_resume >= 5.0:
+            self._resumer()
+
+    def _resumer(self) -> None:
+        def stats(xs: list[float]) -> str:
+            if not xs:
+                return "n/a"
+            tri = sorted(xs)
+            moy = sum(tri) / len(tri)
+            return (f"moy {moy:5.2f}  med {tri[len(tri)//2]:5.2f}  "
+                    f"p95 {tri[int(len(tri) * 0.95)]:6.2f}  max {tri[-1]:6.2f}")
+
+        depasse = sum(1 for x in self._peintures if x > self._budget)
+        logger.warning(
+            "PERF %-9s %3d images en 5 s (%4.1f fps) | peinture ms: %s | "
+            "retard du reveil ms: %s | %d image(s) au-dessus du budget de %.0f ms",
+            self._nom, len(self._peintures), len(self._peintures) / 5.0,
+            stats(self._peintures), stats(self._retards), depasse, self._budget,
+        )
+        self._peintures.clear()
+        self._retards.clear()
+        self._t_resume = time.perf_counter()
+
+
+_CAD_MOSAIQUE = _Cadence("mosaique", 50.0)
+_CAD_TICKER = _Cadence("ticker", 16.0)
+
 def _download_avatar(login: str, url: str) -> None:
     """Délègue au cache partagé — voir core/avatar_cache.
 
@@ -268,9 +329,9 @@ class _GuiDispatcher(QObject):
         self._call.connect(self._run, Qt.ConnectionType.QueuedConnection)
 
     @staticmethod
-    def _run(fn: object) -> None:
+    def _run(fn: Callable[[], None]) -> None:
         try:
-            fn()  # type: ignore[operator]
+            fn()
         except RuntimeError:
             pass  # widget détruit entre-temps
         except Exception:
@@ -560,7 +621,8 @@ class _TickerWidget(QWidget):
         self.update()
 
     def _tick(self) -> None:
-        import time
+        if _PERF:
+            _CAD_TICKER.reveil()
         now = int(time.monotonic() * 1000)
         dt = now - self._last_ms
         self._last_ms = now
@@ -571,6 +633,7 @@ class _TickerWidget(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
+        _t0 = time.perf_counter() if _PERF else 0.0
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -587,6 +650,8 @@ class _TickerWidget(QWidget):
 
         if not self._streamers:
             painter.end()
+            if _PERF:
+                _CAD_TICKER.peinture((time.perf_counter() - _t0) * 1000.0)
             return
 
         n = len(self._streamers)
@@ -602,6 +667,8 @@ class _TickerWidget(QWidget):
                 self._draw_card(painter, s, x, h)
 
         painter.end()
+        if _PERF:
+            _CAD_TICKER.peinture((time.perf_counter() - _t0) * 1000.0)
 
     def _draw_card(self, painter: QPainter, s: "StreamerInfo", x: int, h: int) -> None:
         size = self._AVATAR
@@ -619,7 +686,7 @@ class _TickerWidget(QWidget):
         text_w = self._ITEM_W - size - 8 - 8 - 8  # marges gauche, gap, marge droite
 
         # Nom
-        name_font = QFont("Segoe UI", 11, QFont.Weight.Bold)
+        name_font = QFont(_POLICE_UI, 11, QFont.Weight.Bold)
         painter.setFont(name_font)
         painter.setPen(QPen(QColor("#ffffff")))
         name = QFontMetrics(name_font).elidedText(
@@ -632,7 +699,7 @@ class _TickerWidget(QWidget):
         )
 
         # Jeu
-        game_font = QFont("Segoe UI", 9)
+        game_font = QFont(_POLICE_UI, 9)
         painter.setFont(game_font)
         painter.setPen(QPen(QColor("#888888")))
         game = s.game or "en live"
@@ -661,13 +728,24 @@ class _BgAvatarsWidget(QWidget):
     _COLS = 10          # colonnes
     _AVATAR_SIZE = 96   # taille du cache (px) — affiché dynamiquement
     _GAP = 2            # séparateur minimal entre images
-    _FPS_INTERVAL = 33  # ~30fps
-    _SCROLL_PX = 1.5    # pixels défilés par frame
+    # 60 images par seconde demandées. La cadence RÉELLEMENT obtenue sera plus
+    # basse : le vidage du backing store plein écran bloque ~14 ms par image
+    # (mesuré), ce qui plafonne autour de 30 à 35 fps. Viser 60 laisse la
+    # mosaïque prendre toute la marge disponible au lieu de s'auto-limiter,
+    # et le défilement étant exprimé en px/s, sa vitesse ne bouge pas d'un
+    # poste à l'autre.
+    _FPS_INTERVAL = 16
+    # En pixels PAR SECONDE, et non par image : la vitesse ne doit pas dépendre
+    # de la cadence réellement obtenue. Avec l'ancien pas par image, la mosaïque
+    # ralentissait dès que la machine était chargée — 37 px/s mesurés au lieu
+    # des 45 attendus.
+    _SCROLL_PX_S = 45.0
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._streamers: list[StreamerInfo] = []
         self._offset: float = 0.0
+        self._last_tick: float = 0.0
         self._prewarm_idx: int = 0
         self._prewarm_cell: int = 0
         self._prewarm_gen: int = 0
@@ -747,8 +825,9 @@ class _BgAvatarsWidget(QWidget):
             # Pas encore dimensionné : on retente au prochain tour.
             QTimer.singleShot(200, lambda g=gen: self._prewarm(g))
             return
-        # Après le calcul de cell_w : sinon un resize survenu alors que la liste
-        # est vide perdrait la nouvelle taille.
+        # Après le calcul de cell_w, pour que le cas « pas encore dimensionné »
+        # soit reprogrammé même sans streamers : sans quoi un préchauffage
+        # démarré trop tôt s'arrêterait là et ne reprendrait jamais.
         if not self._streamers:
             return
         if cell_w != self._prewarm_cell:
@@ -768,21 +847,59 @@ class _BgAvatarsWidget(QWidget):
         QTimer.singleShot(200, lambda g=gen: self._prewarm(g))
 
     def _tick(self) -> None:
+        if _PERF:
+            _CAD_MOSAIQUE.reveil()
         if not self._streamers:
             return
         w = self.width()
         if w == 0:
             return
+        now = time.monotonic()
+        # Premier tick, ou reprise après masquage : on prend une image nominale
+        # plutôt qu'un delta de plusieurs secondes qui ferait sauter la mosaïque.
+        dt = now - self._last_tick if self._last_tick else self._FPS_INTERVAL / 1000.0
+        self._last_tick = now
+        dt = min(dt, 0.25)
+
         cell_w = w // self._COLS
         cell_h = cell_w + self._GAP
         n_rows = max(1, math.ceil(len(self._streamers) / self._COLS))
         total_h = n_rows * cell_h
-        self._offset = (self._offset + self._SCROLL_PX) % total_h
+        self._offset = (self._offset + self._SCROLL_PX_S * dt) % total_h
         self.update()
+
+    def _cellules_visibles(self, rows_needed: int, start_row: int, n_rows: int,
+                           n: int, cell_w: int, cell_h: int, row_frac: float,
+                           h: int) -> tuple:
+        """(en ligne, hors ligne) : positions et pixmaps des cellules a peindre.
+
+        Deux listes plutot qu'une : peindre les hors-ligne d'un bloc ne change
+        l'opacite que deux fois par image, au lieu d'une fois par cellule.
+
+        Les pixmaps sont demandes a la taille EXACTE de la cellule : le cache
+        les stocke deja mis a l'echelle, donc drawPixmap fait une copie 1:1 au
+        lieu de redimensionner chaque avatar a chaque image.
+        """
+        online: list[tuple[int, int, "QPixmap"]] = []
+        offline: list[tuple[int, int, "QPixmap"]] = []
+        for visible_row in range(rows_needed):
+            cy = int(visible_row * cell_h - row_frac)
+            if cy + cell_w < 0 or cy > h:
+                continue
+            data_row = (start_row + visible_row) % n_rows
+            for col in range(self._COLS):
+                s = self._streamers[(data_row * self._COLS + col) % n]
+                purl = getattr(s, "profile_url", "")
+                cible = online if s.online else offline
+                lire = _avatar_cache.get_sq if s.online else _avatar_cache.get_gray_sq
+                cible.append((col * cell_w, cy, lire(
+                    s.twitch_login, s.display, cell_w, self.update, purl)))
+        return online, offline
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         if not self._streamers:
             return
+        _t0 = time.perf_counter() if _PERF else 0.0
 
         painter = QPainter(self)
         # Aucun redimensionnement ni forme arrondie ici : les indices de rendu
@@ -793,9 +910,6 @@ class _BgAvatarsWidget(QWidget):
         painter.fillRect(0, 0, w, h, QBrush(_BG))
 
         n = len(self._streamers)
-        if n == 0:
-            painter.end()
-            return
 
         # Cellules carrées qui couvrent toute la largeur, images qui se touchent
         cell_w = w // self._COLS
@@ -817,28 +931,8 @@ class _BgAvatarsWidget(QWidget):
         # au lieu de redimensionner chaque avatar à chaque image.
         # Deux passes (en ligne puis hors ligne) pour ne changer l'opacité que
         # deux fois par image au lieu d'une fois par cellule.
-        online: list[tuple[int, int, "QPixmap"]] = []
-        offline: list[tuple[int, int, "QPixmap"]] = []
-
-        for visible_row in range(rows_needed):
-            cy = int(visible_row * cell_h - row_frac)
-            if cy + cell_w < 0 or cy > h:
-                continue
-            data_row = (start_row + visible_row) % n_rows
-
-            for col in range(self._COLS):
-                idx = (data_row * self._COLS + col) % n
-                s = self._streamers[idx]
-                cx = col * cell_w
-                purl = getattr(s, "profile_url", "")
-                if s.online:
-                    online.append((cx, cy, _avatar_cache.get_sq(
-                        s.twitch_login, s.display, cell_w, self.update, purl
-                    )))
-                else:
-                    offline.append((cx, cy, _avatar_cache.get_gray_sq(
-                        s.twitch_login, s.display, cell_w, self.update, purl
-                    )))
+        online, offline = self._cellules_visibles(
+            rows_needed, start_row, n_rows, n, cell_w, cell_h, row_frac, h)
 
         painter.setOpacity(1.0)
         for cx, cy, px in online:
@@ -861,6 +955,8 @@ class _BgAvatarsWidget(QWidget):
         painter.drawRect(0, 0, w, 80)
 
         painter.end()
+        if _PERF:
+            _CAD_MOSAIQUE.peinture((time.perf_counter() - _t0) * 1000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -966,7 +1062,7 @@ class _OdometerWidget(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(0)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
-        self.setStyleSheet("background: transparent;")
+        self.setStyleSheet(_FOND_TRANSPARENT)
 
     def set_text(self, text: str, animate: bool = True) -> None:
         if text == self._current_text:
@@ -1022,7 +1118,7 @@ class _CagnotteCard(QFrame):
 
         section = QLabel("CAGNOTTE TOTALE")
         section.setFont(QFont("Consolas", 10))
-        section.setStyleSheet("color: #00ff87; background: transparent; border: none;")
+        section.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
         vl.addWidget(section)
 
         _odo_font = QFont("Consolas", 44, QFont.Weight.Bold)
@@ -1045,8 +1141,8 @@ class _CagnotteCard(QFrame):
         vl.addWidget(sep)
 
         self._viewers_lbl = QLabel("—")
-        self._viewers_lbl.setFont(QFont("Segoe UI", 14))
-        self._viewers_lbl.setStyleSheet("color: #00ff87; background: transparent; border: none;")
+        self._viewers_lbl.setFont(QFont(_POLICE_UI, 14))
+        self._viewers_lbl.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
         vl.addWidget(self._viewers_lbl)
 
         self.adjustSize()
@@ -1120,11 +1216,11 @@ class _GoalsCard(QFrame):
 
         section = QLabel("OBJECTIFS PROCHES")
         section.setFont(QFont("Consolas", 10))
-        section.setStyleSheet("color: #00ff87; background: transparent; border: none;")
+        section.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
         self._vl.addWidget(section)
 
         self._content_w = QWidget()
-        self._content_w.setStyleSheet("background: transparent;")
+        self._content_w.setStyleSheet(_FOND_TRANSPARENT)
         self._content_vl = QVBoxLayout(self._content_w)
         self._content_vl.setContentsMargins(0, 8, 0, 0)
         self._content_vl.setSpacing(0)
@@ -1154,7 +1250,7 @@ class _GoalsCard(QFrame):
 class _GoalRow(QWidget):
     def __init__(self, g: "GoalWithStreamer", parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background: transparent;")
+        self.setStyleSheet(_FOND_TRANSPARENT)
         vl = QVBoxLayout(self)
         vl.setContentsMargins(0, 10, 0, 6)
         vl.setSpacing(6)
@@ -1191,13 +1287,13 @@ class _GoalRow(QWidget):
 
         streamer_lbl = QLabel(g.streamer_display)
         streamer_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        streamer_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        streamer_lbl.setFont(QFont(_POLICE_UI, 12, QFont.Weight.Bold))
         streamer_lbl.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         info.addWidget(streamer_lbl)
 
         goal_lbl = QLabel(g.goal_name)
         goal_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        goal_lbl.setFont(QFont("Segoe UI", 10))
+        goal_lbl.setFont(QFont(_POLICE_UI, 10))
         goal_lbl.setStyleSheet("color: #aaaaaa; background: transparent; border: none;")
         goal_lbl.setWordWrap(True)
         info.addWidget(goal_lbl)
@@ -1214,7 +1310,7 @@ class _GoalRow(QWidget):
         bar_row.addWidget(bar, stretch=1)
         pct_lbl = QLabel(f"{g.pct:.0f}%")
         pct_lbl.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        pct_lbl.setStyleSheet("color: #00ff87; background: transparent; border: none;")
+        pct_lbl.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
         pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bar_row.addWidget(pct_lbl)
         vl.addLayout(bar_row)

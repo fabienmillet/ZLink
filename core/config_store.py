@@ -85,8 +85,8 @@ def _write(config: dict) -> bool:
                            CONFIG_PATH, exc)
         os.replace(tmp, CONFIG_PATH)
         return True
-    except OSError as exc:
-        logger.error("Écriture de la configuration impossible — %s", exc)
+    except OSError:
+        logger.exception("Écriture de la configuration impossible")
         try:
             tmp.unlink(missing_ok=True)
         except (OSError, NameError):

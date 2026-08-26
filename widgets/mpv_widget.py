@@ -27,7 +27,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QOpenGLContext
 from PyQt6.QtWidgets import QApplication, QWidget
 
-from core.stream_manager import safe_quality
+from core.stream_manager import QUALITY_GRID, safe_quality
+from core.sous_processus import sans_fenetre
 
 # mpv n'implémente --wid que sur X11, win32 (HWND) et Android : sur macOS il
 # ouvrirait sa propre fenêtre. On y passe donc par l'API de rendu libmpv, où
@@ -153,6 +154,12 @@ _STREAMLINK = _find_streamlink()
 # Limite de concurrence globale pour streamlink (évite les timeouts quand la grille charge 20 streams d'un coup)
 _STREAMLINK_SEMAPHORE = threading.Semaphore(3)
 
+#: Qualité demandée par défaut pour une cellule de grille, et repli quand la
+#: valeur configurée est refusée. Empruntée à stream_manager plutôt que
+#: recopiée : deux échelles qui divergent, c'est une moitié des chaînes qui
+#: échoue sans qu'on sache laquelle des deux est en cause.
+QUALITE_GRILLE = QUALITY_GRID
+
 # Signal audio de HypeWatcher. Le filtre astats coûte ~2,9 % d'un cœur et
 # 12 threads PAR FLUX — soit +72 % d'un cœur et +300 threads sur une grille de
 # 25. Désactivé par défaut ; ZLINK_AUDIO_SIGNAL=1 le réactive.
@@ -272,6 +279,14 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
     # terminé côté Twitch. L'API met souvent plusieurs minutes à basculer le
     # streamer en « offline », la cellule restait donc noire entre-temps.
     playback_ended = pyqtSignal()
+    # La résolution streamlink a échoué : ni URL, ni lecture à attendre. Sans
+    # ce signal, l'appelant ne distinguait pas une résolution qui piétine d'une
+    # résolution morte, et la cellule tournait indéfiniment sur son anneau de
+    # chargement.
+    resolution_failed = pyqtSignal(str)      # twitch_login
+    # Une URL a été obtenue et remise à mpv : à partir d'ici, et seulement
+    # ici, il est légitime d'attendre une première image dans un délai borné.
+    playback_requested = pyqtSignal(str)     # twitch_login
     # Interne : libmpv signale une nouvelle frame depuis son thread de rendu ;
     # la connexion queued ramène le repaint sur le thread GUI.
     _frame_ready = pyqtSignal()
@@ -292,6 +307,31 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         if not _MPV_AVAILABLE:
             return
 
+        self._garantir_locale_c()
+
+        # État audio VOULU, indépendant du lecteur : il survit à un changement
+        # de flux, à une relance et à un changement de qualité.
+        self._want_volume: int = 100
+        self._want_muted: bool = grid_mode      # une cellule démarre muette
+
+        mpv_kwargs = self._options_de_base()
+        if not self._appliquer_options_affichage(mpv_kwargs, grid_mode):
+            return
+        self._appliquer_options_tampon(mpv_kwargs, grid_mode, clip_buffer_secs)
+
+        self._appliquer_options_journal(mpv_kwargs)
+
+        self._creer_lecteur(mpv_kwargs)
+
+        self._brancher_observateurs()
+
+    @staticmethod
+    def _garantir_locale_c() -> None:
+        """LC_NUMERIC=C, sans quoi mpv_create() part en segfault.
+
+        Normalement déjà réglé par main.py ; garanti ici pour les widgets
+        créés hors de ce chemin (tests, scripts).
+        """
         # libmpv exige LC_NUMERIC="C" : avec une locale à virgule décimale, mpv_create()
         # part en segfault. Normalement déjà réglé dans main.py, on le garantit ici pour
         # les widgets créés hors de ce chemin (tests, scripts).
@@ -302,11 +342,9 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             )
             locale.setlocale(locale.LC_NUMERIC, "C")
 
-        # État audio VOULU, indépendant du lecteur : il survit à un changement
-        # de flux, à une relance et à un changement de qualité.
-        self._want_volume: int = 100
-        self._want_muted: bool = grid_mode      # une cellule démarre muette
-
+    @staticmethod
+    def _options_de_base() -> dict:
+        """Options communes à tous les lecteurs, avant spécialisation."""
         mpv_kwargs: dict[str, object] = {
             "ytdl": False,
             "osc": False,
@@ -333,59 +371,91 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             "input_cursor": False,
             "really_quiet": True,
         }
+        return mpv_kwargs
+
+    def _appliquer_options_affichage(self, mpv_kwargs: dict,
+                                     grid_mode: bool) -> bool:
+        """Choix du backend d'affichage : rendu libmpv ou embarquement natif.
+
+        Renvoie False quand la plateforme ne permet aucun affichage sûr —
+        l'appelant laisse alors le widget inerte plutôt que de risquer un
+        BadWindow fatal.
+        """
         if _RENDER_API:
-            # Le contexte de rendu est créé dans initializeGL(), quand le
-            # contexte OpenGL de Qt est courant.
-            mpv_kwargs.update(vo="libmpv", hwdec="videotoolbox")
-            # Chaque repaint d'une surface OpenGL déclenche une passe de
-            # composition de la fenêtre : à 24 cellules et 30 fps par flux, le
-            # coût est en dizaines de passes par seconde. Les vignettes sont
-            # plafonnées, le plein écran garde la cadence native du flux.
-            self._min_frame_interval = _GRID_FRAME_INTERVAL if grid_mode else 0.0
-            self._frame_ready.connect(
-                self._on_frame_ready, Qt.ConnectionType.QueuedConnection,
+            self._appliquer_rendu_libmpv(mpv_kwargs, grid_mode)
+            return True
+        return self._appliquer_embarquement(mpv_kwargs, grid_mode)
+
+    def _appliquer_rendu_libmpv(self, mpv_kwargs: dict, grid_mode: bool) -> None:
+        """macOS : c'est nous qui dessinons les images dans le FBO du widget.
+
+        mpv n'implémente --wid que sur X11, win32 et Android ; ailleurs il
+        ouvrirait sa propre fenêtre.
+        """
+        # Le contexte de rendu est créé dans initializeGL(), quand le
+        # contexte OpenGL de Qt est courant.
+        mpv_kwargs.update(vo="libmpv", hwdec="videotoolbox")
+        # Chaque repaint d'une surface OpenGL déclenche une passe de
+        # composition de la fenêtre : à 24 cellules et 30 fps par flux, le
+        # coût est en dizaines de passes par seconde. Les vignettes sont
+        # plafonnées, le plein écran garde la cadence native du flux.
+        self._min_frame_interval = _GRID_FRAME_INTERVAL if grid_mode else 0.0
+        self._frame_ready.connect(
+            self._on_frame_ready, Qt.ConnectionType.QueuedConnection,
+        )
+        logger.debug("MpvWidget: backend rendu libmpv (grid=%s)", grid_mode)
+
+    def _appliquer_embarquement(self, mpv_kwargs: dict, grid_mode: bool) -> bool:
+        """X11 ou Windows : mpv dessine lui-même dans notre fenêtre native.
+
+        Renvoie False quand la plateforme Qt ne fournit pas de fenêtre X11
+        exploitable — le widget reste alors inerte.
+        """
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+        if grid_mode:
+            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        wid = int(self.winId())
+        logger.debug("MpvWidget: wid=%d grid=%s", wid, grid_mode)
+        if sys.platform.startswith("linux"):
+            _plat = QApplication.platformName() if QApplication.instance() else ""
+            if _plat and _plat != "xcb":
+                # Sur une plateforme sans fenêtre X11, winId() ne désigne
+                # rien de valide pour mpv — qui ouvre sa PROPRE connexion X
+                # et opère dessus. La moindre requête sur cet identifiant
+                # lève un BadWindow, fatal : le gestionnaire d'erreur Xlib
+                # par défaut termine le process. On rend donc le widget
+                # inerte plutôt que de prendre ce risque.
+                logger.error(
+                    "Plateforme Qt '%s' : mpv n'implémente --wid que sur X11. "
+                    "Lecture vidéo désactivée — relancer sous XWayland avec "
+                    "QT_QPA_PLATFORM=xcb.",
+                    _plat,
+                )
+                self._player = None
+                return False
+            # X11 : mpv gère --wid nativement (embed sans composition Qt).
+            # hwdec auto-safe couvre vaapi (AMD/Intel) et nvdec.
+            # gpu-context doit être EXPLICITE : en autodétection, mpv voit
+            # WAYLAND_DISPLAY dans l'environnement et choisit son backend
+            # Wayland même quand Qt tourne sous XWayland. Il ouvre alors sa
+            # propre fenêtre au lieu de se greffer sur le wid X11 — c'est la
+            # cause des flux qui s'affichent hors de l'application.
+            mpv_kwargs.update(
+                wid=str(wid), hwdec="auto-safe", gpu_api="auto", vo="gpu",
+                gpu_context="x11egl",
             )
-            logger.debug("MpvWidget: backend rendu libmpv (grid=%s)", grid_mode)
         else:
-            self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
-            self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
-            if grid_mode:
-                self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
-            wid = int(self.winId())
-            logger.debug("MpvWidget: wid=%d grid=%s", wid, grid_mode)
-            if sys.platform.startswith("linux"):
-                _plat = QApplication.platformName() if QApplication.instance() else ""
-                if _plat and _plat != "xcb":
-                    # Sur une plateforme sans fenêtre X11, winId() ne désigne
-                    # rien de valide pour mpv — qui ouvre sa PROPRE connexion X
-                    # et opère dessus. La moindre requête sur cet identifiant
-                    # lève un BadWindow, fatal : le gestionnaire d'erreur Xlib
-                    # par défaut termine le process. On rend donc le widget
-                    # inerte plutôt que de prendre ce risque.
-                    logger.error(
-                        "Plateforme Qt '%s' : mpv n'implémente --wid que sur X11. "
-                        "Lecture vidéo désactivée — relancer sous XWayland avec "
-                        "QT_QPA_PLATFORM=xcb.",
-                        _plat,
-                    )
-                    self._player = None
-                    return
-                # X11 : mpv gère --wid nativement (embed sans composition Qt).
-                # hwdec auto-safe couvre vaapi (AMD/Intel) et nvdec.
-                # gpu-context doit être EXPLICITE : en autodétection, mpv voit
-                # WAYLAND_DISPLAY dans l'environnement et choisit son backend
-                # Wayland même quand Qt tourne sous XWayland. Il ouvre alors sa
-                # propre fenêtre au lieu de se greffer sur le wid X11 — c'est la
-                # cause des flux qui s'affichent hors de l'application.
-                mpv_kwargs.update(
-                    wid=str(wid), hwdec="auto-safe", gpu_api="auto", vo="gpu",
-                    gpu_context="x11egl",
-                )
-            else:
-                # Windows : HWND + décodage D3D11 (plateforme cible).
-                mpv_kwargs.update(
-                    wid=str(wid), hwdec="d3d11va", gpu_api="d3d11", vo="gpu",
-                )
+            # Windows : HWND + décodage D3D11 (plateforme cible).
+            mpv_kwargs.update(
+                wid=str(wid), hwdec="d3d11va", gpu_api="d3d11", vo="gpu",
+            )
+        return True
+
+    @staticmethod
+    def _appliquer_options_tampon(mpv_kwargs: dict, grid_mode: bool,
+                                  clip_buffer_secs: int) -> None:
+        """Taille des tampons du démuxeur, très différente selon l'usage."""
         if grid_mode:
             mpv_kwargs.update(
                 mute=True,
@@ -425,6 +495,8 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                 demuxer_readahead_secs=_buf,
             )
 
+    def _appliquer_options_journal(self, mpv_kwargs: dict) -> None:
+        """Journal mpv optionnel, activé par ZLINK_MPV_LOG=1."""
         # Journal mpv optionnel : ZLINK_MPV_LOG=1 écrit les messages de chaque
         # player dans ~/.zlink/mpv.log. Sert à voir ce que faisait mpv juste
         # avant une erreur X « BadWindow », que le message X seul ne situe pas.
@@ -435,6 +507,8 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             mpv_kwargs["loglevel"] = "v"
             mpv_kwargs.pop("really_quiet", None)
 
+    def _creer_lecteur(self, mpv_kwargs: dict) -> None:
+        """Instancie MPV et reprend la main sur le gestionnaire d'erreur X."""
         try:
             self._player = _mpv_module.MPV(**mpv_kwargs)  # type: ignore[union-attr]
             _x11_guard.install()
@@ -447,32 +521,35 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                     "vo-configured", self._on_vo_configured)
             except Exception as exc:      # noqa: BLE001 — garde-fou d'agrément
                 logger.debug("MpvWidget: vo-configured non observable — %s", exc)
-        except Exception as exc:
-            logger.error("MpvWidget: impossible d'initialiser MPV — %s", exc)
+        except Exception:
+            logger.exception("MpvWidget: impossible d'initialiser MPV")
             self._player = None
 
-        if self._player is not None:
-            def _on_time_pos(name: str, value: object) -> None:  # noqa: ANN001
-                if value is not None and float(value) > 0 and not self._time_pos_started:
-                    self._time_pos_started = True
-                    self.playback_started.emit()
-                    # mpv émet cette propriété à CHAQUE image : sur 25 cellules
-                    # cela faisait ~7 500 appels Python par seconde, et autant
-                    # de prises du GIL en concurrence avec le thread graphique,
-                    # alors qu'on ne cherche que la première image. On se
-                    # désabonne ; play_stream se réabonne au flux suivant.
-                    self._unobserve_time_pos()
-            self._time_pos_cb = _on_time_pos
-            self._player.observe_property("time-pos", _on_time_pos)
+    def _brancher_observateurs(self) -> None:
+        """Suivi de time-pos et idle-active : début et fin de lecture réelle."""
+        if self._player is None:
+            return
+        def _on_time_pos(name: str, value: object) -> None:  # noqa: ANN001
+            if value is not None and float(value) > 0 and not self._time_pos_started:
+                self._time_pos_started = True
+                self.playback_started.emit()
+                # mpv émet cette propriété à CHAQUE image : sur 25 cellules
+                # cela faisait ~7 500 appels Python par seconde, et autant
+                # de prises du GIL en concurrence avec le thread graphique,
+                # alors qu'on ne cherche que la première image. On se
+                # désabonne ; play_stream se réabonne au flux suivant.
+                self._unobserve_time_pos()
+        self._time_pos_cb = _on_time_pos
+        self._player.observe_property("time-pos", _on_time_pos)
 
-            def _on_idle(name: str, value: object) -> None:  # noqa: ANN001
-                # Ne signaler que la fin d'une lecture RÉELLE : mpv est aussi au
-                # repos avant le premier play, et on ne veut pas vider une
-                # cellule qui n'a jamais commencé.
-                if value and self._time_pos_started:
-                    self._time_pos_started = False
-                    self.playback_ended.emit()
-            self._player.observe_property("idle-active", _on_idle)
+        def _on_idle(name: str, value: object) -> None:  # noqa: ANN001
+            # Ne signaler que la fin d'une lecture RÉELLE : mpv est aussi au
+            # repos avant le premier play, et on ne veut pas vider une
+            # cellule qui n'a jamais commencé.
+            if value and self._time_pos_started:
+                self._time_pos_started = False
+                self.playback_ended.emit()
+        self._player.observe_property("idle-active", _on_idle)
 
     # -- backend rendu (macOS) ------------------------------------------------
 
@@ -510,8 +587,8 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                 },
             )
             self._render_ctx.update_cb = self._frame_ready.emit  # type: ignore[attr-defined]
-        except Exception as exc:
-            logger.error("MpvWidget: contexte de rendu indisponible — %s", exc)
+        except Exception:
+            logger.exception("MpvWidget: contexte de rendu indisponible")
             self._render_ctx = None
 
     def paintGL(self) -> None:  # type: ignore[override]
@@ -528,8 +605,8 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                     "fbo": self.defaultFramebufferObject(),
                 },
             )
-        except Exception as exc:
-            logger.error("MpvWidget.paintGL: %s", exc)
+        except Exception:
+            logger.exception("MpvWidget.paintGL")
 
     # -- public API -----------------------------------------------------------
 
@@ -544,7 +621,8 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         self._player.play(url)
         self._reapply_audio()
 
-    def play_stream(self, twitch_login: str, quality: str = "360p30,160p30,worst") -> None:  # noqa: D401
+    def play_stream(self, twitch_login: str,
+                    quality: str = QUALITE_GRILLE) -> None:  # noqa: D401
         """Résout l'URL streamlink en arrière-plan puis lance la lecture.
 
         Prévu pour les cellules de grille. Non bloquant.
@@ -555,49 +633,89 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         self._observe_time_pos()
         if self._player is None:
             logger.warning("MpvWidget.play_stream: MPV non disponible")
+            self.resolution_failed.emit(twitch_login)
             return
 
         if not _STREAMLINK:
             logger.error("play_stream(%s): streamlink introuvable", twitch_login)
+            self.resolution_failed.emit(twitch_login)
             return
 
         stop_flag = threading.Event()
         self._stop_flag = stop_flag
-        player = self._player
+        threading.Thread(
+            target=self._resoudre_et_jouer,
+            args=(twitch_login, quality, stop_flag, self._player),
+            daemon=True,
+        ).start()
 
-        def _worker() -> None:
-            try:
-                with _STREAMLINK_SEMAPHORE:
-                    if stop_flag.is_set():
-                        return
-                    result = subprocess.run(
-                        [_STREAMLINK, f"twitch.tv/{twitch_login}",
-                         safe_quality(quality, "360p30,160p30,worst"),
-                         "--stream-url", "--twitch-disable-ads"],
-                        capture_output=True, text=True, timeout=25,
-                    )
-                if stop_flag.is_set():
-                    return
-                url = result.stdout.strip()
-                if result.returncode != 0 or not url:
-                    logger.error(
-                        "play_stream(%s): rc=%d — %s",
-                        twitch_login, result.returncode, result.stderr.strip()[:120],
-                    )
-                    return
-                if not stop_flag.is_set():
-                    self._time_pos_started = False
-                    player.play(url)
-                    self._reapply_audio()
-                    logger.info("MpvWidget: grille — lecture démarrée pour %s", twitch_login)
-            except FileNotFoundError:
-                logger.error("play_stream: streamlink introuvable (%s)", _STREAMLINK)
-            except subprocess.TimeoutExpired:
-                logger.error("play_stream(%s): timeout streamlink", twitch_login)
-            except Exception as exc:
-                logger.error("play_stream(%s): %s", twitch_login, exc)
+    def _resoudre_et_jouer(self, twitch_login: str, quality: str,
+                           stop_flag: threading.Event, player) -> None:
+        """Thread : résout l'URL puis lance la lecture sur `player`.
 
-        threading.Thread(target=_worker, daemon=True).start()
+        Le lecteur est passé en argument plutôt que relu sur self : la cellule
+        peut être démontée pendant la résolution, et on jouerait alors sur un
+        lecteur déjà remplacé.
+        """
+        try:
+            url = self._url_streamlink(twitch_login, quality, stop_flag)
+            if stop_flag.is_set():
+                return          # cellule réaffectée : ni échec ni lecture
+            if url is None:
+                self.resolution_failed.emit(twitch_login)
+                return
+            self._time_pos_started = False
+            player.play(url)
+            self._reapply_audio()
+            self.playback_requested.emit(twitch_login)
+            logger.info("MpvWidget: grille — lecture démarrée pour %s", twitch_login)
+        except FileNotFoundError:
+            logger.error("play_stream: streamlink introuvable (%s)", _STREAMLINK)
+            self.resolution_failed.emit(twitch_login)
+        except subprocess.TimeoutExpired:
+            logger.error("play_stream(%s): timeout streamlink", twitch_login)
+            self.resolution_failed.emit(twitch_login)
+        except Exception:
+            logger.exception("play_stream(%s)", twitch_login)
+            self.resolution_failed.emit(twitch_login)
+
+    @staticmethod
+    def _url_streamlink(twitch_login: str, quality: str,
+                        stop_flag: threading.Event) -> str | None:
+        """URL du flux résolue par streamlink, ou None si annulé ou en échec.
+
+        Le drapeau d'annulation est relu avant ET après l'appel : la résolution
+        peut durer plusieurs secondes, et une cellule qui change de chaîne
+        entre-temps ne doit pas voir l'ancien flux démarrer.
+        """
+        with _STREAMLINK_SEMAPHORE:
+            if stop_flag.is_set():
+                return None
+            result = subprocess.run(
+                [_STREAMLINK, f"twitch.tv/{twitch_login}",
+                 safe_quality(quality, QUALITE_GRILLE),
+                 "--stream-url", "--twitch-disable-ads"],
+                capture_output=True, text=True, timeout=25,
+                **sans_fenetre(),
+            )
+        if stop_flag.is_set():
+            return None
+        url = result.stdout.strip()
+        if result.returncode != 0 or not url:
+            # Le code de retour seul ne dit rien quand streamlink sort en
+            # silence : on joint la QUALITÉ demandée — une qualité absente de
+            # la chaîne est le motif d'échec le plus courant — et les deux
+            # flux, stdout compris, puisque l'erreur y atterrit parfois.
+            logger.error(
+                "play_stream(%s): rc=%d qualite=%r"
+                " | stderr: %s | stdout: %s",
+                twitch_login, result.returncode,
+                safe_quality(quality, QUALITE_GRILLE),
+                (result.stderr or "").strip()[:300] or "(vide)",
+                (result.stdout or "").strip()[:200] or "(vide)",
+            )
+            return None
+        return url
 
     def _unobserve_time_pos(self) -> None:
         """Retire l'observateur d'image, s'il est posé. Idempotent."""
@@ -696,15 +814,16 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                 return None
             start = max(0.0, float(pos) - secs)
             end   = float(pos)
-            clip_dir = pathlib.Path(directory) if directory else pathlib.Path.home() / "Videos" / "ZLink"
+            from core.paths import CLIPS_DEFAUT
+            clip_dir = pathlib.Path(directory) if directory else CLIPS_DEFAUT
             clip_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             output = clip_dir / f"clip_{ts}.ts"
             self._player.command("dump-cache", start, end, str(output))
             logger.info("Clip sauvegardé : %s", output)
             return str(output)
-        except Exception as exc:
-            logger.error("save_clip: %s", exc)
+        except Exception:
+            logger.exception("save_clip")
             return None
 
     def set_clip_buffer(self, secs: int) -> None:
@@ -747,6 +866,21 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             return float(rms_str)
         except Exception:
             return None
+
+    def position(self) -> float | None:
+        """Position de lecture en secondes, ou None si indisponible.
+
+        Sur un MP4 fragmenté repris chez Twitch, cette valeur part de
+        l'horodatage ABSOLU du direct (des dizaines de milliers de secondes) :
+        elle ne vaut que comparée à elle-même, jamais rapportée à `duration`.
+        """
+        if self._player is None:
+            return None
+        try:
+            pos = self._player.time_pos
+        except Exception:      # noqa: BLE001 — lecture en cours de démontage
+            return None
+        return float(pos) if pos is not None else None
 
     @property
     def is_playing(self) -> bool:

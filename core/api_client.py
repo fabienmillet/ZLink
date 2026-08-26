@@ -174,7 +174,9 @@ def _to_local_time(dt_str: str) -> str:
 # Un login Twitch valide : 4-25 caractères alphanumériques ou "_". On accepte
 # dès 1 caractère par tolérance, mais rien d'autre : ces logins servent de nom
 # de fichier (cache avatars), de canal IRC et d'argument de sous-processus.
-_LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{1,25}$")
+# re.ASCII est OBLIGATOIRE : sans lui, \w accepterait les lettres Unicode
+# et cette validation de login laisserait passer bien plus que prévu.
+_LOGIN_RE = re.compile(r"^\w{1,25}$", re.ASCII)
 
 # Hôtes autorisés pour les liens de don : la page est ouverte dans le navigateur
 # embarqué, sans barre d'adresse — un lien détourné serait indétectable.
@@ -267,7 +269,13 @@ def _to_unix_ts(dt_str: str) -> float:
 def _parse_global_stats(data: dict[str, Any]) -> GlobalStats:
     don_block = data.get("donationAmount") or {}
     vc_block = data.get("viewersCount") or {}
-    viewers = int(vc_block.get("number") if isinstance(vc_block, dict) else vc_block or 0)
+    # Les parentheses comptent : le `or 0` ne couvrait que la branche
+    # « compteur nu ». Un viewersCount absent, vide, nul, ou {"number": null}
+    # donnait int(None) -> TypeError, et fetch_zevent_data retombait alors
+    # sur des valeurs neutres COMPLETES : toute la liste des streamers etait
+    # perdue. Zero spectateur est pourtant normal avant le debut de l'event.
+    brut = vc_block.get("number") if isinstance(vc_block, dict) else vc_block
+    viewers = int(brut or 0)
     return GlobalStats(
         donation_total=float(don_block.get("number") or 0.0),
         donation_formatted=str(don_block.get("formatted") or "0 €"),
@@ -300,8 +308,8 @@ async def fetch_zevent_data() -> tuple[GlobalStats, list[StreamerInfo]]:
         r = await _client().get(ZEVENT_URL)
         r.raise_for_status()
         data = r.json()
-    except Exception as exc:
-        logger.error("fetch_zevent_data: %s", exc)
+    except Exception:
+        logger.exception("fetch_zevent_data")
         return GlobalStats(0.0, "0 €", 0, "offline"), []
 
     try:
@@ -314,8 +322,8 @@ async def fetch_zevent_data() -> tuple[GlobalStats, list[StreamerInfo]]:
                 len(parsed) - len(streamers),
             )
         return stats, streamers
-    except Exception as exc:
-        logger.error("fetch_zevent_data (parse): %s", exc)
+    except Exception:
+        logger.exception("fetch_zevent_data (parse)")
         return GlobalStats(0.0, "0 €", 0, "offline"), []
 
 
@@ -323,18 +331,33 @@ async def fetch_zevent_data() -> tuple[GlobalStats, list[StreamerInfo]]:
 # API 2 — participations à l'édition (remplace l'ancien /streamers)
 # ---------------------------------------------------------------------------
 
+def _etat_twitch(first: dict[str, Any]) -> dict[str, Any]:
+    """Premier streaming_state de plateforme twitch, ou {} s'il n'y en a pas."""
+    return next(
+        (st for st in (first.get("streaming_states") or [])
+         if st.get("platform") == "twitch"),
+        {},
+    )
+
+
+def _jeu_affiche(state: dict[str, Any], live: bool) -> str:
+    """Jeu en cours, vide hors direct.
+
+    L'API renvoie parfois « offline » comme jeu : l'afficher tel quel donnait
+    des cartes annonçant « offline » en guise de catégorie.
+    """
+    game = str(state.get("game") or "")
+    return game if live and game.lower() != "offline" else ""
+
+
 def _parse_participation(p: dict[str, Any]) -> Participation:
     """Parse une entrée de /events/{event_id}/participations."""
     streamers = p.get("streamers") or []
     first: dict[str, Any] = streamers[0] if streamers else {}
     twitch = (first.get("socials") or {}).get("twitch") or {}
-    state: dict[str, Any] = next(
-        (st for st in (first.get("streaming_states") or []) if st.get("platform") == "twitch"),
-        {},
-    )
+    state = _etat_twitch(first)
     raw_loc = str(p.get("location") or "").lower().strip()
     live = bool(p.get("live") or state.get("live") or False)
-    game = str(state.get("game") or "")
     return Participation(
         streamer_id=str(p.get("id") or first.get("id") or "").strip(),
         participation_id=str(p.get("participation_id") or "").strip(),
@@ -342,7 +365,7 @@ def _parse_participation(p: dict[str, Any]) -> Participation:
         display=str(p.get("name") or first.get("name") or ""),
         location=_location_label(raw_loc),
         live=live,
-        game=game if live and game.lower() != "offline" else "",
+        game=_jeu_affiche(state, live),
         viewers=int(state.get("viewers") or 0) if live else 0,
         donation=_euros(p.get("amount_raised")),
         profile_url=_safe_https_url(p.get("profile_url") or first.get("profile_url")),
@@ -359,8 +382,8 @@ async def fetch_participations() -> list[Participation]:
         r = await _client().get(f"{GDOC_URL}/events/{GDOC_EVENT_ID}/participations")
         r.raise_for_status()
         data = r.json()
-    except Exception as exc:
-        logger.error("fetch_participations: %s", exc)
+    except Exception:
+        logger.exception("fetch_participations")
         return []
 
     result: list[Participation] = []
@@ -369,8 +392,8 @@ async def fetch_participations() -> list[Participation]:
             parsed = _parse_participation(entry)
             if parsed.twitch_login and parsed.streamer_id:
                 result.append(parsed)
-    except Exception as exc:
-        logger.error("fetch_participations (parse): %s", exc)
+    except Exception:
+        logger.exception("fetch_participations (parse)")
 
     return result
 
@@ -400,35 +423,62 @@ def _parse_participants(
     avatars: dict[str, str] = {}
 
     if isinstance(parts_raw, dict):
+        # Format historique : deux listes d'UUID, sans détail par personne.
         host_ids = [str(h) for h in (parts_raw.get("host") or [])]
         participant_ids = [str(p) for p in (parts_raw.get("participant") or [])]
     elif isinstance(parts_raw, list):
         for entry in parts_raw:
-            if not isinstance(entry, dict):
-                participant_ids.append(str(entry))
-                continue
-            sid = str(entry.get("streamer_id") or entry.get("id") or "").strip()
-            if not sid:
-                continue
-            name = str(entry.get("streamer_name") or entry.get("name") or "")
-            if name:
-                names[sid] = name
-            socials = entry.get("socials")
-            twitch = socials.get("twitch") if isinstance(socials, dict) else None
-            if isinstance(twitch, dict):
-                # _safe_login : ce login sert de nom de fichier pour le cache avatars.
-                login = _safe_login(twitch.get("login"))
-                if login:
-                    logins[sid] = login
-            avatar = _safe_https_url(entry.get("profile_url"))
-            if avatar:
-                avatars[sid] = avatar
-            if str(entry.get("role") or "").lower() == "host":
-                host_ids.append(sid)
-            else:
-                participant_ids.append(sid)
+            _classer_entree(entry, host_ids, participant_ids,
+                            names, logins, avatars)
 
     return host_ids, participant_ids, names, logins, avatars
+
+
+def _classer_entree(entry: Any, host_ids: list[str], participant_ids: list[str],
+                    names: dict[str, str], logins: dict[str, str],
+                    avatars: dict[str, str]) -> None:
+    """Range une entrée en hôte ou participant, et note ce qu'elle apporte.
+
+    Une entrée qui n'est pas un dict est un UUID nu du format historique :
+    on ne sait rien d'elle sinon qu'elle participe.
+    """
+    if not isinstance(entry, dict):
+        participant_ids.append(str(entry))
+        return
+    sid = _noter_participant(entry, names, logins, avatars)
+    if not sid:
+        return
+    if str(entry.get("role") or "").lower() == "host":
+        host_ids.append(sid)
+    else:
+        participant_ids.append(sid)
+
+
+def _noter_participant(entry: dict[str, Any], names: dict[str, str],
+                       logins: dict[str, str],
+                       avatars: dict[str, str]) -> str:
+    """Enregistre nom, login Twitch et avatar. Renvoie l'id, ou "" si absent.
+
+    Sans identifiant, rien ne peut être rattaché à la personne : l'entrée est
+    alors rejetée plutôt que rangée sous une clé vide.
+    """
+    sid = str(entry.get("streamer_id") or entry.get("id") or "").strip()
+    if not sid:
+        return ""
+    name = str(entry.get("streamer_name") or entry.get("name") or "")
+    if name:
+        names[sid] = name
+    socials = entry.get("socials")
+    twitch = socials.get("twitch") if isinstance(socials, dict) else None
+    if isinstance(twitch, dict):
+        # _safe_login : ce login sert de nom de fichier pour le cache avatars.
+        login = _safe_login(twitch.get("login"))
+        if login:
+            logins[sid] = login
+    avatar = _safe_https_url(entry.get("profile_url"))
+    if avatar:
+        avatars[sid] = avatar
+    return sid
 
 
 async def fetch_events(day: str) -> list[EventItem]:
@@ -439,8 +489,8 @@ async def fetch_events(day: str) -> list[EventItem]:
         )
         r.raise_for_status()
         data = r.json()
-    except Exception as exc:
-        logger.error("fetch_events(%s): %s", day, exc)
+    except Exception:
+        logger.exception("fetch_events(%s)", day)
         return []
 
     events: list[EventItem] = []
@@ -468,8 +518,8 @@ async def fetch_events(day: str) -> list[EventItem]:
                 logins=ev_logins,
                 profile_urls=ev_avatars,
             ))
-    except Exception as exc:
-        logger.error("fetch_events(%s) (parse): %s", day, exc)
+    except Exception:
+        logger.exception("fetch_events(%s) (parse)", day)
 
     return events
 
@@ -491,8 +541,8 @@ async def fetch_donation_goals(participation_id: str) -> list[DonationGoal]:
             f"{GDOC_URL}/participations/{participation_id}/donation_goals")
         r.raise_for_status()
         data = r.json()
-    except Exception as exc:
-        logger.error("fetch_donation_goals(%s): %s", participation_id, exc)
+    except Exception:
+        logger.exception("fetch_donation_goals(%s)", participation_id)
         return []
 
     goals: list[DonationGoal] = []
@@ -510,7 +560,7 @@ async def fetch_donation_goals(participation_id: str) -> list[DonationGoal]:
                 ),
                 links=[str(lk) for lk in (g.get("links") or [])],
             ))
-    except Exception as exc:
-        logger.error("fetch_donation_goals(%s) (parse): %s", participation_id, exc)
+    except Exception:
+        logger.exception("fetch_donation_goals(%s) (parse)", participation_id)
 
     return goals

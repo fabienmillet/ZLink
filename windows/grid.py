@@ -10,7 +10,7 @@ import logging
 import time
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QCursor, QFont, QScreen
+from PyQt6.QtGui import QCursor, QFont, QKeySequence, QScreen, QShortcut
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
@@ -19,6 +19,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.win_fullscreen import mark_fullscreen
+from widgets.command_palette import CommandPalette
 from widgets.grid_widget import GridWidget
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,11 @@ class GridWindow(QMainWindow):
     """Wrapper fullscreen autour de GridWidget (triple: écran dédié, dual: même écran que panel)."""
 
     stream_selected = pyqtSignal(str)   # proxy du signal GridWidget
+    #: Ctrl+Entrée dans la palette : ajouter la chaîne à la grille.
+    grid_add_requested = pyqtSignal(str)
+    #: Action choisie dans la palette (clip, replay, récap) — main.py la relaie
+    #: au plein écran, seul à savoir l'exécuter.
+    action_requested = pyqtSignal(str)
     back_to_panel   = pyqtSignal()      # Echap ou bouton "← Panel"
     hype_alert      = pyqtSignal(str, str, float, str, str)  # login, label, score, color, extrait
     #: (source, cible, spectateurs) — un raid vient d'arriver sur une cellule.
@@ -52,6 +59,12 @@ class GridWindow(QMainWindow):
         self._show_back_button = show_back_button
         self.setWindowTitle("ZLink — Grid")
         self.setStyleSheet(GRID_WINDOW_STYLE)
+
+        # Même drapeau que FullscreenWindow : sans lui, Windows 11 conserve une
+        # bordure DWM d'1 px même en plein écran, et le fond d'écran transparaît
+        # sur les quatre bords. À poser AVANT le premier show() — changer les
+        # drapeaux ensuite recréerait le handle natif.
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
 
         self._build()
         if show_on_init:
@@ -87,8 +100,24 @@ class GridWindow(QMainWindow):
         self.grid.stream_selected.connect(self.stream_selected)
         vl.addWidget(self.grid, stretch=1)
 
+        # Palette de commandes (Ctrl+K) : même geste que dans le panel, pour
+        # atteindre une chaîne sans quitter la grille des yeux.
+        self._palette = CommandPalette(container, [])
+        self._palette.stream_requested.connect(self.stream_selected)
+        self._palette.grid_requested.connect(self.grid_add_requested)
+        self._palette.action_requested.connect(self.action_requested)
+        # Voir windows/fullscreen.py : les cellules embarquent des fenêtres
+        # natives, un raccourci de portée fenêtre passe outre le focus.
+        raccourci = QShortcut(QKeySequence("Ctrl+K"), self)
+        raccourci.setContext(Qt.ShortcutContext.WindowShortcut)
+        raccourci.activated.connect(self._palette.open)
+
         self.setCentralWidget(container)
         self._start_hype_watcher()
+
+    def set_streamers(self, streamers: list) -> None:
+        """Alimente la palette de commandes."""
+        self._palette.set_streamers(streamers)
 
     def _move_to_screen(self, screen: QScreen) -> None:
         g = screen.geometry()
@@ -98,11 +127,15 @@ class GridWindow(QMainWindow):
         if handle is not None:
             handle.setScreen(screen)
         self.showFullScreen()
+        mark_fullscreen(self)
         logger.info("Grid ouverte sur %s (%dx%d)", screen.name(), g.width(), g.height())
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = event.key()
         if key == Qt.Key.Key_Escape:
+            if self._palette.isVisible():
+                self._palette.hide()
+                return
             self.back_to_panel.emit()
         elif Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             # 1-9 ouvrent la cellule correspondante en plein écran.

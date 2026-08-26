@@ -79,7 +79,10 @@ def fetch_latest() -> dict | None:
         if len(raw) > _MAX_BYTES:
             logger.warning("Réponse GitHub anormalement volumineuse, ignorée")
             return None
-        return json.loads(raw.decode("utf-8"))
+        data = json.loads(raw.decode("utf-8"))
+        # L'appelant fait data.get() : une racine JSON qui n'est pas un objet
+        # y leverait AttributeError, dans le fil de verification.
+        return data if isinstance(data, dict) else None
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             logger.debug("Aucune release publiée pour le moment")

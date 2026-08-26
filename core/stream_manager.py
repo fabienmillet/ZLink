@@ -15,31 +15,81 @@ import shutil
 import subprocess
 import sys
 import threading
+
+from core.sous_processus import sans_fenetre
 from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
 
+def echelle(*paliers: str) -> str:
+    """Sélecteur streamlink tolérant aux DEUX graphies de Twitch.
+
+    Twitch nomme ses rendus tantôt « 360p », tantôt « 360p30 », selon la chaîne
+    et son transcodage. Relevé sur des chaînes de l'event :
+
+        Available streams: audio_only, 160p (worst), 360p, 480p, 720p60, 1080p60
+
+    …alors que d'autres n'exposent que la graphie suffixée. streamlink exige
+    une correspondance EXACTE et échoue — code 1, message sur stdout — si AUCUN
+    nom de la liste n'existe. N'en demander qu'une graphie condamnait donc une
+    partie des chaînes, au hasard de leur transcodage.
+
+    On liste les deux, et on termine TOUJOURS par « worst », qui existe partout :
+    une échelle sans repli garanti transforme un palier absent en cellule noire.
+
+    >>> echelle("480p", "360p")
+    '480p,480p30,360p,360p30,worst'
+    >>> echelle("720p60", "480p")
+    '720p60,720p,720p30,480p,480p30,worst'
+    """
+    noms: list[str] = []
+    for palier in paliers:
+        for variante in _graphies(palier):
+            if variante not in noms:
+                noms.append(variante)
+    if "worst" not in noms:
+        noms.append("worst")
+    return ",".join(noms)
+
+
+def _graphies(palier: str) -> list[str]:
+    """Toutes les façons dont Twitch peut nommer ce palier.
+
+    « 720p60 » désigne une cadence explicite : la chaîne peut aussi ne proposer
+    que « 720p » ou « 720p30 ». « best » et « worst » ne se déclinent pas.
+    """
+    if palier in ("best", "worst", "audio_only"):
+        return [palier]
+    m = re.match(r"^(\d+p)(\d+)?$", palier)
+    if not m:
+        return [palier]
+    hauteur, cadence = m.group(1), m.group(2)
+    if cadence == "60":
+        # Une chaîne sans 60 fps expose le même palier en 30, ou sans suffixe.
+        return [f"{hauteur}60", hauteur, f"{hauteur}30"]
+    return [hauteur, f"{hauteur}30"]
+
+
+_QUALITE_720 = "720p60,720p,720p30,480p,480p30,360p,360p30,worst"
+
+
 # Qualités streamlink
 QUALITY_FULLSCREEN = "best"
-# Twitch nomme ses rendus 160p30 / 360p30 / 480p30 / 720p60 / 1080p60 et
-# streamlink exige une correspondance EXACTE : « 360p », « 480p » et « 720p »
-# n'existent pas et retombaient silencieusement sur « worst », c'est-à-dire
-# 284x160. Les deux derniers paliers donnaient donc la même image.
 # Durée pendant laquelle un nouveau palier doit se confirmer avant qu'on
 # relance la grille.
 _QUALITY_DEBOUNCE_S = 45.0
 
-QUALITY_GRID = "360p30,160p30,worst"
+QUALITY_GRID = "360p,360p30,160p,160p30,worst"
 
 # Qualité adaptative : chaque palier est (nombre max de flux, qualité). Le premier
 # palier dont le seuil couvre le nombre de flux actifs gagne ; au-delà du dernier,
 # on retombe sur QUALITY_GRID. Budget visé : ~50 Mbps et VCN < 50 %.
 _DEFAULT_ADAPTIVE_TIERS: list[tuple[int, str]] = [
-    (1, "1080p60,best"),
-    (4, "720p60,480p30,360p30"),
-    (9, "480p30,360p30,160p30"),
+    (1, "1080p60,1080p,best"),
+    (4, _QUALITE_720),
+    (9, "480p,480p30,360p,360p30,160p,160p30,worst"),
 ]
 
 
@@ -99,18 +149,32 @@ logger.info("streamlink exe: %s", _STREAMLINK)
 # Une qualité streamlink : tokens alphanumériques séparés par des virgules
 # ("best", "360p,worst"). Tout ce qui commence par "-" serait interprété comme
 # une option par streamlink (--plugin-dirs exécute du Python arbitraire).
-_QUALITY_RE = re.compile(r"^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$")
+# re.ASCII est OBLIGATOIRE : sans lui, \w accepterait les lettres Unicode
+# et cette validation s'élargirait silencieusement.
+_QUALITY_RE = re.compile(r"^\w+(,\w+)*$", re.ASCII)
 
 
 # Anciens sélecteurs, écrits avant qu'on découvre que Twitch nomme ses rendus
 # « 360p30 » et non « 360p » : ils retombaient tous sur « worst », soit 284x160.
 # Une config existante est donc migrée au chargement.
+_ECHELLE_480 = "480p,480p30,360p,360p30,160p,160p30,worst"
+
 _LEGACY_QUALITY = {
-    "360p,worst":            "360p30,160p30,worst",
-    "480p,360p,worst":       "480p30,360p30,160p30",
-    "720p,480p,worst":       "720p60,480p30,360p30",
-    "1080p60,1080p,best":    "1080p60,best",
-    "720p60,720p,480p":      "720p60,480p30,360p30",
+    # Première génération : les graphies nues, avant qu'on croie qu'elles
+    # n'existaient pas.
+    "360p,worst":            QUALITY_GRID,
+    "480p,360p,worst":       _ECHELLE_480,
+    "720p,480p,worst":       _QUALITE_720,
+    "1080p60,1080p,best":    "1080p60,1080p,best",
+    "720p60,720p,480p":      _QUALITE_720,
+    # Deuxième génération : les graphies suffixées SEULES. Elles échouaient sur
+    # toute chaîne dont le transcodage n'expose que « 360p » — code 1, et la
+    # cellule restait noire.
+    "160p30,worst":          "160p,160p30,worst",
+    "360p30,160p30,worst":   QUALITY_GRID,
+    "480p30,360p30,160p30":  _ECHELLE_480,
+    "720p60,480p30,360p30":  _QUALITE_720,
+    "1080p60,best":          "1080p60,1080p,best",
 }
 
 
@@ -155,6 +219,7 @@ def _get_stream_url(
                 "--stream-url",
                 "--twitch-disable-ads",
             ],
+            **sans_fenetre(),
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -173,8 +238,8 @@ def _get_stream_url(
     except subprocess.TimeoutExpired:
         logger.error("streamlink(%s) timeout après %ds", twitch_login, timeout)
         return ""
-    except Exception as exc:
-        logger.error("streamlink(%s): %s", twitch_login, exc)
+    except Exception:
+        logger.exception("streamlink(%s)", twitch_login)
         return ""
 
 

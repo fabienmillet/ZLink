@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import threading
 import pathlib
 import time
@@ -34,11 +35,14 @@ from PyQt6.QtGui import (
     QDesktopServices,
     QFont,
     QFontMetrics,
+    QKeySequence,
     QMouseEvent,
     QPainter,
+    QPen,
     QPixmap,
     QRegion,
     QScreen,
+    QShortcut,
 )
 from PyQt6.QtWidgets import (
     QFrame,
@@ -87,6 +91,9 @@ from widgets.bigscreen_widget import load_avatar_into_label as _load_avatar_into
 from core.ad_watcher import AdWatcher
 from core.api_client import _DONATION_HOSTS, _safe_https_url
 from core.paths import CONFIG_PATH
+from core.win_foreground import ceder_premier_plan, remonter_navigateur
+from widgets.command_palette import CommandPalette
+from core.win_fullscreen import mark_fullscreen
 
 if TYPE_CHECKING:
     from core.api_client import StreamerInfo
@@ -115,12 +122,24 @@ def _save_settings(values: dict) -> None:
             json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
         )
         os.chmod(CONFIG_PATH, 0o600)
-    except Exception as exc:
-        logger.error("Sauvegarde de %s impossible : %s", CONFIG_PATH.name, exc)
+    except Exception:
+        logger.exception("Sauvegarde de %s impossible", CONFIG_PATH.name)
 
 # ---------------------------------------------------------------------------
 # Stylesheet
 # ---------------------------------------------------------------------------
+
+# Fragments de feuille de style et libellés répétés. Regroupés ici pour n'avoir
+# qu'un seul endroit à toucher quand la charte change.
+_FOND_TRANSPARENT = "background: transparent;"
+_FOND_TRANSPARENT_SANS_BORDURE = "background: transparent; border: none;"
+_TEXTE_GRIS = "color: #555555; background: transparent;"
+_TEXTE_VERT = "color: #00ff87; background: transparent;"
+_POLICE_UI = "Segoe UI"
+_POLICE_UI_VARIABLE = "Segoe UI Variable"
+_ICONE_VOLUME = "mdi6.volume-high"
+_LIBELLE_COUPER_SON = "Couper le son"
+
 
 FULLSCREEN_STYLE = """
 QMainWindow {
@@ -284,7 +303,7 @@ class RemoteItemLarge(QWidget):
         avatar_container = QWidget()
         avatar_container.setFixedSize(52, 52)
         avatar_container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        avatar_container.setStyleSheet("background: transparent;")
+        avatar_container.setStyleSheet(_FOND_TRANSPARENT)
 
         initials = display[:1] if display else self._login[:1]
         self._avatar = AvatarLabel(self._login, initials, 52, avatar_container)
@@ -298,7 +317,7 @@ class RemoteItemLarge(QWidget):
         # ── Infos ──────────────────────────────────────────────────────
         info_col = QWidget()
         info_col.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        info_col.setStyleSheet("background: transparent;")
+        info_col.setStyleSheet(_FOND_TRANSPARENT)
         col = QVBoxLayout(info_col)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(2)
@@ -307,20 +326,20 @@ class RemoteItemLarge(QWidget):
         # _build ne reçoit pas le login : il est porté par l'instance. Sans
         # cela, un streamer sans nom d'affichage levait un NameError.
         name_lbl = QLabel(display if display else self._login)
-        name_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        name_lbl.setFont(QFont(_POLICE_UI, 14, QFont.Weight.Bold))
         name_lbl.setStyleSheet(f"color: {name_color}; background: transparent;")
         col.addWidget(name_lbl)
         self._name_lbl = name_lbl
 
         game_lbl = QLabel(game if game else "—")
-        game_lbl.setFont(QFont("Segoe UI", 11))
+        game_lbl.setFont(QFont(_POLICE_UI, 11))
         game_lbl.setStyleSheet("color: #888888; background: transparent;")
         col.addWidget(game_lbl)
 
-        title_font = QFont("Segoe UI", 10)
+        title_font = QFont(_POLICE_UI, 10)
         title_lbl = QLabel()
         title_lbl.setFont(title_font)
-        title_lbl.setStyleSheet("color: #555555; background: transparent;")
+        title_lbl.setStyleSheet(_TEXTE_GRIS)
         title_lbl.setWordWrap(False)
         title_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
@@ -341,7 +360,7 @@ class RemoteItemLarge(QWidget):
         v_text = f"{_fmt_viewers(viewers)} viewers" if viewers > 0 else ""
         v_lbl = QLabel(v_text)
         v_lbl.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
-        v_lbl.setStyleSheet("color: #00ff87; background: transparent;")
+        v_lbl.setStyleSheet(_TEXTE_VERT)
         col.addWidget(v_lbl)
 
         outer.addWidget(info_col, stretch=1)
@@ -349,7 +368,7 @@ class RemoteItemLarge(QWidget):
         # ── Bouton Watch (caché par défaut) ────────────────────────────
         self._watch_btn = QPushButton("▶")
         self._watch_btn.setFixedSize(32, 32)
-        self._watch_btn.setFont(QFont("Segoe UI", 16))
+        self._watch_btn.setFont(QFont(_POLICE_UI, 16))
         self._watch_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -455,7 +474,7 @@ class RemoteItemSmall(QWidget):
         # Nom + viewers
         info_col = QWidget()
         info_col.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        info_col.setStyleSheet("background: transparent;")
+        info_col.setStyleSheet(_FOND_TRANSPARENT)
         col = QVBoxLayout(info_col)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(1)
@@ -464,35 +483,35 @@ class RemoteItemSmall(QWidget):
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
         name_lbl = QLabel(display if display else self._login)
-        name_lbl.setFont(QFont("Segoe UI", 12))
+        name_lbl.setFont(QFont(_POLICE_UI, 12))
         name_lbl.setStyleSheet("color: #aaaaaa; background: transparent;")
         row1.addWidget(name_lbl)
         v_text = _fmt_viewers(viewers)
         v_lbl = QLabel(v_text)
         v_lbl.setFont(QFont("Consolas", 11))
-        v_lbl.setStyleSheet("color: #00ff87; background: transparent;")
+        v_lbl.setStyleSheet(_TEXTE_VERT)
         row1.addWidget(v_lbl)
         row1.addStretch()
         col_widget1 = QWidget()
         col_widget1.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        col_widget1.setStyleSheet("background: transparent;")
+        col_widget1.setStyleSheet(_FOND_TRANSPARENT)
         col_widget1.setLayout(row1)
         col.addWidget(col_widget1)
 
         if game:
             # Largeur disponible : 320 - marges(24) - avatar(36) - spacing(10) - scrollbar(6)
             _avail_g = REMOTE_MENU_WIDTH - 76
-            _game_font = QFont("Segoe UI", 10)
+            _game_font = QFont(_POLICE_UI, 10)
             game_text = QFontMetrics(_game_font).elidedText(
                 game, Qt.TextElideMode.ElideRight, _avail_g
             )
         else:
-            _game_font = QFont("Segoe UI", 10)
+            _game_font = QFont(_POLICE_UI, 10)
             game_text = ""
         game_lbl = QLabel(game_text)
         game_lbl.setTextFormat(Qt.TextFormat.PlainText)
         game_lbl.setFont(_game_font)
-        game_lbl.setStyleSheet("color: #555555; background: transparent;")
+        game_lbl.setStyleSheet(_TEXTE_GRIS)
         if game:
             game_lbl.setToolTip(_infobulle(game))
         col.addWidget(game_lbl)
@@ -502,7 +521,7 @@ class RemoteItemSmall(QWidget):
         # Bouton Watch
         self._watch_btn = QPushButton("▶")
         self._watch_btn.setFixedSize(28, 28)
-        self._watch_btn.setFont(QFont("Segoe UI", 14))
+        self._watch_btn.setFont(QFont(_POLICE_UI, 14))
         self._watch_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
@@ -567,7 +586,7 @@ def _make_section_sep(text: str) -> QWidget:
     w = QWidget()
     w.setFixedHeight(24)
     w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-    w.setStyleSheet("background: transparent;")
+    w.setStyleSheet(_FOND_TRANSPARENT)
     layout = QHBoxLayout(w)
     layout.setContentsMargins(12, 0, 12, 0)
     layout.setSpacing(6)
@@ -666,8 +685,8 @@ class RemoteMenu(QWidget):
         hl.addStretch()
 
         self._count_lbl = QLabel("0 en live")
-        self._count_lbl.setFont(QFont("Segoe UI", 11))
-        self._count_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._count_lbl.setFont(QFont(_POLICE_UI, 11))
+        self._count_lbl.setStyleSheet(_TEXTE_GRIS)
         hl.addWidget(self._count_lbl)
 
         outer.addWidget(header)
@@ -691,7 +710,7 @@ class RemoteMenu(QWidget):
         """)
 
         self._container = QWidget()
-        self._container.setStyleSheet("background: transparent;")
+        self._container.setStyleSheet(_FOND_TRANSPARENT)
         self._container_layout = QVBoxLayout(self._container)
         self._container_layout.setContentsMargins(0, 4, 0, 8)
         self._container_layout.setSpacing(0)
@@ -773,18 +792,41 @@ class RemoteMenu(QWidget):
 
     # ── internals ─────────────────────────────────────────────────────
 
-    def _rebuild(self) -> None:
-        # Supprimer les anciens items
+    def _vider(self) -> None:
+        """Retire les items et tout le contenu du container, sauf le stretch."""
         for item in self._items:
             item.deleteLater()
         self._items.clear()
         self._login_list.clear()
-
-        # Vider le container (tout sauf le stretch final)
         while self._container_layout.count() > 1:
             child = self._container_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
+
+    def _inserer_section(self, idx: int, titre: str, streamers: list, fabrique) -> int:
+        """Insère un titre de section puis ses items, séparateurs compris.
+
+        Renvoie l'index d'insertion suivant. Une section vide ne pose ni titre
+        ni séparateur, et rend l'index inchangé.
+
+        `fabrique` construit l'item ET l'enregistre dans _items / _login_list :
+        c'est elle qui décide de la taille (grande ou petite ligne).
+        """
+        if not streamers:
+            return idx
+        self._container_layout.insertWidget(idx, _make_section_sep(titre))
+        idx += 1
+        dernier = len(streamers) - 1
+        for i, s in enumerate(streamers):
+            self._container_layout.insertWidget(idx, fabrique(s))
+            idx += 1
+            if i < dernier:
+                self._container_layout.insertWidget(idx, _make_item_sep())
+                idx += 1
+        return idx
+
+    def _rebuild(self) -> None:
+        self._vider()
 
         sel_set = set(self._last_selected)
         live = [s for s in self._last_streamers if s.online]
@@ -793,31 +835,10 @@ class RemoteMenu(QWidget):
 
         self._count_lbl.setText(f"{len(live)} en live")
 
-        idx = 0
-
-        # ── Section SÉLECTIONNÉS ──────────────────────────────────────
-        if selected_live:
-            self._container_layout.insertWidget(idx, _make_section_sep("SÉLECTIONNÉS"))
-            idx += 1
-            for i, s in enumerate(selected_live):
-                item = self._make_large_item(s)
-                self._container_layout.insertWidget(idx, item)
-                idx += 1
-                if i < len(selected_live) - 1:
-                    self._container_layout.insertWidget(idx, _make_item_sep())
-                    idx += 1
-
-        # ── Section AUTRES LIVE ───────────────────────────────────────
-        if other_live:
-            self._container_layout.insertWidget(idx, _make_section_sep("AUTRES LIVE"))
-            idx += 1
-            for i, s in enumerate(other_live):
-                item = self._make_small_item(s)
-                self._container_layout.insertWidget(idx, item)
-                idx += 1
-                if i < len(other_live) - 1:
-                    self._container_layout.insertWidget(idx, _make_item_sep())
-                    idx += 1
+        idx = self._inserer_section(0, "SÉLECTIONNÉS", selected_live,
+                                    self._make_large_item)
+        self._inserer_section(idx, "AUTRES LIVE", other_live,
+                              self._make_small_item)
 
         self._keyboard_idx = -1
 
@@ -1009,24 +1030,35 @@ class ChatPanel(QWidget):
     # ── drag resize ───────────────────────────────────────────────────
 
     def eventFilter(self, obj: object, event: object) -> bool:  # type: ignore[override]
-        if obj is self._handle:
-            ev = event  # type: ignore[assignment]
-            if ev.type() == QEvent.Type.MouseButtonPress:
-                if ev.button() == Qt.MouseButton.LeftButton:
-                    self._drag_start_x = ev.globalPosition().x()
-                    self._drag_start_width = self._width
-                    return True
-            elif ev.type() == QEvent.Type.MouseMove:
-                if ev.buttons() & Qt.MouseButton.LeftButton:
-                    delta = int(self._drag_start_x - ev.globalPosition().x())
-                    self._width = max(250, min(600, self._drag_start_width + delta))
-                    self._update_geometry()
-                    p = self.parent()
-                    fs = p.parent() if p is not None else None
-                    if fs is not None and hasattr(fs, "_update_mpv_geometry"):
-                        fs._update_mpv_geometry()  # type: ignore[union-attr]
-                    return True
+        if obj is not self._handle:
+            return super().eventFilter(obj, event)  # type: ignore[arg-type]
+        ev = event  # type: ignore[assignment]
+        if (ev.type() == QEvent.Type.MouseButtonPress
+                and ev.button() == Qt.MouseButton.LeftButton):
+            self._drag_start_x = ev.globalPosition().x()
+            self._drag_start_width = self._width
+            return True
+        if (ev.type() == QEvent.Type.MouseMove
+                and ev.buttons() & Qt.MouseButton.LeftButton):
+            self._redimensionner(ev.globalPosition().x())
+            return True
+        # Bouton autre que le gauche, ou survol sans glisser : l'événement
+        # continue son chemin, comme avant.
         return super().eventFilter(obj, event)  # type: ignore[arg-type]
+
+    def _redimensionner(self, x_souris: float) -> None:
+        """Nouvelle largeur du panneau pendant un glisser, bornée à 250-600 px.
+
+        Le plein écran doit recaler sa vidéo dans la foulée : sans ça, l'image
+        garde l'ancienne largeur jusqu'au prochain redimensionnement.
+        """
+        delta = int(self._drag_start_x - x_souris)
+        self._width = max(250, min(600, self._drag_start_width + delta))
+        self._update_geometry()
+        p = self.parent()
+        fs = p.parent() if p is not None else None
+        if fs is not None and hasattr(fs, "_update_mpv_geometry"):
+            fs._update_mpv_geometry()  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -1061,12 +1093,12 @@ class _AdBreakBanner(QWidget):
 
         # Icône + texte
         icon = QLabel("📺")
-        icon.setFont(QFont("Segoe UI", 14))
-        icon.setStyleSheet("background: transparent; border: none;")
+        icon.setFont(QFont(_POLICE_UI, 14))
+        icon.setStyleSheet(_FOND_TRANSPARENT_SANS_BORDURE)
         h.addWidget(icon)
 
         self._msg = QLabel(f"<b>{html.escape(login)}</b> — Publicité en cours — 0:00")
-        self._msg.setFont(QFont("Segoe UI Variable", 11))
+        self._msg.setFont(QFont(_POLICE_UI_VARIABLE, 11))
         self._msg.setStyleSheet("color: #cccccc; background: transparent; border: none;")
         h.addWidget(self._msg, stretch=1)
 
@@ -1196,11 +1228,11 @@ class _AdEndToast(QWidget):
         top = QHBoxLayout()
         top.setSpacing(8)
         dot = QLabel("●")
-        dot.setFont(QFont("Segoe UI", 9))
+        dot.setFont(QFont(_POLICE_UI, 9))
         dot.setStyleSheet("color: #00ff87; background: transparent; border: none;")
         top.addWidget(dot)
         title = QLabel(f"<b>{html.escape(login)}</b> — Pub terminée !")
-        title.setFont(QFont("Segoe UI Variable", 11))
+        title.setFont(QFont(_POLICE_UI_VARIABLE, 11))
         title.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         top.addWidget(title, stretch=1)
         vl.addLayout(top)
@@ -1250,7 +1282,15 @@ def ouvrir_page_de_don(url: str) -> bool:
     if not sur:
         logger.error("Don annulé : URL hors allowlist (%s)", str(url)[:60])
         return False
+    # Le verrou de premier plan réserve SetForegroundWindow au processus qui
+    # détient déjà le premier plan : sans cette cession, le navigateur ne peut
+    # que faire clignoter son bouton dans la barre des tâches.
+    ceder_premier_plan()
     QDesktopServices.openUrl(QUrl(sur))
+    # Deux tentatives : le délai entre le clic et l'apparition de l'onglet
+    # dépend de la machine et du navigateur.
+    for delai in (400, 1200):
+        QTimer.singleShot(delai, remonter_navigateur)
     return True
 
 
@@ -1287,7 +1327,7 @@ class _FavoriteLiveToast(QWidget):
         root.setSpacing(0)
 
         body = QWidget()
-        body.setStyleSheet("background: transparent;")
+        body.setStyleSheet(_FOND_TRANSPARENT)
         hl = QHBoxLayout(body)
         hl.setContentsMargins(10, 8, 12, 4)
         hl.setSpacing(10)
@@ -1306,16 +1346,16 @@ class _FavoriteLiveToast(QWidget):
         star.setFixedSize(12, 12)
         if _QTA_OK:
             star.setPixmap(qta.icon("mdi6.star", color="#f5c518").pixmap(12, 12))
-        star.setStyleSheet("background: transparent; border: none;")
+        star.setStyleSheet(_FOND_TRANSPARENT_SANS_BORDURE)
         top.addWidget(star)
         title = QLabel(display or login)
         title.setTextFormat(Qt.TextFormat.PlainText)
-        title.setFont(QFont("Segoe UI Variable", 11, QFont.Weight.Bold))
+        title.setFont(QFont(_POLICE_UI_VARIABLE, 11, QFont.Weight.Bold))
         title.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         top.addWidget(title, stretch=1)
         col.addLayout(top)
         self._sub = QLabel("vient de passer en direct")
-        self._sub.setFont(QFont("Segoe UI Variable", 9))
+        self._sub.setFont(QFont(_POLICE_UI_VARIABLE, 9))
         self._sub.setStyleSheet("color: #9a9a9a; background: transparent; border: none;")
         col.addWidget(self._sub)
         hl.addLayout(col, stretch=1)
@@ -1461,20 +1501,20 @@ class _FsHypeToast(QWidget):
 
         name_lbl = QLabel(login or "?")
         name_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        name_lbl.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
+        name_lbl.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
         name_lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
         name_lbl.setMaximumWidth(90)
         h.addWidget(name_lbl)
 
         sep = QLabel("·")
-        sep.setFont(QFont("Segoe UI Variable", 10))
+        sep.setFont(QFont(_POLICE_UI_VARIABLE, 10))
         sep.setStyleSheet("color: #555555; background: transparent; border: none;")
         h.addWidget(sep)
 
         lbl = QLabel(label)
         # Texte produit par le LLM à partir du chat : texte brut obligatoire.
         lbl.setTextFormat(Qt.TextFormat.PlainText)
-        lbl.setFont(QFont("Segoe UI Variable", 10))
+        lbl.setFont(QFont(_POLICE_UI_VARIABLE, 10))
         lbl.setStyleSheet("color: #cccccc; background: transparent; border: none;")
         h.addWidget(lbl, stretch=1)
 
@@ -1536,11 +1576,11 @@ class PinnedAudioOverlay(QWidget):
         icon = QLabel()
         icon.setFixedSize(12, 12)
         if _QTA_OK:
-            icon.setPixmap(qta.icon("mdi6.volume-high", color="#00ff87").pixmap(12, 12))
-        icon.setStyleSheet("background: transparent; border: none;")
+            icon.setPixmap(qta.icon(_ICONE_VOLUME, color="#00ff87").pixmap(12, 12))
+        icon.setStyleSheet(_FOND_TRANSPARENT_SANS_BORDURE)
         head.addWidget(icon)
         title = QLabel("AUDIO ÉPINGLÉ")
-        title.setFont(QFont("Segoe UI Variable", 7, QFont.Weight.Bold))
+        title.setFont(QFont(_POLICE_UI_VARIABLE, 7, QFont.Weight.Bold))
         title.setStyleSheet(
             "color: #00ff87; background: transparent; border: none; "
             "letter-spacing: 1px;"
@@ -1574,6 +1614,7 @@ class PinnedAudioOverlay(QWidget):
             if w is not None:
                 # setParent(None) avant deleteLater : le seul deleteLater laisse
                 # le widget se peindre jusqu'au retour à la boucle d'événements.
+                w.hide()   # avant de détacher : détaché et visible = une fenêtre
                 w.setParent(None)
                 w.deleteLater()
         self._elements.clear()
@@ -1621,7 +1662,7 @@ class PinnedAudioOverlay(QWidget):
                 " background: transparent; border: none;")
             if _QTA_OK:
                 icone.setPixmap(qta.icon(
-                    "mdi6.volume-off" if mute else "mdi6.volume-high",
+                    "mdi6.volume-off" if mute else _ICONE_VOLUME,
                     color="#ff4444" if mute else "#00ff87").pixmap(12, 12))
             icone.setVisible(True)
 
@@ -1634,7 +1675,7 @@ class PinnedAudioOverlay(QWidget):
     def _make_row(self, login: str) -> QWidget:
         row = QWidget()
         row.setFixedHeight(_PIN_ROW_H)
-        row.setStyleSheet("background: transparent;")
+        row.setStyleSheet(_FOND_TRANSPARENT)
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(8)
@@ -1645,15 +1686,15 @@ class PinnedAudioOverlay(QWidget):
 
         etat = QLabel()
         etat.setFixedSize(12, 12)
-        etat.setStyleSheet("background: transparent; border: none;")
+        etat.setStyleSheet(_FOND_TRANSPARENT_SANS_BORDURE)
         if _QTA_OK:
-            etat.setPixmap(qta.icon("mdi6.volume-high",
+            etat.setPixmap(qta.icon(_ICONE_VOLUME,
                                     color="#00ff87").pixmap(12, 12))
         h.addWidget(etat)
 
         name = QLabel(login)
         name.setTextFormat(Qt.TextFormat.PlainText)
-        name.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
+        name.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
         name.setStyleSheet("color: #e8e8e8; background: transparent; border: none;")
         fm = QFontMetrics(name.font())
         name.setText(fm.elidedText(login, Qt.TextElideMode.ElideRight, _PIN_OV_W - 60))
@@ -1671,13 +1712,138 @@ _REPLAY_PIP_W, _REPLAY_PIP_H, _REPLAY_MARGIN = 320, 180, 16
 _REPLAY_DUMP_TIMEOUT_S = 6.0
 
 
-class _ReplayBadge(QWidget):
-    """Bandeau « REPLAY » posé sur la vidéo rejouée."""
+class _PetitAnneau(QWidget):
+    """Anneau qui tourne, seize pixels. Rien d'autre.
+
+    Un texte figé « Reprise en cours » n'apprend rien : il est indiscernable
+    d'une application bloquée. Ce qui tourne dit que quelque chose avance.
+    """
+
+    _PAS = 12          # degrés par image
+    _TICK = 33         # ms — 30 images par seconde suffisent pour un anneau
+    _ARC = 100         # ouverture de l'arc, en degrés
+
+    def __init__(self, taille: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(taille, taille)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._angle = 0
+        self._minuterie = QTimer(self)
+        self._minuterie.setInterval(self._TICK)
+        self._minuterie.timeout.connect(self._tourner)
+        self._minuterie.start()
+
+    def _tourner(self) -> None:
+        self._angle = (self._angle + self._PAS) % 360
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        marge = 2
+        boite = self.rect().adjusted(marge, marge, -marge, -marge)
+        # Qt compte en seizièmes de degré, et dans le sens trigonométrique.
+        stylo = QPen(QColor(255, 107, 0, 60), 2)
+        p.setPen(stylo)
+        p.drawArc(boite, 0, 360 * 16)
+        stylo.setColor(QColor("#ff6b00"))
+        p.setPen(stylo)
+        p.drawArc(boite, -self._angle * 16, self._ARC * 16)
+        p.end()
+
+
+class _ReplayLoader(QWidget):
+    """Bandeau d'attente pendant qu'on reprend le moment chez Twitch.
+
+    La reprise en pleine qualité demande quelques secondes de réseau : sans
+    ce bandeau, le clic sur « Revoir les dernières secondes » ne produisait
+    rien de visible, et on le refaisait en croyant l'avoir manqué.
+
+    Cliquable pour renoncer : une attente qu'on ne peut pas interrompre est
+    une attente qu'on subit.
+    """
+
+    annulation_demandee = pyqtSignal()
 
     def __init__(self, login: str, secs: int, parent: QWidget) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "QWidget { background: rgba(10,10,10,200); border: 1px solid #ff6b00;"
+            " border-radius: 6px; }"
+        )
+        h = QHBoxLayout(self)
+        h.setContentsMargins(12, 6, 12, 6)
+        h.setSpacing(10)
+        anneau = _PetitAnneau(16, self)
+        anneau.setStyleSheet("background: transparent; border: none;")
+        h.addWidget(anneau)
+        quoi = QLabel(f"Reprise des {secs} dernières secondes de {login}…")
+        quoi.setTextFormat(Qt.TextFormat.PlainText)
+        quoi.setFont(QFont(_POLICE_UI_VARIABLE, 10))
+        quoi.setStyleSheet("color: #e0e0e0; background: transparent; border: none;")
+        h.addWidget(quoi)
+        renoncer = QLabel("✕  Échap")
+        renoncer.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
+        renoncer.setStyleSheet("color: #888888; background: transparent; border: none;")
+        h.addWidget(renoncer)
+        self.adjustSize()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        self.annulation_demandee.emit()
+        event.accept()
+
+
+class _ReplayProgress(QWidget):
+    """Fine barre de progression du replay, collée en haut de l'écran.
+
+    Trois pixels : assez pour situer où l'on en est, assez peu pour ne rien
+    voler à l'image. Pas de graduation ni de texte — c'est un repère, pas un
+    lecteur.
+
+    La progression est FOURNIE par l'appelant, jamais calculée à partir de la
+    durée du fichier : un MP4 fragmenté repris chez Twitch annonce la durée
+    depuis le début du direct, soit des heures, et le rapport serait à 99 %
+    dès la première image.
+    """
+
+    HAUTEUR = 3
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedHeight(self.HAUTEUR)
+        self._ratio = 0.0
+
+    def set_ratio(self, ratio: float) -> None:
+        borne = max(0.0, min(1.0, ratio))
+        if abs(borne - self._ratio) < 0.001:
+            return          # inutile de repeindre pour un dixième de pixel
+        self._ratio = borne
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        w = self.width()
+        p.fillRect(0, 0, w, self.height(), QColor(255, 107, 0, 60))
+        p.fillRect(0, 0, int(w * self._ratio), self.height(), QColor("#ff6b00"))
+        p.end()
+
+
+class _ReplayBadge(QWidget):
+    """Bandeau « REPLAY » posé sur la vidéo rejouée.
+
+    Cliquable : Échap ferme aussi le replay, mais rien ne le disait — et une
+    sortie qu'on ne devine pas revient à ne pas en avoir.
+    """
+
+    fermeture_demandee = pyqtSignal()
+
+    def __init__(self, login: str, secs: int, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
             "QWidget { background: rgba(10,10,10,200); border: 1px solid #ff6b00;"
             " border-radius: 6px; }"
@@ -1686,16 +1852,24 @@ class _ReplayBadge(QWidget):
         h.setContentsMargins(12, 6, 12, 6)
         h.setSpacing(8)
         dot = QLabel("REPLAY")
-        dot.setFont(QFont("Segoe UI Variable", 10, QFont.Weight.Bold))
+        dot.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
         dot.setStyleSheet("color: #ff6b00; background: transparent; border: none;"
                           " letter-spacing: 2px;")
         h.addWidget(dot)
         who = QLabel(f"{login} · {secs} dernières secondes")
         who.setTextFormat(Qt.TextFormat.PlainText)
-        who.setFont(QFont("Segoe UI Variable", 10))
+        who.setFont(QFont(_POLICE_UI_VARIABLE, 10))
         who.setStyleSheet("color: #e0e0e0; background: transparent; border: none;")
         h.addWidget(who)
+        sortie = QLabel("✕  Échap")
+        sortie.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
+        sortie.setStyleSheet("color: #888888; background: transparent; border: none;")
+        h.addWidget(sortie)
         self.adjustSize()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        self.fermeture_demandee.emit()
+        event.accept()
 
 
 # ---------------------------------------------------------------------------
@@ -1715,6 +1889,17 @@ class FullscreenWindow(QMainWindow):
     #: -1 / +1 — stream précédent ou suivant dans l'ordre de la grille.
     neighbour_requested     = pyqtSignal(int)
     stream_changed = pyqtSignal(str)  # emis quand le stream actif change (Bug 3)
+    #: Volume et coupure du direct, APRÈS application — quelle que soit
+    #: l'origine du changement : curseur de l'overlay, touches +/-/M, ou
+    #: console de mixage. Sans ce retour, régler le son en plein écran laissait
+    #: la tranche du mixer sur sa valeur d'avant.
+    volume_changed = pyqtSignal(int)
+    mute_changed = pyqtSignal(bool)
+    #: Interne : le fil de reprise HD a fini. (chemin, secondes obtenues)
+    _replay_hd_pret = pyqtSignal(str, float)
+    #: Ctrl+Entrée dans la palette : ajouter la chaîne à la grille. Le plein
+    #: écran ne tient pas la sélection, la demande remonte à main.py.
+    grid_add_requested = pyqtSignal(str)
 
     def __init__(self, screen: QScreen, show_on_init: bool = True, clip_config: dict | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1734,11 +1919,24 @@ class FullscreenWindow(QMainWindow):
         self._replay_active: bool = False
         self._replay_player: MpvWidget | None = None
         self._replay_badge: QWidget | None = None
+        self._replay_progress: QWidget | None = None
+        self._replay_loader: QWidget | None = None
+        #: Vrai entre une demande de replay et son abandon : le fil de reprise
+        #: peut encore rendre un fichier, il ne doit plus être joué.
+        self._replay_annule: bool = False
+        self._replay_suivi: QTimer | None = None
+        #: Position de la premiere image lue, en secondes. Un MP4 fragmente
+        #: repris chez Twitch demarre a l'horodatage du direct : seule la
+        #: distance a cette origine a un sens.
+        self._replay_origine: float | None = None
         self._replay_path: str = ""
         self._replay_login: str = ""
         self._replay_secs: int = 30
         self._replay_size: int = -1
         self._replay_deadline: float = 0.0
+        # Queued par construction : le fil de reprise emet depuis un
+        # thread, la lecture doit repartir sur le fil graphique.
+        self._replay_hd_pret.connect(self._sur_replay_hd)
 
         # Ad-break watcher
         self._ad_watcher = AdWatcher(self)
@@ -1747,6 +1945,8 @@ class FullscreenWindow(QMainWindow):
         self._ad_banner: _AdBreakBanner | None = None
         self._ad_notify_logins: set[str] = set()
         self._ad_active: bool = False
+        # Table des touches, construite à la première frappe.
+        self._touches: dict | None = None
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self._build()
@@ -1776,7 +1976,7 @@ class FullscreenWindow(QMainWindow):
 
         logo = QLabel("ZLink")
         logo.setFont(QFont("Consolas", 48, QFont.Weight.Bold))
-        logo.setStyleSheet("color: #00ff87; background: transparent;")
+        logo.setStyleSheet(_TEXTE_VERT)
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         el.addWidget(logo)
@@ -1784,8 +1984,8 @@ class FullscreenWindow(QMainWindow):
         el.addSpacing(12)
 
         self._hint_lbl = QLabel("Sélectionnez un stream dans la grille")
-        self._hint_lbl.setFont(QFont("Segoe UI", 16))
-        self._hint_lbl.setStyleSheet("color: #555555; background: transparent;")
+        self._hint_lbl.setFont(QFont(_POLICE_UI, 16))
+        self._hint_lbl.setStyleSheet(_TEXTE_GRIS)
         self._hint_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         el.addWidget(self._hint_lbl)
@@ -1837,14 +2037,14 @@ class FullscreenWindow(QMainWindow):
         ol.setSpacing(0)
 
         _left = QWidget()
-        _left.setStyleSheet("background: transparent;")
+        _left.setStyleSheet(_FOND_TRANSPARENT)
         ll = QHBoxLayout(_left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(0)
 
         # Nom · jeu en premier, le volume vient après.
         self._ov_info = QLabel()
-        self._ov_info.setFont(QFont("Segoe UI", 15))
+        self._ov_info.setFont(QFont(_POLICE_UI, 15))
         self._ov_info.setStyleSheet("color: #ffffff; background: transparent;")
         ll.addWidget(self._ov_info)
         ll.addSpacing(16)
@@ -1860,7 +2060,7 @@ class FullscreenWindow(QMainWindow):
             " font-size: 15px; }"
             "QPushButton:hover { color: #ffffff; }"
         )
-        self._vol_btn.setToolTip("Couper le son")
+        self._vol_btn.setToolTip(_LIBELLE_COUPER_SON)
         self._vol_btn.clicked.connect(self._toggle_mute)
         ll.addWidget(self._vol_btn)
 
@@ -1896,12 +2096,12 @@ class FullscreenWindow(QMainWindow):
         # Centre : viewers
         self._ov_viewers = QLabel()
         self._ov_viewers.setFont(QFont("Consolas", 15, QFont.Weight.Bold))
-        self._ov_viewers.setStyleSheet("color: #00ff87; background: transparent;")
+        self._ov_viewers.setStyleSheet(_TEXTE_VERT)
         self._ov_viewers.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ol.addWidget(self._ov_viewers)
 
         _right = QWidget()
-        _right.setStyleSheet("background: transparent;")
+        _right.setStyleSheet(_FOND_TRANSPARENT)
         rl = QHBoxLayout(_right)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(0)
@@ -2058,7 +2258,25 @@ class FullscreenWindow(QMainWindow):
         self._overlay.hide()  # initialement caché — s'affiche au mouvement souris
         self._remote_btn.hide()  # idem
 
+        # Palette de commandes (Ctrl+K). Pas d'onglets ici : en plein écran on
+        # cherche une chaîne ou une action, il n'y a rien d'autre à atteindre.
+        self._palette = CommandPalette(central, [])
+        self._palette.stream_requested.connect(self.stream_change_requested)
+        self._palette.grid_requested.connect(self.grid_add_requested)
+        self._palette.action_requested.connect(self.run_action)
+        # QShortcut plutôt que keyPressEvent : la frappe arrive d'abord au
+        # widget qui a le focus, et la vidéo incrustée est une fenêtre native
+        # qui ne fait pas remonter les touches jusqu'ici. Un raccourci de
+        # portée FENÊTRE se déclenche quel que soit l'enfant qui a la main.
+        raccourci = QShortcut(QKeySequence("Ctrl+K"), self)
+        raccourci.setContext(Qt.ShortcutContext.WindowShortcut)
+        raccourci.activated.connect(self._palette.open)
+
         self.setCentralWidget(central)
+
+    def set_streamers(self, streamers: list) -> None:
+        """Alimente la palette de commandes."""
+        self._palette.set_streamers(streamers)
 
     def _move_to_screen(self, screen: QScreen) -> None:
         g = screen.geometry()
@@ -2068,6 +2286,7 @@ class FullscreenWindow(QMainWindow):
         if handle is not None:
             handle.setScreen(screen)
         self.showFullScreen()
+        mark_fullscreen(self)
         logger.info("Fullscreen ouverte sur %s (%dx%d)", screen.name(), g.width(), g.height())
 
     # ── public API ────────────────────────────────────────────────────
@@ -2184,17 +2403,12 @@ class FullscreenWindow(QMainWindow):
         barre d'adresse, alors que l'utilisateur va y saisir des coordonnées de
         paiement. Dans le navigateur il voit l'URL réelle et son cadenas.
         """
-        if not self._current_donation_url:
-            return
-        url = _safe_https_url(self._current_donation_url, _DONATION_HOSTS)
-        if not url:
-            logger.error(
-                "Don annulé : URL hors allowlist (%s)",
-                self._current_donation_url[:60],
-            )
-            return
-        logger.info("Ouverture de la page de don dans le navigateur système")
-        QDesktopServices.openUrl(QUrl(url))
+        # Une SEULE route vers le navigateur. Ce bouton avait sa propre copie
+        # du contrôle d'allowlist et de la cession de premier plan : la copie
+        # n'a pas suivi quand on a découvert que c'était l'ordre Z, et non le
+        # focus, qui cachait la page — le bouton du plein écran restait donc
+        # cassé alors que celui du panel était réparé.
+        ouvrir_page_de_don(self._current_donation_url)
 
     def _close_donate_view(self) -> None:
         """Quitte le mode PiP et restaure le stream en plein écran."""
@@ -2233,7 +2447,9 @@ class FullscreenWindow(QMainWindow):
 
     def _on_fade_finished(self) -> None:
         """Cache le widget une fois le fondu terminé."""
-        if self._opacity_fx.opacity() == 0.0:
+        # Seuil plutôt qu'égalité : l'interpolation de QPropertyAnimation
+        # n'est pas tenue d'atterrir sur 0.0 au bit près.
+        if self._opacity_fx.opacity() <= 0.001:
             self._overlay.hide()
             self._btn_opacity_fx.setOpacity(0.0)
             self._remote_btn.hide()
@@ -2317,6 +2533,45 @@ class FullscreenWindow(QMainWindow):
 
     # ── replay ────────────────────────────────────────────────────────
 
+    def _meilleur_tampon(self, login: str, fourni: str) -> str:
+        """Chemin du meilleur enregistrement disponible pour ce moment.
+
+        La grille joue en 360p — c'est le prix de vingt-cinq flux simultanés —
+        et son `dump-cache` ne peut restituer que ça : le tampon contient les
+        octets réellement reçus, pas une source à ré-encoder. Un replay de
+        cellule est donc en 360p, quoi qu'on fasse ensuite.
+
+        Mais le plein écran, lui, joue la même chaîne en `best`. Quand c'est
+        de celle-là qu'on veut revoir le moment, son tampon est disponible et
+        bien meilleur. On le préfère, et on retombe sur le fichier fourni par
+        la grille s'il n'a rien à offrir.
+        """
+        if not login or login != self.current_login or self._mpv is None:
+            return fourni
+        try:
+            meilleur = self._mpv.save_clip(
+                self._replay_secs_demandes(), tempfile.gettempdir())
+        except Exception:      # noqa: BLE001 — on retombe sur la grille
+            logger.exception("Replay : tampon du plein écran illisible")
+            return fourni
+        if not meilleur:
+            logger.debug("Replay : tampon du plein écran vide, repli sur la grille")
+            return fourni
+        logger.info("Replay de %s pris sur le plein écran (qualité de lecture)",
+                    login)
+        return meilleur
+
+    @staticmethod
+    def _replay_secs_demandes() -> int:
+        """Durée d'un replay : celle que la source peut réellement fournir.
+
+        Volontairement décorrélée de la durée des clips : un clip vient du
+        tampon local et peut être long, un replay est plafonné par la fenêtre
+        que Twitch garde en ligne.
+        """
+        from core.replay_hd import REPLAY_SECS
+        return REPLAY_SECS
+
     def start_replay(self, login: str, path: str, secs: int = 30) -> None:
         """Rejoue `path` en grand, le direct passant en incrustation.
 
@@ -2326,11 +2581,113 @@ class FullscreenWindow(QMainWindow):
         dans un coin.
         """
         cw = self.centralWidget()
-        if cw is None or not path or self._replay_active:
+        if cw is None or self._replay_active:
             return
-        self._replay_path = path
         self._replay_login = login
         self._replay_secs = secs
+        self._replay_annule = False
+        # Montré tout de suite : le chemin le plus court passe encore par une
+        # attente de fichier, et le plus long par plusieurs secondes de réseau.
+        self._montrer_chargeur(login, secs)
+
+        local = self._meilleur_tampon(login, path)
+        if local != path:
+            # La chaîne est celle du plein écran : son tampon est déjà en
+            # pleine qualité, et disponible tout de suite. Rien à télécharger.
+            self._engager_replay(local)
+            return
+        # Sinon le seul tampon local est celui de la grille, donc en 360p :
+        # on tente de reprendre le moment chez Twitch, en pleine qualité.
+        self._reprendre_chez_twitch(login, path, secs)
+
+    def _montrer_chargeur(self, login: str, secs: int) -> None:
+        """Pose le bandeau d'attente à la place qu'occupera le badge REPLAY."""
+        cw = self.centralWidget()
+        if cw is None:
+            return
+        self._cacher_chargeur()
+        chargeur = _ReplayLoader(login, secs, cw)
+        chargeur.annulation_demandee.connect(self._annuler_replay)
+        self._replay_loader = chargeur
+        self._placer_chargeur()
+        chargeur.show()
+        chargeur.raise_()
+
+    def _placer_chargeur(self) -> None:
+        """Centre le bandeau sur la zone vidéo, à la hauteur du badge REPLAY."""
+        chargeur = self._replay_loader
+        if chargeur is None:
+            return
+        chat_w = self._chat_panel._width if self._chat_panel._visible else 0
+        video_w = self.width() - chat_w
+        chargeur.move((video_w - chargeur.width()) // 2, 24)
+
+    def _cacher_chargeur(self) -> None:
+        """Retire le bandeau d'attente. Idempotent."""
+        chargeur, self._replay_loader = self._replay_loader, None
+        if chargeur is not None:
+            chargeur.hide()   # avant de détacher : détaché et visible = une fenêtre
+            chargeur.setParent(None)
+            chargeur.deleteLater()
+
+    def _annuler_replay(self) -> None:
+        """Renonce à la reprise en cours, avant qu'elle n'ait commencé.
+
+        Le fil de téléchargement, lui, va jusqu'au bout — l'interrompre au
+        milieu laisserait un fichier tronqué. Il rendra son verdict dans le
+        vide, et le fichier sera supprimé comme n'importe quel temporaire.
+        """
+        if self._replay_active:
+            return
+        self._replay_annule = True
+        attente = getattr(self, "_replay_wait", None)
+        if attente is not None:
+            attente.stop()
+        self._cacher_chargeur()
+        self._cleanup_replay()
+        logger.info("Replay abandonné à la demande de l'utilisateur")
+
+    def _reprendre_chez_twitch(self, login: str, repli: str, secs: int) -> None:
+        """Retélécharge le moment en pleine qualité, sans bloquer l'interface.
+
+        Quelques secondes de réseau : un fil séparé, et l'interface continue de
+        répondre. Le fichier de la grille sert de repli, pour qu'un direct
+        terminé ou une panne réseau ne laissent pas l'utilisateur sans rien.
+        """
+        from core.replay_hd import recuperer
+
+        def _travail() -> None:
+            chemin, obtenue = "", 0.0
+            try:
+                chemin, obtenue = recuperer(login, secs)
+            except Exception:      # noqa: BLE001 — le repli reste disponible
+                logger.exception("Replay HD : reprise impossible")
+            self._replay_hd_pret.emit(chemin or repli, float(obtenue or secs))
+
+        threading.Thread(target=_travail, daemon=True,
+                         name=f"replay-hd-{login}").start()
+
+    def _sur_replay_hd(self, chemin: str, secondes: float) -> None:
+        """Le fil de reprise a rendu son verdict — on joue ce qu'on a."""
+        if self._replay_annule:
+            self._replay_path = chemin
+            self._cleanup_replay()      # supprime le fichier devenu inutile
+            return
+        if self._replay_active:
+            return
+        if not chemin:
+            # Ni reprise HD ni repli : rien ne viendra, l'attente s'arrête ici.
+            logger.warning("Replay : aucune source, ni Twitch ni tampon local")
+            self._cacher_chargeur()
+            return
+        self._replay_secs = int(secondes) or self._replay_secs
+        self._engager_replay(chemin)
+
+    def _engager_replay(self, path: str) -> None:
+        """Attend que le fichier soit complet, puis lance la lecture."""
+        if not path:
+            return
+        self._replay_path = path
         # dump-cache écrit en arrière-plan et mpv ne signale pas la fin : on
         # attend que le fichier cesse de grossir, sinon on lit un tronçon.
         self._replay_size = -1
@@ -2339,9 +2696,12 @@ class FullscreenWindow(QMainWindow):
         self._replay_wait.setInterval(200)
         self._replay_wait.timeout.connect(self._check_replay_file)
         self._replay_wait.start()
-        logger.info("Replay demandé : %s (%s)", login, path)
+        logger.info("Replay demandé : %s (%s)", self._replay_login, path)
 
     def _check_replay_file(self) -> None:
+        if self._replay_annule:
+            self._replay_wait.stop()
+            return
         try:
             size = pathlib.Path(self._replay_path).stat().st_size
         except OSError:
@@ -2360,16 +2720,24 @@ class FullscreenWindow(QMainWindow):
                 self._begin_replay()
             else:
                 logger.warning("Replay abandonné : aucun fichier produit")
+                # Le bandeau d'attente doit partir avec l'attente : le laisser
+                # tourner sur un replay qui n'arrivera jamais serait pire que
+                # de n'avoir rien montré.
+                self._cacher_chargeur()
                 self._cleanup_replay()
 
     def _begin_replay(self) -> None:
         cw = self.centralWidget()
         if cw is None:
             return
+        self._cacher_chargeur()
         self._replay_active = True
         self._replay_player = MpvWidget(cw)
         self._replay_player.playback_ended.connect(self.stop_replay)
         self._replay_badge = _ReplayBadge(self._replay_login, self._replay_secs, cw)
+        self._replay_badge.fermeture_demandee.connect(self.stop_replay)
+        self._replay_progress = _ReplayProgress(cw)
+        self._replay_origine = None
         # Le direct se tait pendant le replay : deux sources simultanées ne
         # s'écoutent pas, et c'est l'action qu'on veut entendre.
         self._mpv.set_mute(True)
@@ -2377,22 +2745,59 @@ class FullscreenWindow(QMainWindow):
         self._replay_player.show()
         self._replay_badge.show()
         self._replay_badge.raise_()
+        self._replay_progress.show()
+        self._replay_progress.raise_()
         self._replay_player.play(self._replay_path)
+        # 200 ms : la barre avance d'un demi-pour-cent par pas sur trente
+        # secondes, assez fin pour paraître continu sans réveiller l'interface
+        # soixante fois par seconde pour trois pixels.
+        self._replay_suivi = QTimer(self)
+        self._replay_suivi.setInterval(200)
+        self._replay_suivi.timeout.connect(self._suivre_progression)
+        self._replay_suivi.start()
+
+    def _suivre_progression(self) -> None:
+        """Avance la barre selon la distance parcourue depuis la première image.
+
+        La durée annoncée par le fichier est inutilisable : un fragment repris
+        chez Twitch porte l'horodatage du direct, soit des heures. On mesure
+        donc un écart, jamais un rapport à `duration`.
+        """
+        joueur, barre = self._replay_player, self._replay_progress
+        if joueur is None or barre is None:
+            return
+        pos = joueur.position()
+        if pos is None:
+            return
+        if self._replay_origine is None:
+            self._replay_origine = pos
+        span = max(1.0, float(self._replay_secs))
+        barre.set_ratio((pos - self._replay_origine) / span)
 
     def stop_replay(self) -> None:
         """Referme le replay et rend l'écran au direct."""
         if not self._replay_active:
             return
         self._replay_active = False
+        self._cacher_chargeur()
         player, self._replay_player = self._replay_player, None
         if player is not None:
             player.shutdown()
+            player.hide()   # avant de détacher : détaché et visible = une fenêtre
             player.setParent(None)
             player.deleteLater()
-        badge, self._replay_badge = self._replay_badge, None
-        if badge is not None:
-            badge.setParent(None)
-            badge.deleteLater()
+        suivi, self._replay_suivi = self._replay_suivi, None
+        if suivi is not None:
+            suivi.stop()
+            suivi.deleteLater()
+        self._replay_origine = None
+        for attr in ("_replay_badge", "_replay_progress"):
+            widget = getattr(self, attr)
+            setattr(self, attr, None)
+            if widget is not None:
+                widget.hide()   # avant de détacher : détaché et visible = une fenêtre
+                widget.setParent(None)
+                widget.deleteLater()
         self._apply_volume()          # rétablit le son du direct
         self._update_mpv_geometry()
         self._cleanup_replay()
@@ -2516,6 +2921,28 @@ class FullscreenWindow(QMainWindow):
         toast.show()
         toast.raise_()
 
+    def show_resource_alert(self, ressource: str, total: float,
+                            part: float) -> None:
+        """Prévient que le poste sature, là où l'utilisateur regarde.
+
+        Orange plutôt que rouge : rien n'est cassé, mais l'image va se dégrader
+        si le nombre de flux ne baisse pas.
+        """
+        cw = self.centralWidget()
+        if cw is None:
+            return
+        from core.resource_watch import LIBELLES
+        toast = _FsHypeToast(
+            "Poste saturé",
+            f"{LIBELLES.get(ressource, ressource)} à {total:.0f} % — "
+            "réduisez le nombre de flux",
+            1.0, "#ff6b00", cw)
+        off = self._pinned_audio.height_hint()
+        if off:
+            toast.move(toast.x(), 8 + off + 6)
+        toast.show()
+        toast.raise_()
+
     def show_favorite_live(self, login: str, display: str = "") -> None:
         """Annonce qu'un favori vient de lancer son direct."""
         cw = self.centralWidget()
@@ -2572,7 +2999,10 @@ class FullscreenWindow(QMainWindow):
         secs   = self._clip_config.get("duration_secs", 60)
         folder = self._clip_config.get("directory", "")
         path   = self._mpv.save_clip(secs, folder)
-        original = "⏺ Clip"
+        # Le libellé rendu après coup ne doit pas réintroduire de pictogramme :
+        # le bouton porte déjà une icône qtawesome, et U+23FA s'affichait en
+        # plus, sous forme de carré bleu faute de police d'emoji.
+        original = "Clip"
         if path:
             self._clip_btn.setText("✓ Clip sauvé !")
         else:
@@ -2582,15 +3012,17 @@ class FullscreenWindow(QMainWindow):
     # ── volume ─────────────────────────────────────────────────────
 
     def _apply_volume(self) -> None:
-        """Répercute volume et mute sur MPV et rafraîchit l'icône."""
+        """Répercute volume et mute sur MPV, l'icône, et la console."""
         self._mpv.set_volume(0 if self._muted else self._volume)
+        self.volume_changed.emit(self._volume)
+        self.mute_changed.emit(self._muted)
         self._mpv.set_mute(self._muted)
         if self._muted or self._volume == 0:
             icon, tip = "\U0001f507", "Rétablir le son"
         elif self._volume < 50:
-            icon, tip = "\U0001f509", "Couper le son"
+            icon, tip = "\U0001f509", _LIBELLE_COUPER_SON
         else:
-            icon, tip = "\U0001f50a", "Couper le son"
+            icon, tip = "\U0001f50a", _LIBELLE_COUPER_SON
         self._vol_btn.setText(icon)
         self._vol_btn.setToolTip(tip)
         self._vol_slider.setToolTip(f"Volume : {self._volume} %")
@@ -2625,102 +3057,96 @@ class FullscreenWindow(QMainWindow):
         """Met à jour la config clips (appelé depuis main.py sur settings_changed)."""
         self._clip_config = cfg.get("clips", {})
 
+    def _carte_des_touches(self) -> dict:
+        """Touche → (action, faut-il rappeler l'overlay ensuite).
+
+        Une table plutôt qu'une chaîne de elif : ce qu'on vient lire ici, c'est
+        la correspondance touche/action, et elle se lit d'un coup d'œil.
+        Construite à la première frappe puis mémorisée — les actions sont des
+        méthodes liées, elles n'existent pas avant l'instance.
+
+        « C » garde le moment en cours : le geste le plus fréquent en régie, et
+        il fallait autrefois viser un bouton dans un overlay masqué.
+        """
+        if self._touches is None:
+            K = Qt.Key
+            self._touches = {
+                K.Key_Up:     (self._remote_menu.select_previous, False),
+                K.Key_Down:   (self._remote_menu.select_next, False),
+                K.Key_Return: (self._remote_menu.confirm_selection, False),
+                K.Key_Space:  (self._remote_menu.confirm_selection, False),
+                K.Key_Plus:   (lambda: self.set_volume(self._volume + 5), True),
+                K.Key_Equal:  (lambda: self.set_volume(self._volume + 5), True),
+                K.Key_Minus:  (lambda: self.set_volume(self._volume - 5), True),
+                K.Key_M:      (self._toggle_mute, True),
+                K.Key_C:      (self._save_clip, True),
+                K.Key_R:      (self._replay_current, False),
+                K.Key_F:      (self._toggle_favorite_current, True),
+                K.Key_Left:   (lambda: self.neighbour_requested.emit(-1), False),
+                K.Key_Right:  (lambda: self.neighbour_requested.emit(1), False),
+            }
+        return self._touches
+
+    def _echapper(self) -> None:
+        """Échap : coupe le replay d'abord, puis le menu, puis ferme.
+
+        Le replay passe avant : c'est l'état le plus transitoire, et le plus
+        susceptible d'être interrompu.
+        """
+        if self._replay_active:
+            self.stop_replay()
+        elif self._replay_loader is not None:
+            self._annuler_replay()
+        elif self._remote_menu.isVisible():
+            self._close_remote_menu()
+        else:
+            self.close()
+
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = event.key()
-        if key == Qt.Key.Key_Up:
-            self._remote_menu.select_previous()
-        elif key == Qt.Key.Key_Down:
-            self._remote_menu.select_next()
-        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Space):
-            self._remote_menu.confirm_selection()
-        elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            self.set_volume(self._volume + 5)
-            self._show_overlay()
-        elif key == Qt.Key.Key_Minus:
-            self.set_volume(self._volume - 5)
-            self._show_overlay()
-        elif key == Qt.Key.Key_M:
-            self._toggle_mute()
-            self._show_overlay()
-        elif key == Qt.Key.Key_C:
-            # Garder le moment en cours : le geste le plus fréquent en régie,
-            # et il fallait jusqu'ici viser un bouton dans un overlay masqué.
-            self._save_clip()
-            self._show_overlay()
-        elif key == Qt.Key.Key_R:
-            self._replay_current()
-        elif key == Qt.Key.Key_F:
-            self._toggle_favorite_current()
-            self._show_overlay()
-        elif Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
+        if key == Qt.Key.Key_Escape:
+            if self._palette.isVisible():
+                self._palette.hide()
+                return
+            self._echapper()
+            return
+        # Les chiffres désignent une cellule de la grille : une plage, donc hors
+        # table.
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
             self.slot_requested.emit(key - Qt.Key.Key_1)
-        elif key == Qt.Key.Key_Left:
-            self.neighbour_requested.emit(-1)
-        elif key == Qt.Key.Key_Right:
-            self.neighbour_requested.emit(1)
-        elif key == Qt.Key.Key_Escape:
-            if self._replay_active:
-                # Échap coupe le replay avant tout : c'est l'état le plus
-                # transitoire, et le plus susceptible d'être interrompu.
-                self.stop_replay()
-            elif self._remote_menu.isVisible():
-                self._close_remote_menu()
-            else:
-                self.close()
-        else:
+            return
+        entree = self._carte_des_touches().get(key)
+        if entree is None:
             super().keyPressEvent(event)
+            return
+        action, montrer_overlay = entree
+        action()
+        if montrer_overlay:
+            self._show_overlay()
 
     # ── new features ───────────────────────────────────────────────
 
     def _update_mpv_geometry(self) -> None:
-        """Recalcule les géométries absolues selon la visibilité du chat / mode PiP."""
+        """Recalcule les géométries absolues selon la visibilité du chat / mode PiP.
+
+        Trois dispositions s'excluent — replay, page de don, direct seul — et
+        chacune a sa méthode. Les avoir toutes ici en faisait une fonction dont
+        on ne lisait plus la branche qui nous intéressait.
+        """
         w, h = self.width(), self.height()
         chat_w = self._chat_panel._width if self._chat_panel._visible else 0
         video_w = w - chat_w
 
         if self._replay_active:
-            # Le replay prend toute la zone vidéo, le direct se réfugie en bas
-            # à droite : c'est l'action qu'on veut voir en grand, le direct ne
-            # sert plus qu'à ne pas perdre le fil.
-            pip_x = video_w - _REPLAY_PIP_W - _REPLAY_MARGIN
-            pip_y = h - _REPLAY_PIP_H - _REPLAY_MARGIN
-            if self._replay_player is not None:
-                self._replay_player.setGeometry(0, 0, video_w, h)
-                self._replay_player.lower()
-            self._stack.setGeometry(pip_x, pip_y, _REPLAY_PIP_W, _REPLAY_PIP_H)
-            self._stack.raise_()
-            if self._replay_badge is not None:
-                self._replay_badge.move(
-                    (video_w - self._replay_badge.width()) // 2, 24)
-                self._replay_badge.raise_()
-            self._overlay.hide()
+            self._geometrie_replay(video_w, h)
         elif self._pip_active:
-            _PIP_W, _PIP_H, _MARGIN = 320, 180, 16
-            pip_x = video_w - _PIP_W - _MARGIN
-            pip_y = h - _PIP_H - _MARGIN
-            self._stack.setGeometry(pip_x, pip_y, _PIP_W, _PIP_H)
-            self._donate_view.setGeometry(0, 0, w, h)
-            # Bouton fermer en haut à droite de la fenêtre
-            btn_w = self._donate_close_btn.sizeHint().width()
-            self._donate_close_btn.move(w - btn_w - 16, 16)
-            self._stack.raise_()           # PiP au premier plan
-            self._donate_close_btn.raise_()
+            self._geometrie_donation(w, h, video_w)
         else:
-            self._stack.setGeometry(0, 0, video_w, h)
-            self._overlay.setGeometry(0, h - 56, video_w, 56)
+            self._geometrie_direct(w, h, video_w)
 
-            self._remote_btn.move(8, 8)
-            self._remote_btn.raise_()
-            self._pinned_audio.reposition(video_w, h)
-            self._pinned_audio.raise_()
-
-            if self._remote_menu.isVisible():
-                self._remote_menu.setGeometry(
-                    self._remote_menu.x(), 0, REMOTE_MENU_WIDTH, h
-                )
-
-            if self._chat_panel._visible:
-                self._chat_panel._update_geometry()
+        # Hors des branches : le bandeau d'attente est posé AVANT que le
+        # replay soit actif, et doit suivre la fenêtre pendant ce temps-là.
+        self._placer_chargeur()
 
         if self._ad_banner is not None:
             self._ad_banner.reposition(w, h)
@@ -2729,6 +3155,58 @@ class FullscreenWindow(QMainWindow):
         # tout changement de géométrie, sinon elle affiche l'ancienne frame.
         if self._mpv.uses_render_backend:
             self._mpv.update()
+
+    def _geometrie_replay(self, video_w: int, h: int) -> None:
+        """Le replay prend toute la zone vidéo, le direct passe en incrustation.
+
+        C'est l'action qu'on veut voir en grand ; le direct ne sert plus qu'à
+        ne pas perdre le fil.
+        """
+        pip_x = video_w - _REPLAY_PIP_W - _REPLAY_MARGIN
+        pip_y = h - _REPLAY_PIP_H - _REPLAY_MARGIN
+        if self._replay_player is not None:
+            self._replay_player.setGeometry(0, 0, video_w, h)
+            self._replay_player.lower()
+        self._stack.setGeometry(pip_x, pip_y, _REPLAY_PIP_W, _REPLAY_PIP_H)
+        self._stack.raise_()
+        if self._replay_badge is not None:
+            self._replay_badge.move(
+                (video_w - self._replay_badge.width()) // 2, 24)
+            self._replay_badge.raise_()
+        if self._replay_progress is not None:
+            # Collée au bord haut de la zone vidéo : le chat, quand il est
+            # ouvert, ne rejoue pas et n'a pas à porter la barre.
+            self._replay_progress.setGeometry(
+                0, 0, video_w, _ReplayProgress.HAUTEUR)
+            self._replay_progress.raise_()
+        self._overlay.hide()
+
+    def _geometrie_donation(self, w: int, h: int, video_w: int) -> None:
+        """La page de don occupe l'écran, le direct se réduit dans un coin."""
+        _PIP_W, _PIP_H, _MARGIN = 320, 180, 16
+        pip_x = video_w - _PIP_W - _MARGIN
+        pip_y = h - _PIP_H - _MARGIN
+        self._stack.setGeometry(pip_x, pip_y, _PIP_W, _PIP_H)
+        self._donate_view.setGeometry(0, 0, w, h)
+        # Bouton fermer en haut à droite de la fenêtre
+        btn_w = self._donate_close_btn.sizeHint().width()
+        self._donate_close_btn.move(w - btn_w - 16, 16)
+        self._stack.raise_()           # PiP au premier plan
+        self._donate_close_btn.raise_()
+
+    def _geometrie_direct(self, _w: int, h: int, video_w: int) -> None:
+        """Le cas ordinaire : le direct en grand, ses surcouches par-dessus."""
+        self._stack.setGeometry(0, 0, video_w, h)
+        self._overlay.setGeometry(0, h - 56, video_w, 56)
+        self._remote_btn.move(8, 8)
+        self._remote_btn.raise_()
+        self._pinned_audio.reposition(video_w, h)
+        self._pinned_audio.raise_()
+        if self._remote_menu.isVisible():
+            self._remote_menu.setGeometry(
+                self._remote_menu.x(), 0, REMOTE_MENU_WIDTH, h)
+        if self._chat_panel._visible:
+            self._chat_panel._update_geometry()
 
     def update_remote_menu(
         self,

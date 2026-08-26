@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.win_fullscreen import mark_fullscreen
 from windows.fullscreen import FullscreenWindow
 from windows.grid import GridWindow
 from windows.panel import PanelWindow
@@ -243,6 +244,7 @@ class SingleModeShell:
                 if handle is not None:
                     handle.setScreen(self._screen)
                 win.showFullScreen()
+                mark_fullscreen(win)
                 win.raise_()
                 win.activateWindow()
             else:

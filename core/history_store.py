@@ -235,26 +235,32 @@ class HistoryStore:
             # Zip puis inverser pour avoir ordre chronologique (ancien → récent)
             pairs = list(zip(labels_ms, values))
             pairs.reverse()
-            self._donation.clear()
-            for ts_ms, val in pairs:
-                point = _sane_point(ts_ms, val)
-                if point:
-                    self._donation.append(point)
+            # Tout-ou-rien : les listes sont construites EN LOCAL, et l'état
+            # n'est remplacé qu'une fois le dépôt entièrement lu. Vider
+            # self._donation avant de lire la section viewers laissait, si
+            # celle-ci manquait, la courbe de l'édition PRÉCÉDENTE en place
+            # avec self._previous vide : donation_rate() mesurait alors la
+            # vitesse de l'édition passée en la présentant comme celle en cours.
+            dons = [p for p in (_sane_point(ts, v) for ts, v in pairs) if p]
 
             # VIEWERS — viewers.large est en ordre CROISSANT → ne pas inverser
             v_labels_ms = data["viewers"]["large"]["labels"]  # ex: [1757088000000, ..., 1757286000000]
             v_values = data["viewers"]["large"]["values"]
+            vues = [p for p in (_sane_point(ts, v)
+                                for ts, v in zip(v_labels_ms, v_values)) if p]
+
+            self._donation.clear()
+            self._donation.extend(dons)
             self._viewers.clear()
-            for ts_ms, val in zip(v_labels_ms, v_values):
-                point = _sane_point(ts_ms, val)
-                if point:
-                    self._viewers.append(point)
+            self._viewers.extend(vues)
 
             # Copie de la courbe précédente AVANT que les points en direct ne
             # s'y ajoutent : c'est elle qui servira de référence.
             self._previous = [(t, v) for t, v in self._donation]
             if self._viewers:
-                self._previous_peak_viewers = max(v for _, v in self._viewers)
+                # int() : _sane_point convertit tout en float, et la propriété
+                # annonce un entier — un nombre de spectateurs n'est pas décimal.
+                self._previous_peak_viewers = int(max(v for _, v in self._viewers))
             logger.info(
                 "Édition précédente : %d points, total final %.0f €, pic %d viewers",
                 len(self._previous),
@@ -275,5 +281,5 @@ class HistoryStore:
                 logger.info(f"Viewers: {datetime.fromtimestamp(ts0, tz=timezone.utc)} → {datetime.fromtimestamp(ts1, tz=timezone.utc)}")
             # Doit afficher: 2026-09-03 06:00:00+00:00 → 2026-09-05 18:00:00+00:00
 
-        except Exception as e:
-            logger.error(f"Impossible de charger historique 2026: {e}")
+        except Exception:
+            logger.exception("Impossible de charger historique 2026")

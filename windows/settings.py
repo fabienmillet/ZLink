@@ -57,6 +57,9 @@ _C_SIDEBAR  = "#0d0d0d"
 _C_SURFACE  = "#1a1a1a"
 _C_BORDER   = "#2a2a2a"
 _C_TEXT     = "#cccccc"
+_FOND_TRANSPARENT = "background: transparent;"
+_LICENCE_BSD = "BSD 3-Clause"
+_TITRE_ECRANS = "Écrans"
 _C_MUTED    = "#555555"
 _C_GREEN    = "#00ff87"
 _C_DANGER   = "#ff4444"
@@ -142,6 +145,18 @@ def _h2(text: str) -> QLabel:
     return lbl
 
 
+def _entier(brut: object, defaut: int) -> int:
+    """Entier lu depuis config.json, ou `defaut` si la valeur est inutilisable.
+
+    Le fichier s'edite a la main : une valeur en texte, decimale ou absurde
+    ne doit pas empecher la fenetre de reglages de s'ouvrir.
+    """
+    try:
+        return int(brut)
+    except (TypeError, ValueError):
+        return defaut
+
+
 def _hint(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setFont(QFont(_FONT_UI, 10))
@@ -190,7 +205,7 @@ class _NavItem(QWidget):
     def _refresh_style(self) -> None:
         color = "#ffffff" if self._active else _C_MUTED
         if self._active:
-            self.setStyleSheet(f"background: #222222; border-radius: 6px; border: none;")
+            self.setStyleSheet("background: #222222; border-radius: 6px; border: none;")
         else:
             self.setStyleSheet("background: transparent; border-radius: 6px; border: none;")
         self._text_lbl.setStyleSheet(f"color: {color};")
@@ -213,7 +228,7 @@ def _scroll_wrap(inner: QWidget) -> QScrollArea:
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setStyleSheet("background: transparent; border: none;")
-    scroll.viewport().setStyleSheet("background: transparent;")
+    scroll.viewport().setStyleSheet(_FOND_TRANSPARENT)
     scroll.setWidget(inner)
     return scroll
 
@@ -258,12 +273,16 @@ class _PageStreams(_PageBase):
         # Rendus réels de Twitch : « 360p », « 480p » et « 720p » n'existent pas
         # et retombaient silencieusement sur « worst », soit 284x160.
         self._grid_quality.addItems([
-            "160p30,worst", "360p30,160p30,worst", "480p30,360p30,160p30",
-            "720p60,480p30,360p30",
+            # Chaque entrée liste les DEUX graphies de Twitch — « 360p » et
+            # « 360p30 » selon la chaîne — et finit par un repli garanti.
+            "160p,160p30,worst",
+            "360p,360p30,160p,160p30,worst",
+            "480p,480p30,360p,360p30,160p,160p30,worst",
+            "720p60,720p,720p30,480p,480p30,360p,360p30,worst",
         ])
-        from core.stream_manager import migrate_quality
+        from core.stream_manager import QUALITY_GRID, migrate_quality
         idx = self._grid_quality.findText(
-            migrate_quality(config.get("grid_quality", "360p30,160p30,worst")))
+            migrate_quality(config.get("grid_quality", QUALITY_GRID)))
         if idx >= 0:
             self._grid_quality.setCurrentIndex(idx)
         f.addRow("Qualité grille :", self._grid_quality)
@@ -287,7 +306,12 @@ class _PageStreams(_PageBase):
         f2 = self._form()
         self._max_streams = QSpinBox()
         self._max_streams.setRange(1, 25)
-        self._max_streams.setValue(config.get("max_active_streams", 20))
+        # int() comme partout ailleurs sur cette page : un "20" en texte dans
+        # config.json faisait lever TypeError a setValue() et rendait la
+        # fenetre de reglages INOUVRABLE — donc le seul endroit d'ou on
+        # aurait pu reparer. Le texte d'aide invite pourtant a editer le
+        # fichier a la main.
+        self._max_streams.setValue(_entier(config.get("max_active_streams", 20), 20))
         self._max_streams.setFixedWidth(100)
         f2.addRow("Max streams actifs :", self._max_streams)
 
@@ -339,7 +363,7 @@ class _PageScreens(_PageBase):
             else:
                 _default = {0: "panel", 1: "fullscreen", 2: "grid"}
 
-        self._vl.addWidget(_h2("Écrans"))
+        self._vl.addWidget(_h2(_TITRE_ECRANS))
         self._vl.addWidget(_sep())
         self._vl.addWidget(_section_title("Attribution des moniteurs"))
 
@@ -430,7 +454,7 @@ class _PageHype(_PageBase):
         self._vl.addWidget(_sep())
 
         self._advanced = QWidget()
-        self._advanced.setStyleSheet("background: transparent;")
+        self._advanced.setStyleSheet(_FOND_TRANSPARENT)
         adv_vl = QVBoxLayout(self._advanced)
         adv_vl.setContentsMargins(0, 0, 0, 0)
         adv_vl.setSpacing(20)
@@ -562,7 +586,7 @@ class _PageHype(_PageBase):
         self._son_test.clicked.connect(self._on_son_test)
         son_row.addWidget(self._son_test)
         self._son_row_widget = QWidget()
-        self._son_row_widget.setStyleSheet("background: transparent;")
+        self._son_row_widget.setStyleSheet(_FOND_TRANSPARENT)
         self._son_row_widget.setLayout(son_row)
         self._vl.addWidget(self._son_row_widget)
         self._vl.addWidget(_hint(
@@ -611,7 +635,6 @@ class _PageClips(_PageBase):
     def __init__(self, config: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         clips = config.get("clips", {})
-        from pathlib import Path as _Path
 
         self._vl.addWidget(_h2("Clips"))
         self._vl.addWidget(_sep())
@@ -623,7 +646,8 @@ class _PageClips(_PageBase):
         dur_row = QHBoxLayout()
         self._duration = QSpinBox()
         self._duration.setRange(10, 300)
-        self._duration.setValue(clips.get("duration_secs", 60))
+        # Meme defaut, meme consequence : voir _PageStreams.
+        self._duration.setValue(_entier(clips.get("duration_secs", 60), 60))
         self._duration.setSuffix(" s")
         self._duration.setFixedWidth(100)
         dur_row.addWidget(self._duration)
@@ -633,7 +657,8 @@ class _PageClips(_PageBase):
 
         # Dossier
         dir_row = QHBoxLayout()
-        default_dir = str(_Path.home() / "Videos" / "ZLink")
+        from core.paths import CLIPS_DEFAUT
+        default_dir = str(CLIPS_DEFAUT)
         self._directory = QLineEdit(clips.get("directory", "") or default_dir)
         self._directory.setPlaceholderText(default_dir)
         dir_row.addWidget(self._directory, stretch=1)
@@ -731,13 +756,13 @@ _THIRD_PARTY: list[tuple[str, str]] = [
     ("mpv / libmpv",              "GPL v2+ et LGPL v2.1+"),
     ("python-mpv",                "GPL v2+ ou LGPL v2.1+"),
     ("Streamlink",                "BSD 2-Clause"),
-    ("httpx",                     "BSD 3-Clause"),
+    ("httpx",                     _LICENCE_BSD),
     ("QtAwesome",                 "MIT"),
     ("Material Design Icons",     "Apache 2.0"),
     ("PyQtGraph",                 "MIT"),
-    ("NumPy",                     "BSD 3-Clause"),
-    ("lxml",                      "BSD 3-Clause"),
-    ("python-dotenv",             "BSD 3-Clause"),
+    ("NumPy",                     _LICENCE_BSD),
+    ("lxml",                      _LICENCE_BSD),
+    ("python-dotenv",             _LICENCE_BSD),
     ("pycryptodome",              "BSD et domaine public"),
     ("Chart.js",                  "MIT"),
 ]
@@ -837,12 +862,11 @@ class _PageCredits(_PageBase):
 
     def collect(self, config: dict) -> None:
         """Page informative : rien à enregistrer."""
-        return
 
 
 _NAV_ITEMS = [
     ("Streams",      "mdi6.play-circle-outline"),
-    ("Écrans",       "mdi6.monitor-multiple"),
+    (_TITRE_ECRANS,       "mdi6.monitor-multiple"),
     ("Alertes",      "mdi6.bell-outline"),
     ("Clips",        "mdi6.record-circle-outline"),
     ("Crédits",      "mdi6.heart-outline"),
@@ -942,7 +966,7 @@ class SettingsPanel(QWidget):
         cl.setSpacing(0)
 
         self._pages_stack = QStackedWidget()
-        self._pages_stack.setStyleSheet("background: transparent;")
+        self._pages_stack.setStyleSheet(_FOND_TRANSPARENT)
 
         self._page_streams = _PageStreams(self._config)
         self._page_screens = _PageScreens(self._config)
@@ -1007,7 +1031,7 @@ class SettingsPanel(QWidget):
         self._page_clips.collect(self._config)
 
         if not self._page_screens.collect(self._config):
-            self._switch_page("Écrans")
+            self._switch_page(_TITRE_ECRANS)
             self._footer_error.setText("⚠ Corriger les écrans avant de sauvegarder.")
             return
 

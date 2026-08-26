@@ -62,6 +62,10 @@ class _StreamWatcher:
         self._stop    = threading.Event()
         self._on_start = on_ad_start
         self._on_end   = on_ad_end
+        # État de la machine à confirmer, lu et écrit par le seul thread.
+        self._pub_active = False
+        self._pos_streak = 0   # polls consécutifs avec marqueurs
+        self._neg_streak = 0   # polls consécutifs sans marqueurs
 
         self._thread = threading.Thread(
             target=self._run, daemon=True,
@@ -73,41 +77,41 @@ class _StreamWatcher:
         self._stop.set()
 
     def _run(self) -> None:
-        ad_active     = False
-        pos_streak    = 0   # polls consécutifs avec marqueurs
-        neg_streak    = 0   # polls consécutifs sans marqueurs
-        start_time    = time.monotonic()
-
+        start_time = time.monotonic()
         client = httpx.Client(timeout=5.0, follow_redirects=True)
         try:
             while not self._stop.is_set():
                 text = self._fetch(client)
                 has_ad = _playlist_has_ad(text) if text else False
-
-                # Ignorer les marqueurs pendant la période de grâce au démarrage
-                in_grace = (time.monotonic() - start_time) < _STARTUP_GRACE
-                if in_grace:
-                    self._stop.wait(_POLL_INTERVAL)
-                    continue
-
-                if has_ad:
-                    pos_streak += 1
-                    neg_streak  = 0
-                    if not ad_active and pos_streak >= _AD_CONFIRM:
-                        ad_active = True
-                        logger.info("AdWatcher: pub détectée sur %s", self.login)
-                        self._on_start(self.login)
-                else:
-                    neg_streak += 1
-                    pos_streak  = 0
-                    if ad_active and neg_streak >= _END_CONFIRM:
-                        ad_active = False
-                        logger.info("AdWatcher: pub terminée sur %s", self.login)
-                        self._on_end(self.login)
-
+                # Les marqueurs sont ignorés pendant la période de grâce du
+                # démarrage : le début d'un flux en contient souvent.
+                if (time.monotonic() - start_time) >= _STARTUP_GRACE:
+                    self._transition(has_ad)
                 self._stop.wait(_POLL_INTERVAL)
         finally:
             client.close()
+
+    def _transition(self, has_ad: bool) -> None:
+        """Compte les polls consécutifs et bascule l'état une fois confirmé.
+
+        Une pub n'est annoncée qu'après _AD_CONFIRM relevés positifs d'affilée,
+        et sa fin après _END_CONFIRM négatifs : un relevé aberrant isolé ne doit
+        pas faire clignoter le bandeau.
+        """
+        if has_ad:
+            self._pos_streak += 1
+            self._neg_streak = 0
+            if not self._pub_active and self._pos_streak >= _AD_CONFIRM:
+                self._pub_active = True
+                logger.info("AdWatcher: pub détectée sur %s", self.login)
+                self._on_start(self.login)
+            return
+        self._neg_streak += 1
+        self._pos_streak = 0
+        if self._pub_active and self._neg_streak >= _END_CONFIRM:
+            self._pub_active = False
+            logger.info("AdWatcher: pub terminée sur %s", self.login)
+            self._on_end(self.login)
 
     def _fetch(self, client: httpx.Client) -> str:
         """Récupère le texte du M3U8. Retourne '' en cas d'erreur."""
@@ -161,6 +165,6 @@ class AdWatcher(QObject):
 
     def unwatch_all(self) -> None:
         """Arrête toutes les surveillances (ex: fermeture de l'app)."""
-        for w in list(self._watchers.values()):
+        for w in self._watchers.values():
             w.stop()
         self._watchers.clear()

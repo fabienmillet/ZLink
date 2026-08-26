@@ -357,39 +357,47 @@ class _ScreenPicker(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         for i, r in enumerate(self._rects):
-            on = self._enabled[i]
-            role = self._role_of(i)
-            p.setBrush(QBrush(QColor("#16211b" if on else "#141414")))
-            pen = QPen(QColor(_C_GREEN if on else "#333333"))
-            pen.setWidth(2 if on else 1)
-            if not on:
-                pen.setStyle(Qt.PenStyle.DashLine)
-            p.setPen(pen)
-            p.drawRoundedRect(r, 7, 7)
-
-            # Numéro, comme dans les réglages d'affichage du système.
-            p.setPen(QColor("#ffffff" if on else "#4a4a4a"))
-            f = QFont(_FONT, max(13, min(26, r.height() // 4)), QFont.Weight.Bold)
-            p.setFont(f)
-            num = QRect(r.x(), r.y() + 6, r.width(), r.height() // 2)
-            p.drawText(num, Qt.AlignmentFlag.AlignCenter, str(i + 1))
-
-            # Rôle attribué, ou l'état inactif.
-            p.setPen(QColor(_C_GREEN if on else "#3d3d3d"))
-            p.setFont(QFont(_FONT, 8, QFont.Weight.Bold))
-            lab = QRect(r.x(), r.y() + r.height() // 2, r.width(), r.height() // 2 - 6)
-            p.drawText(lab, Qt.AlignmentFlag.AlignCenter,
-                       self._ROLE_SHORT.get(role, "" if on else "DÉSACTIVÉ"))
-
-            # Définition, seulement si le rectangle est assez grand pour la lire.
-            if r.height() >= 70:
-                p.setPen(QColor("#5a5a5a" if on else "#2f2f2f"))
-                p.setFont(QFont(_FONT, 7))
-                g = self._geos[i]
-                foot = QRect(r.x(), r.bottom() - 16, r.width(), 14)
-                p.drawText(foot, Qt.AlignmentFlag.AlignCenter,
-                           f"{g[2]}\u00d7{g[3]}")
+            self._dessiner_ecran(p, i, r)
         p.end()
+
+    def _dessiner_ecran(self, p: QPainter, i: int, r: QRect) -> None:
+        """Un rectangle d'écran : cadre, numéro, rôle attribué, définition.
+
+        Un écran désactivé garde sa place mais passe en pointillés grisés :
+        le voir barré vaut mieux que le voir disparaître de la disposition.
+        """
+        on = self._enabled[i]
+        role = self._role_of(i)
+        p.setBrush(QBrush(QColor("#16211b" if on else "#141414")))
+        pen = QPen(QColor(_C_GREEN if on else "#333333"))
+        pen.setWidth(2 if on else 1)
+        if not on:
+            pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.drawRoundedRect(r, 7, 7)
+
+        # Numéro, comme dans les réglages d'affichage du système.
+        p.setPen(QColor("#ffffff" if on else "#4a4a4a"))
+        f = QFont(_FONT, max(13, min(26, r.height() // 4)), QFont.Weight.Bold)
+        p.setFont(f)
+        num = QRect(r.x(), r.y() + 6, r.width(), r.height() // 2)
+        p.drawText(num, Qt.AlignmentFlag.AlignCenter, str(i + 1))
+
+        # Rôle attribué, ou l'état inactif.
+        p.setPen(QColor(_C_GREEN if on else "#3d3d3d"))
+        p.setFont(QFont(_FONT, 8, QFont.Weight.Bold))
+        lab = QRect(r.x(), r.y() + r.height() // 2, r.width(), r.height() // 2 - 6)
+        p.drawText(lab, Qt.AlignmentFlag.AlignCenter,
+                   self._ROLE_SHORT.get(role, "" if on else "DÉSACTIVÉ"))
+
+        # Définition, seulement si le rectangle est assez grand pour la lire.
+        if r.height() >= 70:
+            p.setPen(QColor("#5a5a5a" if on else "#2f2f2f"))
+            p.setFont(QFont(_FONT, 7))
+            g = self._geos[i]
+            foot = QRect(r.x(), r.bottom() - 16, r.width(), 14)
+            p.drawText(foot, Qt.AlignmentFlag.AlignCenter,
+                       f"{g[2]}\u00d7{g[3]}")
 
 
 class _Step(QWidget):
@@ -619,7 +627,9 @@ class _StepSummary(_Step):
             f"• {len(assigned)} écran" + ("s" if len(assigned) > 1 else "")
             + " : " + ", ".join(
                 f"écran {int(i) + 1} → {_ROLE_LABELS.get(r, r).split(' (')[0]}"
-                for i, r in sorted(assigned.items())
+                # Tri NUMERIQUE : par cle texte, l'ecran 10 passerait
+                # avant le 2.
+                for i, r in sorted(assigned.items(), key=lambda kv: int(kv[0]))
             ),
             f"• Jusqu'à {config.get('max_active_streams', 16)} flux dans la grille",
             "• Disposition : " + {
