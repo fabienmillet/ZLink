@@ -68,11 +68,13 @@ class _FausseFenetre:
 
 
 class _FaussePilule:
-    def __init__(self) -> None:
+    def __init__(self, epinglee: bool = False) -> None:
         self.actif: int | None = None
         self.revelations = 0
         self.masquages = 0
+        self.retraits = 0
         self.premier_plan = 0
+        self.epinglee = epinglee
 
     def set_active(self, idx):
         self.actif = idx
@@ -85,6 +87,12 @@ class _FaussePilule:
 
     def start_hide(self):
         self.masquages += 1
+
+    def hide_now(self):
+        self.retraits += 1
+
+    def is_pinned(self):
+        return self.epinglee
 
 
 @pytest.fixture
@@ -225,35 +233,65 @@ def test_le_bord_haut_d_un_autre_ecran_ne_compte_pas(coquille, curseur, dx):
     assert coquille._pill.masquages == 1
 
 
-def test_pas_de_pilule_si_zlink_n_est_pas_au_premier_plan(
-        coquille, curseur, monkeypatch):
-    """Une pilule qui surgit par-dessus une autre application est une nuisance.
+@pytest.mark.parametrize("epinglee", [False, True])
+def test_pas_de_barre_si_zlink_n_est_pas_au_premier_plan(
+        coquille, curseur, monkeypatch, epinglee):
+    """Une barre qui surgit par-dessus une autre application est une nuisance.
 
     Le curseur est ici exactement dans la zone : seul le premier plan décide.
+    L'épingle ne change rien — la barre est au-dessus de TOUTES les fenêtres,
+    pas seulement de celles de ZLink, et elle reviendra avec lui.
     """
+    coquille._pill.epinglee = epinglee
     monkeypatch.setattr(single.QApplication, "activeWindow",
                         staticmethod(lambda: None))
     g = coquille._screen_rect
     curseur["p"] = QPoint(g.x() + 10, g.y())
     coquille._check_cursor()
     assert coquille._pill.revelations == 0
-    assert coquille._pill.masquages == 1
+    assert coquille._pill.retraits == 1
+
+
+def test_la_barre_epinglee_reste_meme_loin_du_bord(coquille, curseur):
+    """C'est tout l'objet de l'épingle : ne plus avoir à viser le bord haut."""
+    coquille._pill.epinglee = True
+    g = coquille._screen_rect
+    curseur["p"] = QPoint(g.x() + 10, g.y() + g.height() // 2)
+    coquille._check_cursor()
+    assert coquille._pill.revelations == 1
+    assert coquille._pill.masquages == 0
 
 
 # ── pilule de navigation ─────────────────────────────────────────────────────
 
-@pytest.fixture
-def pilule(qtbot, qapp):
-    """_NavPill réelle, sur l'écran principal (fenêtre de 310x44, hors champ)."""
+def _construire_pilule(qtbot, qapp, epinglee: bool):
+    """_NavPill réelle, sur l'écran principal, hors champ ou non selon l'épingle.
+
+    L'état de l'épingle est TOUJOURS passé explicitement : le laisser lire
+    config.json ferait dépendre ces tests d'un fichier, et l'un d'eux le
+    réécrit.
+    """
     bascules: list[int] = []
     fermetures: list[int] = []
     p = single._NavPill(qapp.primaryScreen(),
                         on_switch=bascules.append,
-                        on_close=lambda: fermetures.append(1))
+                        on_close=lambda: fermetures.append(1),
+                        pinned=epinglee)
     qtbot.addWidget(p)
     p.bascules = bascules
     p.fermetures = fermetures
     return p
+
+
+@pytest.fixture
+def pilule(qtbot, qapp):
+    """Barre décrochée : c'est le comportement escamotable qu'on éprouve ici."""
+    return _construire_pilule(qtbot, qapp, epinglee=False)
+
+
+@pytest.fixture
+def pilule_epinglee(qtbot, qapp):
+    return _construire_pilule(qtbot, qapp, epinglee=True)
 
 
 def test_la_pilule_nait_hors_ecran(pilule):
@@ -365,3 +403,108 @@ def test_quitter_la_pilule_relance_le_masquage(pilule):
     pilule.cancel_hide()
     pilule.leaveEvent(QEvent(QEvent.Type.Leave))
     assert pilule._hide_timer.isActive() is True
+
+
+# ── épingle ──────────────────────────────────────────────────────────────────
+
+def test_la_barre_epinglee_nait_visible(pilule_epinglee):
+    """Tout l'objet de l'épingle : savoir que la barre existe sans la chercher."""
+    assert pilule_epinglee.y() == pilule_epinglee._shown_y
+    assert pilule_epinglee.is_pinned() is True
+    assert pilule_epinglee._pin_btn.isChecked() is True
+
+
+def test_la_barre_decrochee_nait_hors_ecran(pilule):
+    assert pilule.y() == pilule._hidden_y
+    assert pilule.is_pinned() is False
+
+
+def test_l_epingle_est_engagee_par_defaut(config_vierge, qtbot, qapp):
+    """Sans réglage enregistré, la barre doit s'annoncer d'elle-même."""
+    p = single._NavPill(qapp.primaryScreen(),
+                        on_switch=lambda _i: None, on_close=lambda: None)
+    qtbot.addWidget(p)
+    assert p.is_pinned() is True
+
+
+def test_une_barre_epinglee_ignore_le_minuteur_de_masquage(pilule_epinglee):
+    """Sinon elle s'escamoterait 1,8 s après le moindre passage de souris."""
+    pilule_epinglee.start_hide()
+    assert pilule_epinglee._hide_timer.isActive() is False
+
+
+def test_decrocher_l_epingle_lance_le_masquage(pilule_epinglee):
+    pilule_epinglee.set_pinned(False)
+    assert pilule_epinglee.is_pinned() is False
+    assert pilule_epinglee._hide_timer.isActive() is True
+
+
+def test_engager_l_epingle_ramene_la_barre(pilule):
+    pilule.set_pinned(True)
+    pilule._anim.setCurrentTime(pilule._anim.duration())
+    assert pilule.y() == pilule._shown_y
+    assert pilule._hide_timer.isActive() is False
+
+
+def test_le_bouton_bascule_l_epingle(pilule):
+    """Le clic passe par le signal `clicked`, avec l'état déjà retourné."""
+    pilule._pin_btn.click()
+    assert pilule.is_pinned() is True
+    pilule._pin_btn.click()
+    assert pilule.is_pinned() is False
+
+
+def test_les_deux_etats_de_l_epingle_se_distinguent(pilule):
+    """Un bouton qui ne change pas n'apprend rien de son état."""
+    avant = (pilule._pin_btn.text(), pilule._pin_btn.icon().cacheKey(),
+             pilule._pin_btn.toolTip())
+    pilule.set_pinned(True)
+    apres = (pilule._pin_btn.text(), pilule._pin_btn.icon().cacheKey(),
+             pilule._pin_btn.toolTip())
+    assert avant != apres
+
+
+def test_l_epingle_reste_lisible_sans_qtawesome(qtbot, qapp, monkeypatch):
+    """Une icône absente rendrait le bouton vide, donc introuvable."""
+    monkeypatch.setattr(single, "_QTA_OK", False)
+    p = _construire_pilule(qtbot, qapp, epinglee=True)
+    assert p._pin_btn.text() != ""
+    p.set_pinned(False)
+    assert p._pin_btn.text() != ""
+
+
+def test_le_retrait_immediat_l_emporte_sur_l_epingle(pilule_epinglee):
+    """ZLink passe en arrière-plan : la barre ne doit pas flotter par-dessus."""
+    pilule_epinglee.hide_now()
+    pilule_epinglee._anim.setCurrentTime(pilule_epinglee._anim.duration())
+    assert pilule_epinglee.y() == pilule_epinglee._hidden_y
+    assert pilule_epinglee.is_pinned() is True, "l'épingle, elle, reste engagée"
+
+
+# ── mémoire du choix ─────────────────────────────────────────────────────────
+
+def test_le_choix_est_retenu_pour_la_prochaine_session(config_vierge, qtbot, qapp):
+    p = _construire_pilule(qtbot, qapp, epinglee=True)
+    p.set_pinned(False)
+    assert single.charger_epingle() is False
+
+
+def test_une_valeur_illisible_reengage_l_epingle(config_vierge):
+    """config.json s'édite à la main : une faute ne doit pas cacher la barre."""
+    config_vierge.write_text('{"single_bar_pinned": "oui"}', encoding="utf-8")
+    assert single.charger_epingle() is True
+
+
+def test_un_enregistrement_impossible_ne_leve_pas(monkeypatch, caplog):
+    """Config en lecture seule : on perd le réglage, pas l'application."""
+    monkeypatch.setattr(single.config_store, "save_merge", lambda _p: False)
+    single.enregistrer_epingle(True)
+    assert "epingle" in caplog.text
+
+
+def test_retirer_une_barre_deja_cachee_ne_relance_pas_l_animation(pilule):
+    """`_check_cursor` tourne toutes les 80 ms : rejouer le glissement à chaque
+    tour ferait une animation perpétuelle sur une barre déjà hors champ."""
+    assert pilule.y() == pilule._hidden_y
+    pilule.hide_now()
+    assert pilule._anim.state() == pilule._anim.State.Stopped
