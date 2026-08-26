@@ -36,7 +36,12 @@ SOURCES = ["core/replay_hd.py", "core/stream_manager.py", "core/version.py",
 
 def test_le_drapeau_est_pose_sous_windows(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
-    assert sans_fenetre() == {"creationflags": subprocess.CREATE_NO_WINDOW}
+    # La constante n'existe QUE sous Windows : simuler la plateforme sans la
+    # fournir faisait échouer le test sur l'intégration continue, alors que le
+    # code visé n'y est jamais atteint — `sans_fenetre` sort avant.
+    drapeau = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", drapeau, raising=False)
+    assert sans_fenetre() == {"creationflags": drapeau}
 
 
 @pytest.mark.parametrize("plateforme", ["linux", "darwin"])

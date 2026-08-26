@@ -1125,6 +1125,11 @@ def test_construction_complete(qtbot, monkeypatch, grille, muet):
     """Une cellule de grille démarre muette, le plein écran non."""
     lecteur = FauxLecteur()
     monkeypatch.setattr(mpv_widget, "_MPV_AVAILABLE", True)
+    # La plateforme est FIXÉE : ce test porte sur la construction, pas sur
+    # l'embarquement. Sous Linux hors X11 — le cas de l'intégration continue —
+    # le widget se rend inerte à dessein, et aucun lecteur n'est créé ; c'est
+    # le test voisin qui vérifie ce refus.
+    monkeypatch.setattr(mpv_widget.sys, "platform", "win32")
     monkeypatch.setattr(mpv_widget, "_mpv_module", faux_module(lecteur))
     w = mpv_widget.MpvWidget(grid_mode=grille)
     qtbot.addWidget(w)

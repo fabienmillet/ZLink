@@ -97,9 +97,19 @@ def test_install_ne_fait_rien_hors_linux(monkeypatch, plateforme):
     assert x11_guard._HANDLER_REF is None
 
 
-def test_install_reel_hors_linux_ne_leve_pas():
-    """Appel sans rustine : la plateforme de test n'est pas Linux."""
-    assert x11_guard.install() is False
+def test_install_reel_ne_leve_jamais():
+    """Appel sans rustine, sur la plateforme RÉELLE du banc d'essai.
+
+    Le test supposait auparavant que ce n'était jamais Linux — faux dès que la
+    suite tourne sur l'intégration continue, où libX11 est présente et où la
+    garde s'installe pour de bon. Ce qui doit tenir sur les deux plateformes,
+    c'est qu'aucun appel ne lève : hors Linux on rend False sans rien tenter,
+    sous Linux True ou False selon que libX11 réponde.
+    """
+    resultat = x11_guard.install()
+    assert isinstance(resultat, bool)
+    if not sys.platform.startswith("linux"):
+        assert resultat is False
 
 
 def test_install_reste_inoffensif_repete(monkeypatch):
