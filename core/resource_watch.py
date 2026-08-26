@@ -171,12 +171,20 @@ def _temps_cpu_linux() -> tuple[float, float, float] | None:
         with open("/proc/stat", encoding="ascii") as f:
             champs = [float(x) for x in f.readline().split()[1:]]
         total = sum(champs)
-        # champs[3] = idle, champs[4] = iowait
-        actif = total - champs[3] - (champs[4] if len(champs) > 4 else 0.0)
+        # La quatrieme colonne de /proc/stat est le temps oisif, la cinquieme
+        # l'attente d'entrees-sorties : le processeur n'y travaille pas non
+        # plus. Les noyaux anciens s'arretent avant la cinquieme.
+        oisif = champs[3]
+        attente_es = champs[4] if len(champs) > 4 else 0.0
+        actif = total - oisif - attente_es
         with open(f"/proc/{os.getpid()}/stat", encoding="ascii") as f:
             parts = f.read().rsplit(") ", 1)[1].split()
-        # utime (13) et stime (14) en comptant depuis le champ 3.
-        processus = float(parts[11]) + float(parts[12])
+        # Champs 14 et 15 de /proc/<pid>/stat : temps utilisateur et temps
+        # noyau du processus. Ils sont ici aux indices 11 et 12, la coupure sur
+        # « ) » ayant deja consomme les treize premiers champs.
+        temps_utilisateur = float(parts[11])
+        temps_noyau = float(parts[12])
+        processus = temps_utilisateur + temps_noyau
         return total, actif, processus
     except (OSError, ValueError, IndexError) as exc:
         logger.debug("Temps CPU indisponibles : %s", exc)

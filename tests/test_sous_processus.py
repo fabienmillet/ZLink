@@ -90,3 +90,47 @@ def test_aucun_autre_fichier_de_l_application_ne_lance_de_processus():
             if list(_appels_subprocess(chemin)):
                 oublies.append(str(chemin.relative_to(RACINE)))
     assert oublies == [], f"points d'appel non couverts : {oublies}"
+
+
+# ── Couverture remontée à SonarQube ─────────────────────────────────────────
+#
+# La configuration était correcte et la couverture restait vide côté serveur :
+# la CI ne lançait jamais les tests, donc coverage.xml n'existait pas au moment
+# du scan — un chemin juste vers un fichier absent ne produit aucun message.
+#
+# Ces contrôles portent sur la configuration, pas sur un rapport : ils tiennent
+# sans avoir à lancer la couverture.
+
+_COVERAGERC = (RACINE / ".coveragerc").read_text(encoding="utf-8")
+_SONAR = (RACINE / "sonar-project.properties").read_text(encoding="utf-8")
+_CI = (RACINE / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+
+
+def test_les_chemins_du_rapport_sont_relatifs():
+    """Sans quoi coverage.xml porte les chemins absolus de la machine de test.
+
+    SonarQube ne retrouve alors aucun fichier, et la couverture reste à zéro
+    sans le moindre avertissement.
+    """
+    assert "relative_files = True" in _COVERAGERC
+
+
+def test_une_seule_racine_de_couverture():
+    """Quatre racines nommaient trois fichiers « __init__.py » à l'identique.
+
+    SonarQube rattachait la couverture des trois au premier qu'il résolvait.
+    """
+    ligne = next(l for l in _COVERAGERC.splitlines()
+                 if l.startswith("source ="))
+    assert ligne.split("=", 1)[1].strip() == "."
+
+
+def test_sonarqube_sait_ou_lire_le_rapport():
+    assert "sonar.python.coverage.reportPaths=coverage.xml" in _SONAR
+
+
+def test_la_ci_produit_le_rapport_avant_de_scanner():
+    """L'ordre est tout : un scan lancé avant les tests ne trouve rien."""
+    i_tests = _CI.index("--cov-report=xml")
+    i_scan = _CI.index("sonarqube-scan-action")
+    assert i_tests < i_scan, "le scan passe avant la production du rapport"

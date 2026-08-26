@@ -1,12 +1,36 @@
 [run]
 branch = True
-source = core,widgets,windows,scripts
+# UNE seule racine, la racine du dépôt — et non les quatre paquets.
+#
+# Avec quatre racines, coverage nomme chaque fichier par sa base seule :
+# « __init__.py » apparaît trois fois, une par paquet, et SonarQube rattache
+# leur couverture au premier qu'il résout. Depuis la racine, les chemins sont
+# « core/ad_watcher.py » et l'ambiguïté disparaît.
+source = .
+# Chemins RELATIFS à la racine du dépôt. Sans cette option, coverage.xml
+# déclare des racines absolues — celles de la machine qui a lancé les tests —
+# et ne nomme les fichiers que par leur base : SonarQube doit alors deviner à
+# quelle racine rattacher un « __init__.py », et la couverture se rattache au
+# mauvais fichier, ou à aucun.
+relative_files = True
 omit =
     */.venv/*
     */tests/*
     # Scripts de publication : exécutés par la CI, pas par l'application.
     scripts/gen_release_key.py
     scripts/sign_release.py
+    # Outil de diagnostic, hors application.
+    tools_gpu_watch.py
+    # main.py doit rester EXCLU, bien que SonarQube l'analyse.
+    #
+    # En fin de mesure, coverage importe les fichiers de `source` qui n'ont pas
+    # été exécutés, afin de les déclarer à 0 %. Importer main.py réexécute son
+    # en-tête, qui recharge core.* et numpy — lequel refuse d'être chargé deux
+    # fois dans le même processus. Toute la collecte pytest échoue alors sur
+    # « cannot load module more than once per process ».
+    #
+    # Le prix est que main.py apparaît non couvert côté SonarQube.
+    main.py
 
 [report]
 exclude_lines =

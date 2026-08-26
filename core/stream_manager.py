@@ -72,6 +72,9 @@ def _graphies(palier: str) -> list[str]:
     return [hauteur, f"{hauteur}30"]
 
 
+#: Un seul flux : on prend le meilleur rendu disponible.
+_QUALITE_MAX = "1080p60,1080p,best"
+
 _QUALITE_720 = "720p60,720p,720p30,480p,480p30,360p,360p30,worst"
 
 
@@ -87,7 +90,7 @@ QUALITY_GRID = "360p,360p30,160p,160p30,worst"
 # palier dont le seuil couvre le nombre de flux actifs gagne ; au-delà du dernier,
 # on retombe sur QUALITY_GRID. Budget visé : ~50 Mbps et VCN < 50 %.
 _DEFAULT_ADAPTIVE_TIERS: list[tuple[int, str]] = [
-    (1, "1080p60,1080p,best"),
+    (1, _QUALITE_MAX),
     (4, _QUALITE_720),
     (9, "480p,480p30,360p,360p30,160p,160p30,worst"),
 ]
@@ -165,7 +168,7 @@ _LEGACY_QUALITY = {
     "360p,worst":            QUALITY_GRID,
     "480p,360p,worst":       _ECHELLE_480,
     "720p,480p,worst":       _QUALITE_720,
-    "1080p60,1080p,best":    "1080p60,1080p,best",
+    _QUALITE_MAX:    _QUALITE_MAX,
     "720p60,720p,480p":      _QUALITE_720,
     # Deuxième génération : les graphies suffixées SEULES. Elles échouaient sur
     # toute chaîne dont le transcodage n'expose que « 360p » — code 1, et la
@@ -174,7 +177,7 @@ _LEGACY_QUALITY = {
     "360p30,160p30,worst":   QUALITY_GRID,
     "480p30,360p30,160p30":  _ECHELLE_480,
     "720p60,480p30,360p30":  _QUALITE_720,
-    "1080p60,best":          "1080p60,1080p,best",
+    "1080p60,best":          _QUALITE_MAX,
 }
 
 
