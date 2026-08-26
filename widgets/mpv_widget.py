@@ -255,6 +255,31 @@ def _grid_back_bytes(secs: int) -> int:
     return int(secs * 400_000)        # ~3,2 Mbit/s, avec de la marge
 
 
+#: Dernier horodatage rendu, et le rang de sa réutilisation. Deux dump-cache
+#: peuvent tomber dans la même milliseconde — le replay du plein écran en
+#: lance justement deux coup sur coup.
+_dernier_horodatage: tuple[str, int] = ("", 0)
+
+
+def _horodatage_de_clip() -> str:
+    """Un horodatage lisible, et unique même répété dans la milliseconde.
+
+    Le nom ne tenait qu'à la seconde : le second dump visait le MÊME fichier
+    et écrasait le premier pendant que mpv y écrivait encore. Le replay lisait
+    alors un tronçon corrompu, ou repartait chercher chez Twitch en croyant
+    qu'aucun tampon local ne valait mieux.
+    """
+    global _dernier_horodatage
+
+    import datetime
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    precedent, rang = _dernier_horodatage
+    rang = rang + 1 if ts == precedent else 0
+    _dernier_horodatage = (ts, rang)
+    return ts if rang == 0 else f"{ts}-{rang}"
+
+
 class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
     """Widget hébergeant une instance python-mpv.
 
@@ -817,8 +842,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             from core.paths import CLIPS_DEFAUT
             clip_dir = pathlib.Path(directory) if directory else CLIPS_DEFAUT
             clip_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            output = clip_dir / f"clip_{ts}.ts"
+            output = clip_dir / f"clip_{_horodatage_de_clip()}.ts"
             self._player.command("dump-cache", start, end, str(output))
             logger.info("Clip sauvegardé : %s", output)
             return str(output)
@@ -881,6 +905,22 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         except Exception:      # noqa: BLE001 — lecture en cours de démontage
             return None
         return float(pos) if pos is not None else None
+
+    def restant(self) -> float | None:
+        """Secondes de lecture restantes, ou None si indisponible.
+
+        `duration` ne peut pas servir ici : sur un fragment repris chez Twitch
+        il porte l'horodatage absolu du direct. `time-remaining` est un ÉCART,
+        juste dans les deux cas — c'est lui qui, ajouté à la position, donne
+        la vraie longueur du morceau.
+        """
+        if self._player is None:
+            return None
+        try:
+            reste = self._player.time_remaining
+        except Exception:      # noqa: BLE001 — lecture en cours de démontage
+            return None
+        return float(reste) if reste is not None else None
 
     @property
     def is_playing(self) -> bool:

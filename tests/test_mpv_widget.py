@@ -775,6 +775,21 @@ def test_le_clip_puise_dans_le_tampon_arriere(widget_inerte, tmp_path):
     assert (tmp_path / "clips").is_dir(), "le dossier est créé au besoin"
 
 
+def test_deux_clips_dans_la_meme_seconde_ne_se_marchent_pas_dessus(
+        widget_inerte, tmp_path):
+    """Le nom du fichier ne tenait qu'à la seconde.
+
+    Deux « dump-cache » lancés coup sur coup visaient le même fichier : le
+    second écrasait le premier pendant que mpv y écrivait encore. C'est ce qui
+    faisait repartir le replay du plein écran chercher chez Twitch, croyant
+    qu'aucun tampon local ne valait mieux.
+    """
+    widget_inerte._player = FauxLecteur(time_pos=100.0)
+    premier = widget_inerte.save_clip(60, str(tmp_path))
+    second = widget_inerte.save_clip(30, str(tmp_path))
+    assert premier != second
+
+
 def test_un_clip_plus_long_que_la_lecture_part_de_zero(widget_inerte, tmp_path):
     lecteur = FauxLecteur(time_pos=10.0)
     widget_inerte._player = lecteur

@@ -191,6 +191,11 @@ class StreamerSheet(QDialog):
         detail = f"{etat} · {s.twitch_login}"
         if s.online and s.game:
             detail += f" · {s.game}"
+        if s.online:
+            from core import live_uptime
+            depuis = live_uptime.texte(s.twitch_login)
+            if depuis:
+                detail += f" · {depuis}"
         sous = QLabel(detail)
         sous.setTextFormat(Qt.TextFormat.PlainText)
         sous.setFont(QFont(_FONT, 10))

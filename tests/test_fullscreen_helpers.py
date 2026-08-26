@@ -611,3 +611,150 @@ def test_le_menu_telecommande_ouvert_prend_toute_la_hauteur(geom):
     geom._geometrie_direct(1920, 1080, 1920)
     assert geom._remote_menu.geometrie == (
         0, 0, fullscreen.REMOTE_MENU_WIDTH, 1080)
+
+
+# ── run_action : la surface unique des gestes ────────────────────────────────
+#
+# La palette du panel et la télécommande Stream Deck passent toutes deux par
+# là. Une clé inconnue doit être ignorée sans bruit : le panel en traite
+# d'autres de son côté, et une télécommande peut être plus récente que
+# l'application qu'elle pilote.
+
+class _FenetreGestes:
+    """Compte les gestes appelés, sans construire de fenêtre."""
+
+    run_action = fullscreen.FullscreenWindow.run_action
+    ACTIONS = fullscreen.FullscreenWindow.ACTIONS
+
+    def __init__(self) -> None:
+        self.appels: list[str] = []
+        for nom in ("_save_clip", "_replay_current", "_toggle_chat",
+                    "_open_donate_view", "_toggle_favorite_current",
+                    "_toggle_mute"):
+            setattr(self, nom, lambda n=nom: self.appels.append(n))
+
+
+@pytest.mark.parametrize("cle,methode", [
+    ("clip", "_save_clip"),
+    ("replay", "_replay_current"),
+    ("chat", "_toggle_chat"),
+    ("don", "_open_donate_view"),
+    ("favori", "_toggle_favorite_current"),
+    ("muet", "_toggle_mute"),
+])
+def test_chaque_action_appelle_son_geste(cle, methode):
+    f = _FenetreGestes()
+    f.run_action(cle)
+    assert f.appels == [methode]
+
+
+@pytest.mark.parametrize("cle", ["recap", "", "inconnue", "CLIP"])
+def test_une_action_inconnue_est_ignoree_sans_bruit(cle):
+    f = _FenetreGestes()
+    f.run_action(cle)
+    assert f.appels == []
+
+
+def test_la_liste_publiee_correspond_aux_gestes_reels():
+    """`ACTIONS` sert de catalogue à la télécommande : si elle mentait, une
+    touche du Stream Deck ne ferait rien sans que personne ne le sache."""
+    f = _FenetreGestes()
+    for cle in _FenetreGestes.ACTIONS:
+        f.appels.clear()
+        f.run_action(cle)
+        assert f.appels, f"« {cle} » est annoncée mais ne fait rien"
+
+
+# ── Replay : la durée annoncée doit être celle qu'on joue ────────────────────
+#
+# Le bandeau annonçait la durée DEMANDÉE. Or le tampon du direct peut être
+# plus court, et une reprise chez Twitch est plafonnée par ce que la
+# plateforme garde en ligne — vingt-huit secondes. On lisait donc « 60
+# dernières secondes » sur vingt-huit secondes de vidéo, et la barre de
+# progression s'arrêtait à mi-course.
+
+class _LecteurDeReplay:
+    def __init__(self, restant):
+        self._restant = restant
+
+    def restant(self):
+        return self._restant
+
+
+class _FauxPleinEcran:
+    """Le strict nécessaire pour éprouver `_mesurer_duree` sans fenêtre."""
+
+    def __init__(self, demandee=60, origine=0.0):
+        self._replay_secs = demandee
+        self._replay_origine = origine
+        self._replay_badge = None
+
+    mesurer = fullscreen.FullscreenWindow._mesurer_duree
+
+
+def test_la_duree_reellement_obtenue_remplace_celle_demandee():
+    ecran = _FauxPleinEcran(demandee=60)
+    ecran.mesurer(_LecteurDeReplay(restant=28.0), 0.0)
+    assert ecran._replay_secs == 28
+
+
+def test_un_horodatage_absolu_n_est_pas_pris_pour_une_duree():
+    """Un fragment Twitch démarre à l'heure du direct : des milliers de secondes."""
+    ecran = _FauxPleinEcran(demandee=60, origine=42_000.0)
+    ecran.mesurer(_LecteurDeReplay(restant=9_000.0), 42_000.0)
+    assert ecran._replay_secs == 60, "la durée demandée devait être conservée"
+
+
+def test_une_duree_nulle_est_ignoree():
+    ecran = _FauxPleinEcran(demandee=60)
+    ecran.mesurer(_LecteurDeReplay(restant=0.0), 0.0)
+    assert ecran._replay_secs == 60
+
+
+def test_sans_temps_restant_rien_ne_change():
+    """mpv ne le donne pas tant que le fichier n'est pas ouvert."""
+    ecran = _FauxPleinEcran(demandee=60)
+    ecran.mesurer(_LecteurDeReplay(restant=None), 0.0)
+    assert ecran._replay_secs == 60
+
+
+def test_l_origine_est_retranchee_de_la_mesure():
+    """Position et reste sont absolus ; seule leur distance à l'origine compte."""
+    ecran = _FauxPleinEcran(demandee=60, origine=42_000.0)
+    ecran.mesurer(_LecteurDeReplay(restant=10.0), 42_020.0)
+    assert ecran._replay_secs == 30
+
+
+def test_le_bandeau_corrige_ce_qu_il_annonce(qtbot):
+    from PyQt6.QtWidgets import QWidget
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    badge = fullscreen._ReplayBadge("samueletienne", 60, parent)
+    assert "60 dernières secondes" in badge._who.text()
+    badge.set_secs(28)
+    assert "28 dernières secondes" in badge._who.text()
+
+
+# ── Clip : un geste sans retour visible est un geste raté ────────────────────
+
+def test_l_annonce_laisse_passer_les_clics(qtbot):
+    """Elle couvre la vidéo : avaler un clic trois secondes serait pire."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QWidget
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    annonce = fullscreen._Annonce("Clip sauvegardé · 60 s", "#00ff87", parent)
+    assert annonce.testAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+
+def test_l_annonce_porte_le_texte_demande(qtbot):
+    from PyQt6.QtWidgets import QLabel, QWidget
+
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    annonce = fullscreen._Annonce("Clip sauvegardé · 60 s", "#00ff87", parent)
+    textes = [w.text() for w in annonce.findChildren(QLabel)]
+    assert textes == ["Clip sauvegardé · 60 s"]

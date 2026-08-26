@@ -1711,6 +1711,11 @@ _REPLAY_PIP_W, _REPLAY_PIP_H, _REPLAY_MARGIN = 320, 180, 16
 #: Attente maximale de fin d'écriture du fichier par dump-cache.
 _REPLAY_DUMP_TIMEOUT_S = 6.0
 
+#: Bornes au-delà desquelles une durée de replay mesurée n'est pas crue. En
+#: dessous, le fichier n'est pas encore lisible ; au-dessus, c'est un
+#: horodatage absolu pris pour une durée.
+_DUREE_REPLAY_MIN, _DUREE_REPLAY_MAX = 1.0, 600.0
+
 
 class _PetitAnneau(QWidget):
     """Anneau qui tourne, seize pixels. Rien d'autre.
@@ -1750,6 +1755,37 @@ class _PetitAnneau(QWidget):
         p.setPen(stylo)
         p.drawArc(boite, -self._angle * 16, self._ARC * 16)
         p.end()
+
+
+class _Annonce(QWidget):
+    """Bandeau passager posé sur la vidéo : « clip sauvé », et rien de plus.
+
+    Le retour d'un clip ne tenait que dans le libellé du bouton de la barre
+    d'outils, laquelle s'efface après deux secondes d'immobilité — et n'existe
+    pas du tout quand le geste vient du clavier ou du Stream Deck. On appuyait
+    donc sans jamais savoir si quelque chose avait été enregistré.
+    """
+
+    def __init__(self, texte: str, couleur: str, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Transparent aux clics : le bandeau passe au-dessus de la vidéo, et
+        # avaler un clic pendant trois secondes serait pire que le silence.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet(
+            "QWidget { background: rgba(10,10,10,205); border: 1px solid "
+            + couleur + "; border-radius: 6px; }"
+        )
+        h = QHBoxLayout(self)
+        h.setContentsMargins(14, 7, 14, 7)
+        h.setSpacing(0)
+        mot = QLabel(texte)
+        mot.setTextFormat(Qt.TextFormat.PlainText)
+        mot.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
+        mot.setStyleSheet(
+            f"color: {couleur}; background: transparent; border: none;")
+        h.addWidget(mot)
+        self.adjustSize()
 
 
 class _ReplayLoader(QWidget):
@@ -1856,11 +1892,13 @@ class _ReplayBadge(QWidget):
         dot.setStyleSheet("color: #ff6b00; background: transparent; border: none;"
                           " letter-spacing: 2px;")
         h.addWidget(dot)
-        who = QLabel(f"{login} · {secs} dernières secondes")
-        who.setTextFormat(Qt.TextFormat.PlainText)
-        who.setFont(QFont(_POLICE_UI_VARIABLE, 10))
-        who.setStyleSheet("color: #e0e0e0; background: transparent; border: none;")
-        h.addWidget(who)
+        self._login = login
+        self._who = QLabel(f"{login} · {secs} dernières secondes")
+        self._who.setTextFormat(Qt.TextFormat.PlainText)
+        self._who.setFont(QFont(_POLICE_UI_VARIABLE, 10))
+        self._who.setStyleSheet(
+            "color: #e0e0e0; background: transparent; border: none;")
+        h.addWidget(self._who)
         sortie = QLabel("✕  Échap")
         sortie.setFont(QFont(_POLICE_UI_VARIABLE, 10, QFont.Weight.Bold))
         sortie.setStyleSheet("color: #888888; background: transparent; border: none;")
@@ -1870,6 +1908,10 @@ class _ReplayBadge(QWidget):
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self.fermeture_demandee.emit()
         event.accept()
+
+    def set_secs(self, secs: int) -> None:
+        """Corrige la durée annoncée quand la vraie est connue."""
+        self._who.setText(f"{self._login} · {secs} dernières secondes")
 
 
 # ---------------------------------------------------------------------------
@@ -1894,6 +1936,14 @@ class FullscreenWindow(QMainWindow):
     #: console de mixage. Sans ce retour, régler le son en plein écran laissait
     #: la tranche du mixer sur sa valeur d'avant.
     volume_changed = pyqtSignal(int)
+    #: Émis quand un état BASCULABLE change sans que le flux change : chat
+    #: ouvert ou fermé, favori posé ou retiré. Les touches d'un Stream Deck
+    #: portent ces états — sans ce signal elles resteraient sur l'ancien.
+    etat_bascule = pyqtSignal()
+    #: (login, favori) — l'étoile posée depuis le plein écran, le clavier ou
+    #: le boîtier Stream Deck. Le panel affiche la même étoile sur ses cartes :
+    #: sans ce signal, les deux moitiés de l'application divergent.
+    favori_change = pyqtSignal(str, bool)
     mute_changed = pyqtSignal(bool)
     #: Interne : le fil de reprise HD a fini. (chemin, secondes obtenues)
     _replay_hd_pret = pyqtSignal(str, float)
@@ -1921,6 +1971,10 @@ class FullscreenWindow(QMainWindow):
         self._replay_badge: QWidget | None = None
         self._replay_progress: QWidget | None = None
         self._replay_loader: QWidget | None = None
+        #: Bandeau passager d'un geste qui a abouti — un clip enregistré. Le
+        #: minuteur est gardé pour être remplacé, pas empilé.
+        self._annonce: QWidget | None = None
+        self._annonce_timer: QTimer | None = None
         #: Vrai entre une demande de replay et son abandon : le fil de reprise
         #: peut encore rendre un fichier, il ne doit plus être joué.
         self._replay_annule: bool = False
@@ -2315,14 +2369,7 @@ class FullscreenWindow(QMainWindow):
         # Bouton donation : visible seulement si l'URL est disponible
         self._donate_btn.setVisible(bool(donation_url))
 
-        # login et game viennent d'APIs tierces : échappés avant interpolation
-        # dans du texte riche.
-        parts = [f"<b>{html.escape(twitch_login)}</b>"]
-        if game:
-            parts.append(
-                f"<span style='color:#888888;'> · {html.escape(game)}</span>"
-            )
-        self._ov_info.setText("".join(parts))
+        self._peindre_info(twitch_login, game)
         self._ov_viewers.setText(
             f"{self._fmt_viewers(viewers)} viewers" if viewers else "",
         )
@@ -2387,6 +2434,31 @@ class FullscreenWindow(QMainWindow):
     @property
     def current_login(self) -> str:
         return self._current_login
+
+    def _peindre_info(self, login: str, game: str) -> None:
+        """La ligne « chaîne · jeu · depuis 4 h 12 » de la barre du bas.
+
+        Le login et le jeu viennent d'APIs tierces : échappés avant
+        interpolation dans du texte riche. La durée, elle, est fabriquée ici.
+        """
+        from core import live_uptime
+
+        parts = [f"<b>{html.escape(login)}</b>"]
+        if game:
+            parts.append(
+                f"<span style='color:#888888;'> · {html.escape(game)}</span>"
+            )
+        depuis = live_uptime.texte(login)
+        if depuis:
+            parts.append(f"<span style='color:#888888;'> · {depuis}</span>")
+        self._ov_info.setText("".join(parts))
+        self._info_courante = (login, game)
+
+    def rafraichir_duree(self) -> None:
+        """Redessine la barre quand une durée de direct vient d'être relevée."""
+        login, game = getattr(self, "_info_courante", ("", ""))
+        if login and login == self._current_login:
+            self._peindre_info(login, game)
 
     def update_viewers(self, viewers: int) -> None:
         self._current_viewers = viewers
@@ -2572,13 +2644,21 @@ class FullscreenWindow(QMainWindow):
         from core.replay_hd import REPLAY_SECS
         return REPLAY_SECS
 
-    def start_replay(self, login: str, path: str, secs: int = 30) -> None:
+    def start_replay(self, login: str, path: str, secs: int = 30,
+                     tampon_optimal: bool = False) -> None:
         """Rejoue `path` en grand, le direct passant en incrustation.
 
         Le direct ne peut pas se rembobiner lui-même : reculer dans son cache
         le mettrait en pause et ferait décrocher le flux. Le moment est donc
         rejoué par un SECOND lecteur, tandis que le direct continue, réduit
         dans un coin.
+
+        `tampon_optimal` dit que `path` sort DÉJÀ du plein écran. Sans cette
+        indication on redemandait un `dump-cache` au même lecteur, dans la
+        même seconde : les deux visaient le même fichier, la comparaison de
+        chemins concluait « rien de mieux », et le replay partait chercher
+        chez Twitch les vingt-huit secondes que la plateforme garde en
+        ligne — alors que soixante étaient déjà sur le disque.
         """
         cw = self.centralWidget()
         if cw is None or self._replay_active:
@@ -2590,6 +2670,9 @@ class FullscreenWindow(QMainWindow):
         # attente de fichier, et le plus long par plusieurs secondes de réseau.
         self._montrer_chargeur(login, secs)
 
+        if tampon_optimal:
+            self._engager_replay(path)
+            return
         local = self._meilleur_tampon(login, path)
         if local != path:
             # La chaîne est celle du plein écran : son tampon est déjà en
@@ -2612,6 +2695,46 @@ class FullscreenWindow(QMainWindow):
         self._placer_chargeur()
         chargeur.show()
         chargeur.raise_()
+
+    def annoncer(self, texte: str, couleur: str = "#00ff87",
+                 secondes: float = 3.0) -> None:
+        """Montre un bandeau passager au centre haut de la vidéo."""
+        cw = self.centralWidget()
+        if cw is None:
+            return
+        self._retirer_annonce()
+        annonce = _Annonce(texte, couleur, cw)
+        self._annonce = annonce
+        self._placer_annonce()
+        annonce.show()
+        annonce.raise_()
+        # Un seul minuteur, remplacé à chaque annonce : deux clips coup sur
+        # coup ne doivent pas faire disparaître le second au bout du premier.
+        self._annonce_timer = QTimer(self)
+        self._annonce_timer.setSingleShot(True)
+        self._annonce_timer.timeout.connect(self._retirer_annonce)
+        self._annonce_timer.start(int(secondes * 1000))
+
+    def _placer_annonce(self) -> None:
+        """Sous le badge REPLAY, pour ne pas le recouvrir quand les deux sont là."""
+        annonce = self._annonce
+        if annonce is None:
+            return
+        chat_w = self._chat_panel._width if self._chat_panel._visible else 0
+        video_w = self.width() - chat_w
+        haut = 24 + (44 if self._replay_active else 0)
+        annonce.move((video_w - annonce.width()) // 2, haut)
+
+    def _retirer_annonce(self) -> None:
+        annonce, self._annonce = self._annonce, None
+        if annonce is not None:
+            annonce.hide()   # avant de détacher : détaché et visible = une fenêtre
+            annonce.setParent(None)
+            annonce.deleteLater()
+        minuteur, self._annonce_timer = self._annonce_timer, None
+        if minuteur is not None:
+            minuteur.stop()
+            minuteur.deleteLater()
 
     def _placer_chargeur(self) -> None:
         """Centre le bandeau sur la zone vidéo, à la hauteur du badge REPLAY."""
@@ -2771,8 +2894,31 @@ class FullscreenWindow(QMainWindow):
             return
         if self._replay_origine is None:
             self._replay_origine = pos
+            self._mesurer_duree(joueur, pos)
         span = max(1.0, float(self._replay_secs))
         barre.set_ratio((pos - self._replay_origine) / span)
+
+    def _mesurer_duree(self, joueur, pos: float) -> None:
+        """Remplace la durée DEMANDÉE par celle qu'on a réellement obtenue.
+
+        Les deux diffèrent souvent : le tampon du direct peut être plus court
+        que la demande, et une reprise chez Twitch est plafonnée par ce que la
+        plateforme garde en ligne. Annoncer soixante secondes pour en jouer
+        vingt-huit faisait mentir le bandeau ET s'arrêter la barre au milieu.
+        """
+        restant = joueur.restant()
+        if restant is None:
+            return
+        mesuree = float(pos) + float(restant) - float(self._replay_origine or pos)
+        if not _DUREE_REPLAY_MIN <= mesuree <= _DUREE_REPLAY_MAX:
+            # Horodatage absolu, fichier encore incomplet : on garde la durée
+            # demandée plutôt qu'une valeur qui ferait n'importe quoi.
+            logger.debug("Replay : durée mesurée aberrante (%.1f s), ignorée",
+                         mesuree)
+            return
+        self._replay_secs = max(1, round(mesuree))
+        if self._replay_badge is not None:
+            self._replay_badge.set_secs(self._replay_secs)
 
     def stop_replay(self) -> None:
         """Referme le replay et rend l'écran au direct."""
@@ -2812,11 +2958,32 @@ class FullscreenWindow(QMainWindow):
                 logger.debug("Replay : fichier temporaire non supprimé — %s", exc)
 
     def run_action(self, cle: str) -> None:
-        """Exécute une action demandée depuis la palette du panel."""
-        if cle == "clip":
-            self._save_clip()
-        elif cle == "replay":
-            self._replay_current()
+        """Exécute une action, d'où qu'elle vienne — palette, télécommande.
+
+        Une table plutôt qu'une chaîne de `elif` : ce qu'on vient lire ici,
+        c'est la LISTE des gestes disponibles, et elle se lit d'un coup.
+
+        Une clé inconnue est ignorée sans bruit. Le panel en traite d'autres de
+        son côté (« recap »), et une télécommande peut être plus récente que
+        l'application qu'elle pilote.
+        """
+        gestes = {
+            "clip": self._save_clip,
+            "replay": self._replay_current,
+            "chat": self._toggle_chat,
+            "don": self._open_donate_view,
+            "favori": self._toggle_favorite_current,
+            "muet": self._toggle_mute,
+        }
+        geste = gestes.get(cle)
+        if geste is None:
+            logger.debug("Action « %s » inconnue du plein écran", cle)
+            return
+        geste()
+
+    #: Gestes que `run_action` sait exécuter. Publié pour que la télécommande
+    #: et la palette proposent la même liste sans la recopier.
+    ACTIONS = ("clip", "replay", "chat", "don", "favori", "muet")
 
     def _replay_current(self) -> None:
         """Rejoue les dernières secondes du direct affiché."""
@@ -2827,7 +2994,22 @@ class FullscreenWindow(QMainWindow):
         secs = int(self._clip_config.get("duration_secs", 30) or 30)
         path = self._mpv.save_clip(secs, tempfile.gettempdir())
         if path:
-            self.start_replay(self._current_login, path, secs)
+            # Ce tampon EST celui du plein écran, en pleine qualité : inutile
+            # d'en chercher un meilleur, il n'y en a pas.
+            self.start_replay(self._current_login, path, secs,
+                              tampon_optimal=True)
+
+    @property
+    def chat_ouvert(self) -> bool:
+        """Le panneau de chat est-il déployé."""
+        return bool(self._chat_panel._visible)
+
+    @property
+    def favori_courant(self) -> bool:
+        """La chaîne affichée est-elle en favori."""
+        from core import favorites
+        return bool(self._current_login) and favorites.is_favorite(
+            self._current_login)
 
     def _toggle_favorite_current(self) -> None:
         """Bascule le favori du direct affiché."""
@@ -2838,6 +3020,10 @@ class FullscreenWindow(QMainWindow):
         self._hint_lbl.setText(
             "Ajouté aux favoris" if etat else "Retiré des favoris")
         self._hint_lbl.setStyleSheet("color: #f5c518;")
+        self.annoncer("Ajouté aux favoris" if etat else "Retiré des favoris",
+                      "#f5c518")
+        self.favori_change.emit(self._current_login, etat)
+        self.etat_bascule.emit()
 
     def show_show_started(self, login: str, nom: str) -> None:
         """Propose de basculer sur le show du programme qui vient de démarrer."""
@@ -3005,8 +3191,10 @@ class FullscreenWindow(QMainWindow):
         original = "Clip"
         if path:
             self._clip_btn.setText("✓ Clip sauvé !")
+            self.annoncer(f"Clip sauvegardé · {secs} s", "#00ff87")
         else:
             self._clip_btn.setText("✗ Erreur")
+            self.annoncer("Clip impossible à enregistrer", "#ff5f56")
         QTimer.singleShot(3000, lambda: self._clip_btn.setText(original))
 
     # ── volume ─────────────────────────────────────────────────────
@@ -3147,6 +3335,7 @@ class FullscreenWindow(QMainWindow):
         # Hors des branches : le bandeau d'attente est posé AVANT que le
         # replay soit actif, et doit suivre la fenêtre pendant ce temps-là.
         self._placer_chargeur()
+        self._placer_annonce()
 
         if self._ad_banner is not None:
             self._ad_banner.reposition(w, h)
@@ -3251,3 +3440,4 @@ class FullscreenWindow(QMainWindow):
         self._chat_panel.toggle()
         self._chat_btn.setChecked(self._chat_panel._visible)
         self._update_mpv_geometry()
+        self.etat_bascule.emit()
