@@ -123,6 +123,19 @@ def _apply_screen_config(screens: list[QScreen]) -> DisplayLayout | None:
     has_panel = WindowRole.PANEL in roles
     has_grid = WindowRole.GRID in roles
 
+    if has_grid and not has_panel:
+        # Il n'y a pas de mode « direct + grille » : faute de panel, le calcul
+        # ci-dessous retenait SINGLE, et main n'ouvrait que le direct — la
+        # grille etait perdue sans un mot. Les reglages ne s'ouvrant que depuis
+        # le panel, cette disposition enfermait de surcroit dans un ecran qu'on
+        # ne pouvait plus changer. Le selecteur l'interdit desormais ; ce
+        # garde-fou vaut pour un config.json ecrit a la main.
+        logger.warning(
+            "Config ecrans : grille sans panel — grille ignoree, tout passe "
+            "sur l'ecran du direct (les reglages ne s'ouvrent que du panel)")
+        assignments = [a for a in assignments if a.role != WindowRole.GRID]
+        has_grid = False
+
     if has_panel and has_grid:
         mode = DisplayMode.TRIPLE
     elif has_panel:

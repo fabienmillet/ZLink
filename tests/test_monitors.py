@@ -218,6 +218,29 @@ def test_config_panel_et_fullscreen_donne_dual_avec_grille_sur_le_panel(config_e
     assert grille.name == "gauche" and grille.index == 0
 
 
+def test_une_grille_sans_panel_ne_fait_pas_disparaitre_tout_le_reste(
+        config_ecrans, caplog):
+    """« direct + grille » n'affichait que le direct.
+
+    Faute de panel, le calcul du mode retenait SINGLE et main construisait la
+    coquille un-écran sur le seul moniteur du direct : la grille était perdue
+    en silence. Les réglages ne s'ouvrant que depuis le panel, on se
+    retrouvait de surcroît enfermé dans cette disposition.
+
+    On retombe donc en mode un écran DÉLIBÉRÉMENT — les trois vues s'y
+    superposent, la barre du haut passe de l'une à l'autre, et les réglages
+    redeviennent accessibles. Le sélecteur interdit désormais d'en arriver
+    là ; ce garde-fou vaut pour un config.json écrit à la main.
+    """
+    config_ecrans({"screen_assignments": {"0": "fullscreen", "1": "grid"}})
+    app = _AppFactice(_EcranFactice("gauche", x=0), _EcranFactice("droite", x=1920))
+    layout = monitors.build_layout(app)
+    assert layout.mode is DisplayMode.SINGLE
+    assert layout.get_screen(WindowRole.GRID) is None
+    assert layout.get_screen(WindowRole.FULLSCREEN).name == "gauche"
+    assert "grille sans panel" in caplog.text.lower()
+
+
 def test_config_fullscreen_seul_donne_le_mode_single(config_ecrans):
     config_ecrans({"screen_assignments": {"0": "fullscreen", "1": "disabled"}})
     app = _AppFactice(_EcranFactice("gauche", x=0), _EcranFactice("droite", x=1920))

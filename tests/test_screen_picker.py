@@ -126,14 +126,25 @@ def test_une_attribution_sans_plein_ecran_s_en_voit_donner_un(qapp):
     """Le reste du choix était valable : le jeter serait pire que le réparer."""
     p = SP.ScreenPicker(_TROIS)
     p.definir_assignments({"0": "grid"})
-    assert p.roles() == ["grid", "fullscreen", ""]
+    # L'écran 2 prend le direct, puis le 3 le panel : la grille ne va pas
+    # sans lui, et il restait un écran libre pour le porter.
+    assert p.roles() == ["grid", "fullscreen", "panel"]
 
 
 def test_sans_ecran_libre_la_reparation_prend_le_premier(qapp):
     """Il faut bien que quelqu'un cède : c'est l'écran de gauche."""
     p = SP.ScreenPicker(_DEUX)
     p.definir_assignments({"0": "panel", "1": "grid"})
-    assert p.roles() == ["fullscreen", "grid"]
+    # Le direct s'impose à gauche, faute d'écran libre. La grille se retrouve
+    # alors sans panel, et personne ne peut le porter : c'est elle qui cède.
+    assert p.roles() == ["fullscreen", ""]
+
+
+def test_une_grille_orpheline_recoit_un_panel_s_il_reste_un_ecran(qapp):
+    """config.json écrit à la main peut demander direct + grille sans panel."""
+    p = SP.ScreenPicker(_TROIS)
+    p.definir_assignments({"0": "fullscreen", "1": "grid"})
+    assert p.roles() == ["fullscreen", "grid", "panel"]
 
 
 # ── attribution ──────────────────────────────────────────────────────────────
@@ -381,3 +392,75 @@ def test_un_rectangle_trop_court_se_passe_de_la_definition(qapp):
     p = _picker(_DEUX, largeur=200, hauteur=60)
     assert all(r.height() < 70 for r in p._rects)
     assert p.grab().size().width() == 200
+
+
+# ── la grille ne va pas sans le panel ────────────────────────────────────────
+
+def test_le_geste_qui_isolait_la_grille_est_refuse(qapp):
+    """Reproduit la manœuvre qui menait à « direct + grille, rien d'autre ».
+
+    Trois écrans, on donne le direct au premier — les rôles s'échangent —
+    puis on tente d'éteindre celui qui a hérité du panel. C'est ce dernier
+    geste qui produisait une disposition dont main n'ouvrait que le direct.
+    """
+    p = SP.ScreenPicker(_TROIS)
+    assert p.attribuer(0, "fullscreen") is True
+    assert p.roles() == ["fullscreen", "panel", "grid"]
+    assert p.attribuer(1, "") is False, "éteindre le panel isolerait la grille"
+    assert p.roles() == ["fullscreen", "panel", "grid"]
+
+
+def test_le_panel_ne_s_eteint_pas_tant_qu_une_grille_existe(qapp):
+    p = SP.ScreenPicker(_TROIS)
+    assert p.peut_attribuer(0, "") is False
+
+
+def test_le_panel_s_eteint_des_que_la_grille_a_disparu(qapp):
+    """La règle vise la grille orpheline, pas le panel en soi."""
+    p = SP.ScreenPicker(_TROIS)
+    assert p.attribuer(2, "") is True, "la grille, elle, peut partir"
+    assert p.attribuer(0, "") is True
+    assert p.roles() == ["", "fullscreen", ""]
+
+
+def test_un_ecran_libre_ne_peut_pas_prendre_la_grille_sans_panel(qapp):
+    p = SP.ScreenPicker([(i * 100, 0, 100, 100) for i in range(3)])
+    p._roles = ["fullscreen", "", ""]
+    assert p.peut_attribuer(1, "grid") is False
+    assert p.peut_attribuer(1, "panel") is True
+
+
+def test_la_grille_devient_possible_une_fois_le_panel_pose(qapp):
+    p = SP.ScreenPicker([(i * 100, 0, 100, 100) for i in range(3)])
+    p._roles = ["fullscreen", "", ""]
+    p.attribuer(1, "panel")
+    assert p.attribuer(2, "grid") is True
+    assert p.roles() == ["fullscreen", "panel", "grid"]
+
+
+def test_le_panel_se_deplace_toujours_par_echange(qapp):
+    """Interdire de l'éteindre ne doit pas interdire de le changer d'écran."""
+    p = SP.ScreenPicker(_TROIS)
+    assert p.attribuer(2, "panel") is True
+    assert p.roles() == ["grid", "fullscreen", "panel"]
+
+
+@pytest.mark.parametrize("roles,attendu", [
+    (["fullscreen"], True),
+    (["panel", "fullscreen"], True),
+    (["panel", "fullscreen", "grid"], True),
+    (["fullscreen", "grid"], False),      # la grille orpheline
+    (["panel", "grid"], False),           # pas de direct
+    (["", ""], False),
+])
+def test_dispositions_tenables(qapp, roles, attendu):
+    assert SP.ScreenPicker.tenable(roles) is attendu
+
+
+def test_aucune_suite_de_gestes_ne_produit_une_disposition_intenable(qapp):
+    """La vraie garantie : l'invariant tient quoi qu'on clique."""
+    p = SP.ScreenPicker(_TROIS)
+    for index in (0, 1, 2, 2, 1, 0, 1, 2, 0):
+        for role in ("", "grid", "panel", "fullscreen", ""):
+            p.attribuer(index, role)
+            assert SP.ScreenPicker.tenable(p.roles()), p.roles()

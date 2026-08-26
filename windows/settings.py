@@ -390,7 +390,8 @@ class _PageScreens(_PageBase):
         self._vl.addWidget(_section_title("Attribution des moniteurs"))
         self._vl.addWidget(_hint(
             "Cliquez sur un écran pour choisir son rôle. Le plein écran ne "
-            "s'éteint pas : le donner à un autre moniteur les échange."
+            "s'éteint pas — le donner à un autre moniteur les échange — et la "
+            "grille ne va pas sans le panel, d'où les réglages s'ouvrent."
         ))
 
         self._picker = ScreenPicker(geos)
@@ -439,11 +440,14 @@ class _PageScreens(_PageBase):
 
     def collect(self, config: dict) -> bool:
         assignments = self._picker.assignments()
-        if "fullscreen" not in assignments.values():
+        roles = list(assignments.values())
+        if not ScreenPicker.tenable(roles):
             # Le sélecteur l'interdit. Si ça arrive quand même, mieux vaut ne
             # rien écrire que d'enregistrer une disposition qui ne démarre pas.
-            logger.warning("Attribution sans plein ecran — refus d'enregistrer")
-            self._error_lbl.setText("⚠ Un écran doit afficher le plein écran.")
+            logger.warning("Attribution intenable %s — refus d'enregistrer", roles)
+            manque = ("le plein écran" if "fullscreen" not in roles
+                      else "le panel, dont la grille ne va pas sans")
+            self._error_lbl.setText(f"⚠ Il manque {manque}.")
             return False
         self._error_lbl.setText("")
         config["screen_assignments"] = assignments

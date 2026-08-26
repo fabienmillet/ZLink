@@ -146,47 +146,84 @@ class ScreenPicker(QWidget):
                 roles[indice] = role
         if not any(roles):
             return
+        ordre = sorted(range(len(roles)), key=lambda i: self._geos[i][0])
         if "fullscreen" not in roles:
-            ordre = sorted(range(len(roles)), key=lambda i: self._geos[i][0])
             cible = next((i for i in ordre if not roles[i]), ordre[0])
             logger.info(
                 "Attribution enregistree sans plein ecran — ecran %d le prend",
                 cible + 1)
             roles[cible] = "fullscreen"
+        if "grid" in roles and "panel" not in roles:
+            # Voir `tenable` : la grille sans panel enferme dans une
+            # disposition qu'on ne peut plus changer. Un écran libre prend le
+            # panel ; s'il n'y en a pas, c'est la grille qui cède.
+            cible = next((i for i in ordre if not roles[i]), None)
+            if cible is None:
+                logger.info("Attribution enregistree : grille sans panel, "
+                            "et aucun ecran libre — grille retiree")
+                roles[roles.index("grid")] = AUCUN
+            else:
+                logger.info("Attribution enregistree : grille sans panel — "
+                            "ecran %d prend le panel", cible + 1)
+                roles[cible] = "panel"
         self._roles = roles
         self.update()
 
     # -- attribution -----------------------------------------------------
 
-    def peut_attribuer(self, index: int, role: str) -> bool:
-        """Vrai si ce rôle peut être donné à cet écran.
+    @staticmethod
+    def tenable(roles: list[str]) -> bool:
+        """Vrai si l'application sait ouvrir cette disposition.
 
-        Le plein écran ne se retire jamais : c'est la seule vue dont
-        l'application ne peut pas se passer, et une configuration sans direct
-        bloque le démarrage sans que la raison soit visible. Il se DÉPLACE —
-        le donner à un autre écran rend à celui-ci le rôle qu'il avait.
+        Deux règles, et elles ont chacune coûté une panne :
+
+        Le PLEIN ÉCRAN ne se retire jamais. C'est la seule vue dont
+        l'application ne peut pas se passer, et une disposition sans direct
+        bloque le démarrage sans que la raison soit visible.
+
+        La GRILLE ne va pas sans le PANEL. Les réglages ne s'ouvrent que
+        depuis le panel : direct d'un côté, grille de l'autre, et l'on est
+        enfermé dans une disposition qu'on ne peut plus changer autrement
+        qu'en éditant config.json. `core.monitors` n'a d'ailleurs pas de cas
+        pour elle — elle retombait en mode un écran, et seul le direct
+        s'affichait.
+
+        À un seul écran la question ne se pose pas : les trois vues s'y
+        superposent, et la barre du haut passe de l'une à l'autre.
         """
+        if "fullscreen" not in roles:
+            return False
+        return "grid" not in roles or "panel" in roles
+
+    def _apres(self, index: int, role: str) -> list[str]:
+        """Les rôles tels qu'ils seraient une fois l'attribution faite.
+
+        L'échange est compris dedans : donner à un écran un rôle que porte
+        déjà un autre rend à celui-ci le rôle du premier.
+        """
+        roles = list(self._roles)
+        ancien = roles[index]
+        if role:
+            for j, r in enumerate(roles):
+                if j != index and r == role:
+                    roles[j] = ancien
+                    break
+        roles[index] = role
+        return roles
+
+    def peut_attribuer(self, index: int, role: str) -> bool:
+        """Vrai si ce rôle peut être donné à cet écran."""
         if not 0 <= index < len(self._roles):
             return False
         if role == self._roles[index]:
             return False
-        if self._roles[index] != "fullscreen":
-            return True
-        if not role:
-            return False
-        return any(j != index and r == role for j, r in enumerate(self._roles))
+        return self.tenable(self._apres(index, role))
 
     def attribuer(self, index: int, role: str) -> bool:
         """Donne un rôle à un écran, en échangeant avec celui qui l'avait."""
         if not self.peut_attribuer(index, role):
             return False
-        ancien = self._roles[index]
-        if role:
-            for j, r in enumerate(self._roles):
-                if j != index and r == role:
-                    self._roles[j] = ancien
-                    break
-        self._roles[index] = role
+        self._roles = self._apres(index, role)
         self.update()
         self.changed.emit()
         return True

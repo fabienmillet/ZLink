@@ -813,3 +813,14 @@ def test_une_adresse_en_clair_sur_internet_est_signalee(qtbot):
     page = _page_ha(qtbot)
     page._webhook.setText("http://homeassist.exemple.fr/api/webhook/-abc")
     assert "en clair" in page._avertissement.text()
+
+
+def test_ecrans_refuse_une_grille_sans_panel(qtbot):
+    """Direct + grille sans panel n'affichait que le direct, et enfermait :
+    les réglages ne s'ouvrent que depuis le panel."""
+    page = _page_ecrans(qtbot, 3)
+    page._picker._roles = ["fullscreen", "grid", ""]
+    config = {"autre_cle": "intacte"}
+    assert page.collect(config) is False
+    assert "screen_assignments" not in config
+    assert "panel" in page._error_lbl.text()

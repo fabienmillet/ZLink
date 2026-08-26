@@ -291,7 +291,8 @@ class _StepScreens(_Step):
         v.addWidget(_title("Quel écran fait quoi ?"))
         v.addWidget(_sub(
             "Cliquez sur un écran pour choisir son rôle. La répartition "
-            "proposée va de gauche à droite ; rien n'oblige à la garder."
+            "proposée va de gauche à droite ; rien n'oblige à la garder — "
+            "sauf que la grille ne va pas sans le panel."
         ))
 
         self._picker = ScreenPicker(geos)
