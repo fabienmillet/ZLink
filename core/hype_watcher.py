@@ -49,7 +49,14 @@ from core.paths import CONFIG_PATH as _CONFIG_PATH
 _CHAT_WINDOW_S: float   = 6.0   # fenêtre glissante de mesure du chat
 _EVAL_INTERVAL_S: float = 2.0   # période d'évaluation du score
 # (valeur par défaut plus bas, _COOLDOWN_S_DEFAULT)
-_MAX_RECENT_MSGS: int   = 40    # buffer de messages servant à qualifier l'alerte
+# Buffer de messages servant à qualifier l'alerte.
+#
+# Quarante ne permettait pas de VOIR un moment fort : sur une chaîne à cent
+# mille spectateurs, c'est une seconde de chat. Un vrai emballement, c'est
+# quarante à cent personnes qui écrivent la même chose — impossible à compter
+# dans un échantillon de quarante messages, dont la moitié parle d'autre
+# chose. Le coût est modeste : vingt-cinq cellules × quatre cents messages.
+_MAX_RECENT_MSGS: int   = 400
 _MSG_TTL_S: float       = 120.0 # au-delà, un message ne décrit plus le moment courant
 
 # Ligne de base par canal. Un moment fort est un ÉCART à la normale de CETTE
@@ -95,6 +102,17 @@ _COOLDOWN_S_DEFAULT: float = 600.0
 _SURGE_MIN_CELLS: int = 4
 _SURGE_MARGIN: float  = 1.25
 
+# La règle ci-dessus ne voyait rien, car elle ne comparait que les candidats
+# d'un MÊME tick de deux secondes. Un temps fort du ZEvent s'étale sur une
+# minute : les chaînes y culminent à quelques secondes d'écart et ne sont
+# jamais candidates ensemble. Le mouvement d'ensemble se juge donc sur les
+# alertes RÉCENTES, pas sur l'instant.
+_MONTEE_FENETRE_S: float = 180.0
+
+# Le plafond horaire ne dit rien de la RÉPARTITION. Huit alertes tenaient en
+# deux minutes — le fil devenait illisible — puis plus rien pendant une heure.
+_ESPACEMENT_MIN_S: float = 60.0
+
 # Poids relatifs des signaux. Un signal indisponible est retiré et les autres
 # sont renormalisés, plutôt que remplacé par une valeur inventée.
 _W_CHAT    = 0.45
@@ -116,11 +134,21 @@ _C_GENERAL = "#ff6b00"
 _C_DONO    = "#00ff87"
 _C_FUNNY   = "#a855f7"
 
-# Index des règles qui décrivent un ÉVÉNEMENT FACTUEL (une donation, un record)
-# par opposition à une ambiance (rire, hype). Un seul message suffit à les
-# déclencher : ce sont des faits, pas des humeurs, et les noyer sous le volume
-# du chat ferait manquer précisément ce qu'on veut signaler.
-_FACTUAL_RULES = (0, 2)
+# Il n'y a plus de règle « factuelle » déclenchée par UN seul message.
+#
+# « Donation 💸 » et « World Record 🏆 » l'étaient : un unique message
+# contenant « € », « don » ou « cagnotte » suffisait à étiqueter le moment et
+# à se citer lui-même. Pendant un ZEvent, le chat parle d'argent en
+# permanence — « euh, 85 % du revenu c'est 15 M€ ? » devenait ainsi une
+# donation. Le raccourci court-circuitait en outre toute la mesure de
+# convergence, seule chose qui distingue un mouvement de chat d'un message
+# isolé.
+#
+# Une donation est un FAIT, et ZLink le tient de l'API, exact et chiffré
+# (`DataManager.big_donation`). Le déduire du texte du chat, c'est remplacer
+# une source sûre par une devinette. Les mots-clés servent toujours, mais
+# seulement pour qualifier ce sur quoi le chat a CONVERGÉ — voir
+# `_rule_for_token`.
 
 def _kw_matcher(keywords: list[str]):
     """Construit le test d'appartenance d'une règle, sur des MOTS ENTIERS.
@@ -349,7 +377,9 @@ class HypeWatcher(QThread):
         self._cells: dict[str, _CellInfo] = {}
         self._stop_event       = threading.Event()
         self._channels_dirty   = threading.Event()
-        self._alert_times: deque[float] = deque()   # budget global d'alertes
+        #: (instant, score) des alertes émises. Le score est gardé parce que
+        #: c'est à celui des alertes récentes qu'une nouvelle se compare.
+        self._alert_times: deque[tuple[float, float]] = deque()
         self._cfg_cache: dict  = {}
         self._cfg_mtime: float = -1.0
 
@@ -442,22 +472,51 @@ class HypeWatcher(QThread):
 
         # Budget global : sous une montée générale, on ne garde que les plus
         # forts plutôt que d'inonder la grille d'alertes simultanées.
-        while self._alert_times and now - self._alert_times[0] > _ALERT_BUDGET_WINDOW_S:
+        while self._alert_times and now - self._alert_times[0][0] > _ALERT_BUDGET_WINDOW_S:
             self._alert_times.popleft()
         room = max(0, per_hour - len(self._alert_times))
         if room == 0:
             logger.debug("HypeWatcher: plafond horaire atteint, %d candidat(s) ignoré(s)",
                          len(candidates))
             return
+        espacement = float(hw_cfg.get("espacement_min_s", _ESPACEMENT_MIN_S))
+        if self._alert_times and now - self._alert_times[-1][0] < espacement:
+            # Trop tôt après la précédente — sauf pour ce qui la DÉPASSE
+            # nettement. Un espacement aveugle donne la place au premier
+            # arrivé, et un moment ordinaire muselait celui, bien plus fort,
+            # qui suivait trente secondes plus tard. Mais laisser passer tout
+            # ce qui franchit le seuil haut revenait à supprimer
+            # l'espacement : ces scores-là sont monnaie courante un soir
+            # d'affluence, et deux alertes tombaient dans la même minute.
+            precedent = self._alert_times[-1][1]
+            barre = max(score_high, precedent * _SURGE_MARGIN)
+            candidates = [c for c in candidates if c[0] >= barre]
+            if not candidates:
+                logger.debug(
+                    "HypeWatcher: %.0f s depuis la dernière alerte, on attend",
+                    now - self._alert_times[-1][0])
+                return
 
         candidates.sort(key=lambda c: c[0], reverse=True)
-        room = self._place_apres_montee(candidates, room)
+        room = self._place_apres_montee(candidates, room, now)
         if room == 0:
             return
         for score, info in candidates[:room]:
-            label, color, excerpt = _classify_local(info.recent())
+            label, color, excerpt = _classify_local(info.recent(), info.viewers)
+            if not excerpt:
+                # Le chat s'est accéléré sans rien dire de particulier : il n'y
+                # a rien à MONTRER, donc rien à annoncer. « Moment fort 🔥 »
+                # tout seul n'apprend rien et ne se vérifie pas — c'est
+                # précisément ce qui faisait passer le fil pour du bruit.
+                #
+                # Sans exception, même pour un score énorme : un emballement
+                # que le chat ne commente pas est indistinguable d'un raid, du
+                # spam d'un bot ou d'un pic de bruit. On préfère en manquer.
+                logger.debug("HypeWatcher: %s écartée, aucun extrait (score %.2f)",
+                             info.login, score)
+                continue
             info.mark_alerted()
-            self._alert_times.append(now)
+            self._alert_times.append((now, score))
             logger.info(
                 "HypeWatcher: alerte %s score=%.2f label=%s extrait=%r",
                 info.login, score, label, excerpt[:40],
@@ -496,21 +555,29 @@ class HypeWatcher(QThread):
             return None
         return score
 
-    def _place_apres_montee(self, candidates: list, room: int) -> int:
-        """Corrige le budget quand toute la grille monte en même temps.
+    def _place_apres_montee(self, candidates: list, room: int,
+                            now: float = 0.0) -> int:
+        """Corrige le budget quand toute la grille monte, même en décalé.
+
+        Les candidats de l'instant NE SUFFISENT PAS à repérer un mouvement
+        d'ensemble : pendant un palier de cagnotte, les chaînes culminent à
+        quelques secondes d'écart et n'apparaissent jamais ensemble dans le
+        même tick. On leur adjoint donc les alertes des dernières minutes.
 
         Si rien ne se détache de la médiane, il n'y a rien à signaler : on rend
         0. Si une chaîne se détache, elle seule est annoncée.
         """
-        if len(candidates) < _SURGE_MIN_CELLS:
+        recentes = [score for instant, score in self._alert_times
+                    if now - instant <= _MONTEE_FENETRE_S]
+        if len(candidates) + len(recentes) < _SURGE_MIN_CELLS:
             return room
-        scores = sorted(c[0] for c in candidates)
+        scores = sorted([c[0] for c in candidates] + recentes)
         median = scores[len(scores) // 2]
         if median > 0 and candidates[0][0] < median * _SURGE_MARGIN:
             logger.info(
-                "HypeWatcher: montée générale (%d chaînes, médiane %.2f) — "
-                "aucune ne se détache, pas d'alerte",
-                len(candidates), median,
+                "HypeWatcher: montée générale (%d en cours, %d récentes, "
+                "médiane %.2f) — aucune ne se détache, pas d'alerte",
+                len(candidates), len(recentes), median,
             )
             return 0
         return 1
@@ -750,7 +817,6 @@ class HypeWatcher(QThread):
 # ---------------------------------------------------------------------------
 
 # Testeurs compilés une seule fois, dans l'ordre de _KEYWORD_RULES.
-_KW_MATCHERS = [_kw_matcher(kws) for kws, _lbl, _col in _KEYWORD_RULES]
 
 
 # Mots trop courants pour caractériser quoi que ce soit.
@@ -771,13 +837,113 @@ _SHORT_ALLOWED = frozenset(
     if 2 <= len(k) < _MIN_TOKEN_LEN
 )
 # En dessous, ce n'est pas un mouvement de chat mais une coïncidence.
-_MIN_DOMINANT_USERS = 3
+#: Plancher absolu de personnes reprenant le même terme. Trois n'était pas un
+#: mouvement de chat : sur une chaîne assez suivie pour être dans la grille,
+#: trois personnes qui écrivent le même mot arrivent en permanence.
+_MIN_DOMINANT_USERS = 5
+
+#: Plancher selon l'AUDIENCE, en (viewers, personnes exigées).
+#:
+#: Une part des locuteurs récents ne suffit pas seule : sur un million de
+#: spectateurs, le chat défile si vite que l'échantillon observé reste petit,
+#: et 30 % d'un petit échantillon peut valoir quatre personnes. Quatre kappa
+#: sur un million de spectateurs, ce n'est pas un moment fort.
+#:
+#: Les valeurs viennent de l'observation d'un ZEvent : un vrai emballement,
+#: c'est quarante à cent personnes qui écrivent la même chose.
+_PLANCHERS_AUDIENCE: tuple[tuple[int, int], ...] = (
+    (100_000, 40),
+    (10_000, 20),
+    (1_000, 10),
+)
+
+#: Et surtout, une PART des gens qui viennent de parler.
+#:
+#: C'est la définition même d'un moment fort : le chat CONVERGE. Quatre
+#: personnes sur quarante qui reprennent l'emote de la chaîne, c'est la ligne
+#: de base — cette emote est tapée toute la journée. Les mêmes quatre sur huit
+#: locuteurs, c'est le chat entier qui dit la même chose.
+_PART_DOMINANTE = 0.30
 
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+def _plancher_audience(viewers: int) -> int:
+    """Nombre de personnes en deçà duquel rien n'est un mouvement, ici.
+
+    Le chat d'une grosse chaîne défile trop vite pour qu'on en voie une part
+    représentative : la seule mesure qui tienne est alors le nombre ABSOLU de
+    gens qui disent la même chose.
+    """
+    for seuil, exige in _PLANCHERS_AUDIENCE:
+        if viewers >= seuil:
+            return exige
+    return _MIN_DOMINANT_USERS
+
+
+def _exigence(entries: list[tuple[str, str]], viewers: int = 0) -> int:
+    """Combien de personnes doivent reprendre le même terme pour que ça compte.
+
+    Deux mesures, et on retient la plus exigeante :
+
+    - une PART des locuteurs récents, qui décrit la convergence — quatre
+      personnes valent un mouvement sur un chat de huit, pas sur un de
+      quarante ;
+    - un PLANCHER selon l'audience, parce que sur un million de spectateurs
+      le chat défile trop vite pour qu'on en voie une part représentative.
+    """
+    locuteurs = len({nick for nick, _texte in entries})
+    return max(_plancher_audience(int(viewers or 0)),
+               _MIN_DOMINANT_USERS,
+               round(_PART_DOMINANTE * locuteurs))
+
+
+#: Au-delà, ce n'est plus une réaction mais une phrase.
+#:
+#: Compter un mot pris N'IMPORTE OÙ dans un message laissait gagner les mots
+#: de remplissage : « voir » présent dans douze phrases différentes n'apprend
+#: rien, et se retrouvait pourtant cité comme la preuve d'un moment fort. Une
+#: réaction de chat, c'est un message COURT — une emote, deux mots, un cri.
+_MAX_MOTS_REACTION = 3
+
+#: Longueur maximale d'une réaction faite de symboles seuls, une fois les
+#: répétitions écrasées. Au-delà, ce n'est plus une emote mais du dessin ASCII.
+_MAX_SYMBOLES_REACTION = 8
+
+#: Écrase « aaa » en « a ». Sert aux réactions sans mot : « 💀💀💀 » et
+#: « 💀 » sont la même chose et doivent compter ensemble.
+_REPETITIONS = re.compile(r"(.)\1+", re.UNICODE)
+
+
+def _reaction(texte: str) -> str:
+    """Le message ramené à sa réaction, ou "" si c'en est une phrase.
+
+    Les répétitions sont écrasées : « lul lul lul » et « lul » sont la même
+    réaction, et doivent compter ensemble.
+    """
+    # Les mots DISTINCTS, avant tout filtrage. Deux écueils évités d'un coup :
+    # « lul lul lul lul » reste une réaction — c'est même la forme typique —
+    # tandis que « je pense que ce boss est dur » reste une phrase, alors
+    # qu'il n'en survivrait que trois mots au retrait des mots vides.
+    bruts = list(dict.fromkeys(_TOKEN_RE.findall(texte.lower())))
+    if not bruts:
+        # Aucun MOT : des symboles, des emoji. « € », « 💀💀💀 » sont pourtant
+        # des réactions typiques, et le motif de découpage ne retient que les
+        # caractères alphanumériques — ces messages étaient purement
+        # invisibles. Les répétitions sont écrasées pour que « 💀 » et
+        # « 💀💀💀 » comptent ensemble.
+        nu = _REPETITIONS.sub(r"\1", " ".join(texte.split()))
+        return nu if 0 < len(nu) <= _MAX_SYMBOLES_REACTION else ""
+    if len(bruts) > _MAX_MOTS_REACTION:
+        return ""
+    mots = [t for t in bruts
+            if t not in _STOPWORDS
+            and (len(t) >= _MIN_TOKEN_LEN or t in _SHORT_ALLOWED)]
+    return " ".join(mots) if mots else ""
+
+
 def _dominant_token(entries: list[tuple[str, str]]) -> tuple[str, int]:
-    """Token le plus repris, compté en UTILISATEURS DISTINCTS.
+    """La réaction la plus reprise, comptée en UTILISATEURS DISTINCTS.
 
     C'est ça, un moment fort sur Twitch : trente personnes qui écrivent la même
     chose en même temps. Chercher un message individuel qui contient un mot-clé
@@ -789,16 +955,9 @@ def _dominant_token(entries: list[tuple[str, str]]) -> tuple[str, int]:
     """
     users: dict[str, set[str]] = {}
     for nick, text in entries:
-        seen: set[str] = set()
-        for tok in _TOKEN_RE.findall(text.lower()):
-            if tok in _STOPWORDS:
-                continue
-            if len(tok) < _MIN_TOKEN_LEN and tok not in _SHORT_ALLOWED:
-                continue
-            if tok in seen:      # un message ne vote qu'une fois par token
-                continue
-            seen.add(tok)
-            users.setdefault(tok, set()).add(nick)
+        cle = _reaction(text)
+        if cle:
+            users.setdefault(cle, set()).add(nick)
     if not users:
         return "", 0
     tok, who = max(users.items(), key=lambda kv: (len(kv[1]), kv[0]))
@@ -813,7 +972,8 @@ def _rule_for_token(token: str) -> tuple[str, str] | None:
     return None
 
 
-def _classify_local(entries: list[tuple[str, str]]) -> tuple[str, str, str]:
+def _classify_local(entries: list[tuple[str, str]],
+                    viewers: int = 0) -> tuple[str, str, str]:
     """Qualifie le moment à partir de ce que le chat répète collectivement.
 
     Renvoie (libellé, couleur, extrait). L'extrait décrit le mouvement de
@@ -822,19 +982,8 @@ def _classify_local(entries: list[tuple[str, str]]) -> tuple[str, str, str]:
     if not entries:
         return _LIBELLE_MOMENT_FORT, _C_GENERAL, ""
 
-    # Les événements factuels priment : une donation annoncée dans le chat est
-    # un fait, même si l'ambiance générale porte sur autre chose.
-    texts = [t.lower() for _n, t in entries]
-    for rank in _FACTUAL_RULES:
-        match = _KW_MATCHERS[rank]
-        hits = [t for t in texts if match(t)]
-        if hits:
-            _kw, label, color = _KEYWORD_RULES[rank]
-            clean = " ".join(hits[-1].split())
-            return label, color, (clean[:45] + "…" if len(clean) > 45 else clean)
-
     token, n_users = _dominant_token(entries)
-    if not token or n_users < _MIN_DOMINANT_USERS:
+    if not token or n_users < _exigence(entries, viewers):
         return _LIBELLE_MOMENT_FORT, _C_GENERAL, ""
 
     excerpt = f"« {token} » ×{n_users}"

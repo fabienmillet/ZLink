@@ -31,8 +31,10 @@ from core.hype_watcher import (
     _CHAT_WINDOW_S,
     _COOLDOWN_S_DEFAULT,
     _DEBOUNCE_HITS,
+    _ESPACEMENT_MIN_S,
     _LIBELLE_MOMENT_FORT,
     _MAX_RECENT_MSGS,
+    _MONTEE_FENETRE_S,
     _MSG_TTL_S,
     _SURGE_MIN_CELLS,
     _W_AUDIO,
@@ -533,7 +535,7 @@ def _candidats(*scores: float) -> list[tuple[float, _CellInfo]]:
 def test_peu_de_candidats_laissent_le_budget_intact(watcher, horloge):
     """Trois chaînes qui s'emballent, ce n'est pas encore un mouvement d'ensemble."""
     candidats = _candidats(*[0.9] * (_SURGE_MIN_CELLS - 1))
-    assert watcher._place_apres_montee(candidats, 5) == 5
+    assert watcher._place_apres_montee(candidats, 5, horloge["t"]) == 5
 
 
 def test_si_toute_la_grille_monte_personne_ne_se_detache(watcher, horloge):
@@ -544,18 +546,21 @@ def test_si_toute_la_grille_monte_personne_ne_se_detache(watcher, horloge):
     qui produit le déluge d'alertes qu'on veut éviter.
     """
     # Médiane 0.58, marge de 25 % → il faudrait 0.725 pour se distinguer.
-    assert watcher._place_apres_montee(_candidats(0.60, 0.58, 0.55, 0.52), 5) == 0
+    assert watcher._place_apres_montee(_candidats(0.60, 0.58, 0.55, 0.52), 5,
+                                       horloge["t"]) == 0
 
 
 def test_une_chaine_qui_se_detache_est_annoncee_seule(watcher, horloge):
     """Même avec du budget, la montée d'ensemble ne mérite qu'un seul signalement."""
-    assert watcher._place_apres_montee(_candidats(0.95, 0.55, 0.52, 0.50), 5) == 1
+    assert watcher._place_apres_montee(_candidats(0.95, 0.55, 0.52, 0.50), 5,
+                                       horloge["t"]) == 1
 
 
 def test_une_mediane_nulle_desactive_le_garde_fou(watcher, horloge):
     """Aucun multiple de zéro ne permet de « se détacher » : la comparaison
     relative n'a alors plus de sens et on retombe sur une alerte au plus."""
-    assert watcher._place_apres_montee(_candidats(0.0, 0.0, 0.0, 0.0), 5) == 1
+    assert watcher._place_apres_montee(_candidats(0.0, 0.0, 0.0, 0.0), 5,
+                                       horloge["t"]) == 1
 
 
 # ── _rule_for_token ──────────────────────────────────────────────────────────
@@ -721,7 +726,7 @@ def test_l_alerte_porte_la_couleur_le_libelle_et_l_extrait(grille, horloge):
     assert (couleur, libelle, extrait) == (_C_FUNNY, "Moment drôle 💀", "« lul » ×5")
     assert score == pytest.approx(0.82)
     assert info.last_alert == horloge["t"], "le cooldown de la chaîne repart"
-    assert list(watcher._alert_times) == [horloge["t"]]
+    assert list(watcher._alert_times) == [(horloge["t"], 0.82)]
 
 
 def test_un_extrait_ne_peut_pas_casser_le_decoupage(grille):
@@ -729,26 +734,30 @@ def test_un_extrait_ne_peut_pas_casser_le_decoupage(grille):
     un spectateur pourrait sinon fabriquer un faux libellé ou une fausse couleur."""
     watcher, recues = grille
     watcher.update_cells([(0, "zerator", None)])
-    watcher._cells["zerator"].record_msg("pirate", "don de 500 euros | merci")
+    info = watcher._cells["zerator"]
+    # Une réaction faite de symboles : c'est le seul chemin par lequel un « | »
+    # peut atteindre l'extrait, les mots n'en contenant jamais.
+    _remplit_chat(info, 6, "|")
     watcher._score_retenu = lambda *a: 0.9
 
     watcher._evaluate_all()
 
     _idx, packed, _score = recues[0]
     couleur, libelle, extrait = packed.split("|")
-    assert couleur == _C_DONO
-    assert libelle == "Donation 💸"
-    assert extrait == "don de 500 euros / merci"
+    assert couleur == hw._C_GENERAL
+    assert libelle == _LIBELLE_MOMENT_FORT
+    assert extrait == "« / » ×6", "le séparateur doit être neutralisé"
 
 
-def test_sans_chat_exploitable_le_libelle_reste_generique(grille):
-    watcher, recues = grille
-    watcher.update_cells([(0, "zerator", None)])
-    watcher._cells["zerator"].record_msg("u1", "hmm")
-    watcher._score_retenu = lambda *a: 0.9
-    watcher._evaluate_all()
-    _idx, packed, _score = recues[0]
-    assert packed == f"{hw._C_GENERAL}|{_LIBELLE_MOMENT_FORT}|"
+def test_sans_chat_exploitable_le_libelle_reste_generique():
+    """La qualification, elle, reste définie même sans mot dominant.
+
+    L'alerte correspondante n'est plus émise — un « Moment fort » nu ne se
+    vérifie pas — mais la fonction doit continuer à rendre trois champs
+    valides : le reste du code les découpe sans se poser de question.
+    """
+    libelle, couleur, extrait = hw._classify_local([("u1", "hmm")])
+    assert (libelle, couleur, extrait) == (_LIBELLE_MOMENT_FORT, hw._C_GENERAL, "")
 
 
 def test_le_plafond_horaire_ferme_le_robinet(grille, horloge):
@@ -756,9 +765,10 @@ def test_le_plafond_horaire_ferme_le_robinet(grille, horloge):
     l'heure, échelle à laquelle une alerte reste un événement qu'on regarde."""
     watcher, recues = grille
     watcher._hype_config = lambda: {"alerts_per_hour": 2}
-    watcher._alert_times.extend([horloge["t"] - 600.0, horloge["t"] - 10.0])
+    watcher._alert_times.extend([(horloge["t"] - 600.0, 0.8),
+                                 (horloge["t"] - 10.0, 0.8)])
     watcher.update_cells([(0, "zerator", None)])
-    watcher._cells["zerator"].record_msg("u1", "lul")
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
     watcher._score_retenu = lambda *a: 0.99
 
     watcher._evaluate_all()
@@ -771,17 +781,18 @@ def test_les_alertes_d_il_y_a_plus_d_une_heure_ne_comptent_plus(grille, horloge)
     watcher, recues = grille
     watcher._hype_config = lambda: {"alerts_per_hour": 2}
     watcher._alert_times.extend([
-        horloge["t"] - _ALERT_BUDGET_WINDOW_S - 1.0,
-        horloge["t"] - _ALERT_BUDGET_WINDOW_S - 0.5,
+        (horloge["t"] - _ALERT_BUDGET_WINDOW_S - 1.0, 0.8),
+        (horloge["t"] - _ALERT_BUDGET_WINDOW_S - 0.5, 0.8),
     ])
     watcher.update_cells([(0, "zerator", None)])
-    watcher._cells["zerator"].record_msg("u1", "lul")
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
     watcher._score_retenu = lambda *a: 0.99
 
     watcher._evaluate_all()
 
     assert len(recues) == 1
-    assert list(watcher._alert_times) == [horloge["t"]], "les périmées sont purgées"
+    assert list(watcher._alert_times) == [(horloge["t"], 0.99)], (
+        "les périmées sont purgées")
 
 
 def test_une_montee_generale_n_alerte_pas(grille, horloge):
@@ -789,7 +800,7 @@ def test_une_montee_generale_n_alerte_pas(grille, horloge):
     scores = {"c0": 0.60, "c1": 0.58, "c2": 0.55, "c3": 0.52}
     watcher.update_cells([(i, f"c{i}", None) for i in range(4)])
     for info in watcher._cells.values():
-        info.record_msg("u1", "lul")
+        _remplit_chat(info, 5, "lul")
     watcher._score_retenu = lambda info, *a: scores[info.login]
 
     watcher._evaluate_all()
@@ -803,7 +814,7 @@ def test_sous_montee_generale_seule_la_plus_forte_est_annoncee(grille, horloge):
     scores = {"c0": 0.55, "c1": 0.95, "c2": 0.52, "c3": 0.50}
     watcher.update_cells([(i, f"c{i}", None) for i in range(4)])
     for info in watcher._cells.values():
-        info.record_msg("u1", "lul")
+        _remplit_chat(info, 5, "lul")
     watcher._score_retenu = lambda info, *a: scores[info.login]
 
     watcher._evaluate_all()
@@ -856,3 +867,181 @@ def test_une_config_absente_conserve_le_dernier_reglage_connu(watcher, tmp_path,
     monkeypatch.setattr(hw, "_CONFIG_PATH", tmp_path / "jamais_ecrit.json")
     watcher._cfg_cache = {"cooldown_s": 42}
     assert watcher._hype_config() == {"cooldown_s": 42}
+
+
+# ── Fiabilité du fil : ce qu'on a vu passer un soir de ZEvent ────────────────
+#
+# Sept « Moment fort » en deux minutes, dont quatre sans la moindre citation.
+# Trois faiblesses distinctes se cumulaient, corrigées ici.
+
+def test_une_montee_generale_etalee_dans_le_temps_est_vue(grille, horloge):
+    """La règle ne comparait que les candidats du MÊME tick de deux secondes.
+
+    Un temps fort du ZEvent s'étale sur une minute : les chaînes y culminent à
+    quelques secondes d'écart, et n'étaient donc jamais candidates ensemble.
+    Chacune passait seule, et le fil recevait le déluge que la règle devait
+    justement empêcher.
+    """
+    watcher, recues = grille
+    watcher._alert_times.extend([
+        (horloge["t"] - 150.0, 0.60),
+        (horloge["t"] - 120.0, 0.58),
+        (horloge["t"] - 90.0, 0.55),
+    ])
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
+    watcher._score_retenu = lambda *a: 0.60      # dans la moyenne des récentes
+
+    watcher._evaluate_all()
+
+    assert recues == [], "elle ne se détache pas des trois précédentes"
+
+
+def test_une_chaine_qui_domine_la_montee_passe_quand_meme(grille, horloge):
+    """Le garde-fou écarte le banal, pas l'exceptionnel."""
+    watcher, recues = grille
+    watcher._alert_times.extend([
+        (horloge["t"] - 150.0, 0.55),
+        (horloge["t"] - 120.0, 0.55),
+        (horloge["t"] - 90.0, 0.55),
+    ])
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
+    watcher._score_retenu = lambda *a: 0.98
+
+    watcher._evaluate_all()
+
+    assert len(recues) == 1
+
+
+def test_deux_alertes_ne_se_suivent_pas_de_trop_pres(grille, horloge):
+    """Le plafond horaire ne disait rien de la RÉPARTITION.
+
+    Huit alertes tenaient en deux minutes, puis le fil restait muet une heure.
+    """
+    watcher, recues = grille
+    watcher._alert_times.append((horloge["t"] - _ESPACEMENT_MIN_S + 5.0, 0.9))
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
+    # Sous le seuil haut : c'est le tout-venant que l'espacement retient, pas
+    # l'exceptionnel — celui-là passe, et un test voisin le vérifie.
+    watcher._score_retenu = lambda *a: 0.60
+
+    watcher._evaluate_all()
+
+    assert recues == []
+
+
+def test_l_exceptionnel_passe_malgre_l_espacement(grille, horloge):
+    """Un espacement aveugle donne la place au PREMIER arrivé.
+
+    Un moment ordinaire muselait alors celui, bien plus fort, qui suivait
+    trente secondes plus tard — l'inverse de ce qu'on cherche.
+    """
+    watcher, recues = grille
+    watcher._alert_times.append((horloge["t"] - 5.0, 0.55))
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
+    watcher._score_retenu = lambda *a: 0.96
+
+    watcher._evaluate_all()
+
+    assert len(recues) == 1
+
+
+def test_l_espacement_ecoule_rouvre_le_robinet(grille, horloge):
+    watcher, recues = grille
+    watcher._alert_times.append((horloge["t"] - _ESPACEMENT_MIN_S - 1.0, 0.9))
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
+    watcher._score_retenu = lambda *a: 0.99
+
+    watcher._evaluate_all()
+
+    assert len(recues) == 1
+
+
+def test_un_moment_sans_citation_n_est_pas_annonce(grille, horloge):
+    """« Moment fort 🔥 » tout seul n'apprend rien et se lit comme du bruit.
+
+    Le chat s'est accéléré sans que rien ne soit repris collectivement : il n'y
+    a rien à montrer, donc rien à dire.
+    """
+    watcher, recues = grille
+    watcher.update_cells([(0, "zerator", None)])
+    info = watcher._cells["zerator"]
+    # Cinq personnes, cinq propos différents : aucun terme dominant.
+    for i, mot in enumerate(("bonjour", "quelqu'un", "tranquille",
+                             "vraiment", "pourquoi")):
+        info.record_msg(f"u{i}", mot)
+    watcher._score_retenu = lambda *a: 0.60      # au-dessus du moyen, pas du haut
+
+    watcher._evaluate_all()
+
+    assert recues == []
+    assert not watcher._alert_times, "une alerte écartée ne consomme pas de budget"
+
+
+def test_meme_un_score_enorme_ne_passe_pas_sans_citation(grille, horloge):
+    """Un emballement que le chat ne commente pas ne se vérifie pas.
+
+    Il est indistinguable d'un raid, du spam d'un bot ou d'un pic de bruit :
+    mieux vaut en manquer que remplir le fil de « Moment fort » nus.
+    """
+    watcher, recues = grille
+    watcher.update_cells([(0, "zerator", None)])
+    info = watcher._cells["zerator"]
+    for i, mot in enumerate(("bonjour", "quelqu'un", "tranquille")):
+        info.record_msg(f"u{i}", mot)
+    watcher._score_retenu = lambda *a: 0.99
+
+    watcher._evaluate_all()
+
+    assert recues == []
+
+
+def test_la_fenetre_de_montee_oublie_les_alertes_anciennes(grille, horloge):
+    """Trois alertes d'il y a une demi-heure ne font pas une montée générale."""
+    watcher, recues = grille
+    watcher._alert_times.extend([
+        (horloge["t"] - _MONTEE_FENETRE_S - 60.0, 0.60),
+        (horloge["t"] - _MONTEE_FENETRE_S - 30.0, 0.58),
+        (horloge["t"] - _MONTEE_FENETRE_S - 10.0, 0.55),
+    ])
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 5, "lul")
+    watcher._score_retenu = lambda *a: 0.60
+
+    watcher._evaluate_all()
+
+    assert len(recues) == 1
+
+
+def test_deux_alertes_ne_tombent_pas_dans_la_meme_minute(grille, horloge):
+    """Laisser passer tout ce qui franchit le seuil haut supprimait l'espacement.
+
+    Ces scores-là sont monnaie courante un soir d'affluence : deux « moments
+    forts » tombaient dans la même minute, ce qui est exactement ce que
+    l'espacement devait empêcher.
+    """
+    watcher, recues = grille
+    watcher._alert_times.append((horloge["t"] - 10.0, 0.80))
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 6, "lul")
+    watcher._score_retenu = lambda *a: 0.85      # au-dessus du seuil haut…
+
+    watcher._evaluate_all()
+
+    assert recues == [], "0.85 ne dépasse pas assez 0.80 pour couper la file"
+
+
+def test_nettement_plus_fort_passe_quand_meme(grille, horloge):
+    watcher, recues = grille
+    watcher._alert_times.append((horloge["t"] - 10.0, 0.60))
+    watcher.update_cells([(0, "zerator", None)])
+    _remplit_chat(watcher._cells["zerator"], 6, "lul")
+    watcher._score_retenu = lambda *a: 0.95      # 0.60 × 1.25 = 0.75
+
+    watcher._evaluate_all()
+
+    assert len(recues) == 1
