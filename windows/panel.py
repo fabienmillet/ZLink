@@ -3794,6 +3794,13 @@ class _StreamerCard(QFrame):
     toggled = pyqtSignal(str, bool)   # login, selected
     #: Clic droit sur la carte — ouvrir la fiche du participant.
     sheet_requested = pyqtSignal(str)
+    #: (login, favori) — l'étoile vient d'être posée ou retirée.
+    #:
+    #: Le bouton ne repeignait que lui-même : le favori était bien enregistré,
+    #: mais rien dans l'application ne l'apprenait. Une autre carte de la même
+    #: chaîne gardait son étoile creuse, et la touche « Favori » du Stream Deck
+    #: restait sur l'état d'avant le clic.
+    favori_change = pyqtSignal(str, bool)
 
     def __init__(self, s: StreamerInfo, slot: int | None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3905,6 +3912,43 @@ class _StreamerCard(QFrame):
             f"border: 1px solid {_COL_ONLINE}55; border-radius: 6px; padding: 0px 5px;"
         )
 
+    @staticmethod
+    def _ligne_de_l_heure(s: StreamerInfo) -> "QLabel | None":
+        """Ce que la chaîne a fait dans la dernière heure, ou None.
+
+        L'audience seule ne dit pas ce qui se PASSE : une chaîne peut être
+        petite et monter, une grosse peut être en train de redescendre. C'est
+        cette variation qu'on cherche du regard pendant l'event, et elle ne
+        figurait nulle part.
+
+        Rien n'est affiché tant que la mesure n'existe pas — au lancement, il
+        faut un quart d'heure de relevés avant qu'un écart ait un sens.
+        """
+        from core import tendances
+
+        if not s.online:
+            return None
+        delta = tendances.viewers(s.twitch_login)
+        euros = tendances.cagnotte(s.twitch_login)
+        morceaux = []
+        if delta:
+            signe = "+" if delta > 0 else "−"
+            morceaux.append(f"{signe}{_fmt_viewers(abs(delta))} viewers")
+        if euros:
+            morceaux.append(f"+{_fmt_euros(euros)}")
+        if not morceaux:
+            return None
+        etiquette = QLabel(" · ".join(morceaux) + " / h")
+        etiquette.setTextFormat(Qt.TextFormat.PlainText)
+        etiquette.setFont(QFont(_FONT_MONO, 8))
+        # La couleur porte le SENS : vert on monte, rouge on descend. Un seul
+        # gris pour les deux obligerait à lire le signe.
+        monte = (delta or 0) > 0 or bool(euros)
+        etiquette.setStyleSheet(
+            f"color: {'#00ff87' if monte else '#ff6b6b'};"
+            " background: transparent; border: none;")
+        return etiquette
+
     def _ajouter_textes(self, root: QVBoxLayout, s: StreamerInfo) -> None:
         """Nom, jeu et cagnotte, élidés à la largeur de carte.
 
@@ -3933,6 +3977,10 @@ class _StreamerCard(QFrame):
             game_lbl.setText(fm2.elidedText(s.game, Qt.TextElideMode.ElideRight,
                                             _CARD_W))
             root.addWidget(game_lbl)
+
+        ligne_heure = self._ligne_de_l_heure(s)
+        if ligne_heure is not None:
+            root.addWidget(ligne_heure)
 
         if s.donation > 0:
             don_lbl = QLabel(f"\u2665 {s.donation_formatted}")
@@ -4081,8 +4129,9 @@ class _StreamerCard(QFrame):
         event.accept()
 
     def _toggle_favorite(self) -> None:
-        favorites.toggle(self._login)
+        etat = favorites.toggle(self._login)
         self._refresh_fav_btn()
+        self.favori_change.emit(self._login, etat)
 
     def _apply_style(self) -> None:
         """Habillage de la carte, restreint à la carte elle-même.
@@ -4221,6 +4270,13 @@ class _MixerStrip(QFrame):
                  parent: QWidget | None = None, principal: bool = False) -> None:
         super().__init__(parent)
         self._login = login
+        #: La chaîne RÉELLEMENT affichée par cette tranche.
+        #:
+        #: `_login` est écrasé juste après la construction par la clé de
+        #: routage — « #main » pour le plein écran, qui ne change pas quand le
+        #: flux change. Sans cette seconde référence, plus rien ne dit quelle
+        #: chaîne la tranche montre.
+        self._login_reel = login
         self._muet = False
         self.setFixedWidth(self._W)
         # Sans plafond, la tranche s'étire sur toute la hauteur de l'onglet et
@@ -4387,6 +4443,11 @@ class _MixerTab(QWidget):
         self._main_login: str = ""
         self._muets: dict[str, bool] = {}
         self._strips: dict[str, _MixerStrip] = {}
+        #: Ce pour quoi les tranches actuelles ont été construites : la chaîne
+        #: du plein écran, puis les clés de chaque tranche. Comparer les seules
+        #: clés ne suffit pas — celle du plein écran est la constante
+        #: `_MAIN`, identique d'une chaîne à l'autre.
+        self._empreinte: tuple | None = None
         self._volumes: dict[str, int] = {}
         self._displays: dict[str, str] = {}
         self._build()
@@ -4456,8 +4517,14 @@ class _MixerTab(QWidget):
             logins.append(self._MAIN)
         logins += [lg for lg in getattr(self, "_pinned", [])
                    if lg != self._main_login]
-        if list(self._strips) == logins:
+        # La chaîne du plein écran fait PARTIE de l'empreinte. Sans elle, un
+        # changement de flux laissait la comparaison inchangée — la clé de sa
+        # tranche vaut toujours `_MAIN` — et la console gardait l'avatar et le
+        # nom de la chaîne précédente.
+        empreinte = (self._main_login, tuple(logins))
+        if self._empreinte == empreinte:
             return
+        self._empreinte = empreinte
         while self._rangee.count():
             item = self._rangee.takeAt(0)
             w = item.widget()
@@ -4539,6 +4606,67 @@ class _MixerTab(QWidget):
         strip._muet = muet
         strip._refresh_mute()
 
+    def regler_volume(self, login: str, valeur: int) -> None:
+        """Règle une tranche depuis l'EXTÉRIEUR de la console — télécommande.
+
+        Différent de `set_main_volume`, qui ne fait que reposer le curseur
+        après un réglage venu d'ailleurs : ici la console est le point de
+        départ, donc elle doit à la fois bouger ET prévenir la grille.
+
+        Passer par la console plutôt que d'appeler la grille directement n'est
+        pas un détour : c'est elle qui garde le niveau de chaque tranche, et
+        c'est ce niveau que la télécommande relit avant le cran suivant. Court-
+        circuitée, elle continuait d'annoncer l'ancienne valeur — la molette
+        repartait du même point à chaque cran, et le volume ne bougeait plus.
+        """
+        cle = self._MAIN if not login else login
+        valeur = max(0, min(100, int(valeur)))
+        self._volumes[cle] = valeur
+        strip = self._strips.get(cle)
+        if strip is not None:
+            bloque = strip._slider.blockSignals(True)
+            strip._slider.setValue(valeur)
+            strip._slider.blockSignals(bloque)
+            strip._val.setText(str(valeur))
+        if cle == self._MAIN:
+            self.main_volume_changed.emit(valeur)
+        else:
+            self.volume_changed.emit(cle, valeur)
+
+    def regler_muet(self, login: str, muet: bool) -> None:
+        """Coupe une tranche depuis l'extérieur. Même règle que `regler_volume`."""
+        cle = self._MAIN if not login else login
+        muet = bool(muet)
+        self._muets[cle] = muet
+        strip = self._strips.get(cle)
+        if strip is not None and strip._muet != muet:
+            bloque = strip._mute.blockSignals(True)
+            strip._mute.setChecked(muet)
+            strip._mute.blockSignals(bloque)
+            strip._muet = muet
+            strip._refresh_mute()
+        if cle == self._MAIN:
+            self.main_mute_changed.emit(muet)
+        else:
+            self.mute_changed.emit(cle, muet)
+
+    def niveaux(self) -> dict[str, tuple[int, bool]]:
+        """Volume et coupure de chaque tranche, par login.
+
+        Publié pour la télécommande : une molette de Stream Deck doit afficher
+        le niveau RÉEL avant qu'on la tourne, sinon le premier cran fait sauter
+        le son d'un endroit inattendu.
+
+        La tranche du plein écran est rendue sous la clé vide, comme partout
+        ailleurs dans la télécommande.
+        """
+        rendu: dict[str, tuple[int, bool]] = {}
+        for cle in set(self._volumes) | set(self._muets):
+            login = "" if cle == self._MAIN else str(cle)
+            rendu[login] = (int(self._volumes.get(cle, 100)),
+                            bool(self._muets.get(cle, False)))
+        return rendu
+
     def _on_volume(self, login: str, v: int) -> None:
         strip = self._strips.get(login)
         if strip is not None and not strip._muet:
@@ -4557,6 +4685,8 @@ class _StreamersTab(QWidget):
     grid_selection_changed = pyqtSignal(list)  # list[str] twitch_logins
     #: Login dont on veut ouvrir la fiche.
     sheet_requested = pyqtSignal(str)
+    #: (login, favori) — relayé depuis les cartes.
+    favori_change = pyqtSignal(str, bool)
 
     MAX_SELECTED: int = 25
 
@@ -4977,6 +5107,7 @@ class _StreamersTab(QWidget):
                 card = _StreamerCard(s, slot)
                 card.toggled.connect(self._on_card_toggled)
                 card.sheet_requested.connect(self.sheet_requested)
+                card.favori_change.connect(self._sur_favori)
                 self._card_map[s.twitch_login] = card
             else:
                 # Réutilisée : seuls le slot et les viewers peuvent avoir bougé,
@@ -5072,6 +5203,24 @@ class _StreamersTab(QWidget):
         self._counter_lbl.setStyleSheet(f"color: {color}; background: transparent; border: none;")
 
     # -- slots ----------------------------------------------------------------
+
+    def rafraichir_favori(self, login: str) -> None:
+        """Repeint l'étoile d'une carte après un changement venu d'AILLEURS.
+
+        Le favori se pose aussi au clavier et depuis le boîtier Stream Deck :
+        la carte doit alors suivre, sans quoi les deux moitiés de
+        l'application affichent l'inverse l'une de l'autre.
+        """
+        carte = self._card_map.get(login)
+        if carte is not None:
+            carte._refresh_fav_btn()
+
+    def _sur_favori(self, login: str, favori: bool) -> None:
+        """Répercute l'étoile : mêmes cartes, puis le reste de l'application."""
+        carte = self._card_map.get(login)
+        if carte is not None:
+            carte._refresh_fav_btn()
+        self.favori_change.emit(login, favori)
 
     def _on_card_toggled(self, login: str, add: bool) -> None:
         if add:
@@ -5260,6 +5409,39 @@ def _est_sur_place(location: str) -> bool:
     return bool(lieu) and lieu not in ("online", "remote", "distance")
 
 
+def _duree_de(s: StreamerInfo) -> float:
+    """Secondes de direct, 0 si inconnu — pour trier, pas pour afficher."""
+    from core import live_uptime
+
+    return (live_uptime.depuis(s.twitch_login) or 0.0) if s.online else 0.0
+
+
+def _tendance_de(s: StreamerInfo) -> float:
+    """Viewers gagnés ou perdus dans l'heure, 0 si on ne sait pas encore."""
+    from core import tendances
+
+    return float(tendances.viewers(s.twitch_login) or 0) if s.online else 0.0
+
+
+def _part_objectifs(cache: dict, s: StreamerInfo) -> float:
+    """Part des objectifs atteints. -1 quand la chaîne n'en annonce aucun.
+
+    Trier sur la PART et non sur le compte : trois objectifs sur quatre valent
+    mieux que trois sur vingt, et un classement qui dit l'inverse ment.
+    """
+    buts = cache.get(s.twitch_login) or []
+    if not buts:
+        return -1.0
+    return sum(1 for b in buts if getattr(b, "done", False)) / len(buts)
+
+
+#: Rang de chaque colonne du classement. Nommés : six index nus dans le
+#: remplissage puis dans la configuration, c'est une colonne insérée au
+#: milieu et trois décalages silencieux.
+(_C_RANG, _C_NOM, _C_LIEU, _C_JEU, _C_DUREE,
+ _C_OBJ, _C_VUE, _C_TEND, _C_DON) = range(9)
+
+
 class _StatsTab(QWidget):
     """Onglet Stats — chiffres clés, courbes, et un seul classement lisible.
 
@@ -5275,7 +5457,10 @@ class _StatsTab(QWidget):
         ("Streamer", "nom", False),
         ("Lieu", "lieu", False),
         ("Jeu", "jeu", False),
+        ("Depuis", "duree", True),
+        ("Objectifs", "objectifs", True),
         ("Viewers", "viewers", True),
+        ("+/h", "tendance", True),
         ("Cagnotte", "cagnotte", True),
     ]
 
@@ -5292,6 +5477,9 @@ class _StatsTab(QWidget):
         self._charts_ready = False
         self._charts_payload: str | None = None   # dernière série non poussée
         self._streamers: list[StreamerInfo] = []
+        #: login → objectifs de dons, semés par la fenêtre. Vide tant que
+        #: l'onglet Goals n'a rien reçu : la colonne affiche alors « — ».
+        self._goals: dict = {}
         self._filtre: str = "tous"
         self._tri: str = "cagnotte"
         self._decroissant: bool = True
@@ -5420,13 +5608,16 @@ class _StatsTab(QWidget):
         # de barre, donc de la comparaison lisible. Étirer le nom ou le jeu
         # rouvrait le gouffre de l'ancienne version — cinq cents pixels de vide
         # entre le pseudo et le chiffre qui lui correspond.
-        for colonne in (4, 5):
+        for colonne in (_C_VUE, _C_DON):
             hh.setSectionResizeMode(colonne, QHeaderView.ResizeMode.Stretch)
-        table.setColumnWidth(0, 38)
-        table.setColumnWidth(1, 230)
-        table.setColumnWidth(2, 110)
-        table.setColumnWidth(3, 240)
-        for col in (4, 5):
+        table.setColumnWidth(_C_RANG, 38)
+        table.setColumnWidth(_C_NOM, 200)
+        table.setColumnWidth(_C_LIEU, 90)
+        table.setColumnWidth(_C_JEU, 190)
+        table.setColumnWidth(_C_DUREE, 80)
+        table.setColumnWidth(_C_OBJ, 80)
+        table.setColumnWidth(_C_TEND, 70)
+        for col in (_C_DUREE, _C_OBJ, _C_VUE, _C_TEND, _C_DON):
             item = table.horizontalHeaderItem(col)
             if item is not None:
                 item.setTextAlignment(
@@ -5537,9 +5728,18 @@ class _StatsTab(QWidget):
             # alors l'ordre alphabétique de l'API, illisible. Les viewers
             # départagent, eux.
             "cagnotte": lambda s: (s.donation, s.viewers),
+            "duree": lambda s: (_duree_de(s), s.viewers),
+            "objectifs": lambda s: (_part_objectifs(self._goals, s), s.viewers),
+            "tendance": lambda s: (_tendance_de(s), s.viewers),
         }
         return sorted(retenus, key=cles.get(self._tri, cles["cagnotte"]),
                       reverse=self._decroissant)
+
+    def seed_goals(self, cache: dict) -> None:
+        """Objectifs par login, tels que le panel les a reçus."""
+        self._goals = dict(cache or {})
+        if self._streamers:
+            self._remplir()
 
     def _remplir(self) -> None:
         retenus = self._selection()
@@ -5556,17 +5756,20 @@ class _StatsTab(QWidget):
         table = self._ranking_table
         rang = QTableWidgetItem(str(i + 1))
         rang.setForeground(QBrush(QColor("#555555")))
-        table.setItem(i, 0, rang)
-        table.setItem(i, 1, self._cellule_nom(s))
+        table.setItem(i, _C_RANG, rang)
+        table.setItem(i, _C_NOM, self._cellule_nom(s))
 
         sur_place = _est_sur_place(s.location)
         lieu = QTableWidgetItem("sur place" if sur_place else "à distance")
         lieu.setForeground(QBrush(QColor("#f5c518" if sur_place else "#666666")))
-        table.setItem(i, 2, lieu)
+        table.setItem(i, _C_LIEU, lieu)
 
         jeu = QTableWidgetItem(s.game if s.online else "hors ligne")
         jeu.setForeground(QBrush(QColor("#999999" if s.online else "#555555")))
-        table.setItem(i, 3, jeu)
+        table.setItem(i, _C_JEU, jeu)
+
+        table.setItem(i, _C_DUREE, self._cellule_duree(s))
+        table.setItem(i, _C_OBJ, self._cellule_objectifs(s))
 
         vue = _CelluleNombre(_fmt_viewers(s.viewers) if s.online else "—",
                              float(s.viewers))
@@ -5574,7 +5777,9 @@ class _StatsTab(QWidget):
         vue.setForeground(QBrush(QColor("#38bdf8" if s.online else "#555555")))
         vue.setTextAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(i, 4, vue)
+        table.setItem(i, _C_VUE, vue)
+
+        table.setItem(i, _C_TEND, self._cellule_tendance(s))
 
         don = _CelluleNombre(s.donation_formatted or _fmt_euros(s.donation),
                              s.donation)
@@ -5582,7 +5787,70 @@ class _StatsTab(QWidget):
         don.setForeground(QBrush(QColor("#00ff87" if s.donation else "#555555")))
         don.setTextAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(i, 5, don)
+        table.setItem(i, _C_DON, don)
+
+    def _cellule_duree(self, s: StreamerInfo) -> QTableWidgetItem:
+        """Depuis combien de temps la chaîne est en direct.
+
+        Le tri se fait sur les SECONDES, pas sur le texte : « 9 h 05 min »
+        passerait avant « 12 h 00 min » dans un ordre alphabétique.
+        """
+        from core import live_uptime
+
+        secondes = live_uptime.depuis(s.twitch_login) if s.online else None
+        cellule = _CelluleNombre(
+            live_uptime.duree(secondes) if secondes is not None else "—",
+            float(secondes or 0.0))
+        cellule.setForeground(QBrush(QColor(
+            "#c9c9c9" if secondes is not None else "#555555")))
+        cellule.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return cellule
+
+    def _cellule_objectifs(self, s: StreamerInfo) -> QTableWidgetItem:
+        """« 3/8 » — objectifs atteints sur ceux annoncés.
+
+        Trié sur la PART atteinte et non sur le nombre brut : trois sur quatre
+        est un meilleur résultat que trois sur vingt.
+        """
+        buts = self._goals.get(s.twitch_login) or []
+        if not buts:
+            cellule = _CelluleNombre("—", -1.0)
+            cellule.setForeground(QBrush(QColor("#555555")))
+        else:
+            faits = sum(1 for b in buts if getattr(b, "done", False))
+            cellule = _CelluleNombre(f"{faits}/{len(buts)}", faits / len(buts))
+            cellule.setForeground(QBrush(QColor(
+                "#00ff87" if faits else "#777777")))
+        cellule.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return cellule
+
+    def _cellule_tendance(self, s: StreamerInfo) -> QTableWidgetItem:
+        """Viewers gagnés ou perdus dans la dernière heure.
+
+        Une chaîne peut être petite et MONTER : c'est ce que le classement par
+        audience ne dit jamais, et c'est souvent là qu'il se passe quelque
+        chose.
+        """
+        from core import tendances
+
+        delta = tendances.viewers(s.twitch_login) if s.online else None
+        if delta is None:
+            cellule = _CelluleNombre("—", 0.0)
+            cellule.setForeground(QBrush(QColor("#555555")))
+        else:
+            signe = "+" if delta > 0 else ""
+            cellule = _CelluleNombre(f"{signe}{_fmt_viewers(abs(delta))}"
+                                     if delta else "=", float(delta))
+            if delta:
+                cellule.setText(f"{signe}{'-' if delta < 0 else ''}"
+                                f"{_fmt_viewers(abs(delta))}")
+            cellule.setForeground(QBrush(QColor(
+                "#00ff87" if delta > 0 else "#ff6b6b" if delta < 0 else "#666666")))
+        cellule.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return cellule
 
     def _cellule_nom(self, s: StreamerInfo) -> QTableWidgetItem:
         nom = QTableWidgetItem(s.display)
@@ -5951,6 +6219,9 @@ class PanelWindow(QMainWindow):
     #: Action demandée depuis la palette et destinée au plein écran.
     action_requested = pyqtSignal(str)
     #: (login, volume 0-100) — réglage venu de la console de mixage.
+    #: (login, favori) — l'étoile d'une carte a changé. Ce qui l'affiche
+    #: ailleurs — le boîtier Stream Deck, notamment — s'y raccroche.
+    favori_change = pyqtSignal(str, bool)
     cell_volume_changed = pyqtSignal(str, int)
     #: Volume du plein écran, réglé depuis la console.
     main_volume_changed = pyqtSignal(int)
@@ -6219,6 +6490,7 @@ class PanelWindow(QMainWindow):
         self._streamers_tab = _StreamersTab()
         self._streamers_tab.grid_selection_changed.connect(self.grid_selection_changed)
         self._streamers_tab.sheet_requested.connect(self.open_streamer_sheet)
+        self._streamers_tab.favori_change.connect(self.favori_change)
         self._stack.addWidget(self._streamers_tab)
 
         self._mixer_tab = _MixerTab()
@@ -6387,6 +6659,22 @@ class PanelWindow(QMainWindow):
         """Coupure du plein écran, décidée ailleurs qu'à la console."""
         self._mixer_tab.set_main_muted(muet)
 
+    def rafraichir_favori(self, login: str) -> None:
+        """Répercute sur les cartes un favori posé hors du panel."""
+        self._streamers_tab.rafraichir_favori(login)
+
+    def niveaux_de_mixage(self) -> dict:
+        """Volume et coupure de chaque tranche — relayé à la télécommande."""
+        return self._mixer_tab.niveaux()
+
+    def regler_mixage(self, login: str, valeur: int) -> None:
+        """Règle une tranche de la console. Login vide = le plein écran."""
+        self._mixer_tab.regler_volume(login, valeur)
+
+    def couper_mixage(self, login: str, muet: bool) -> None:
+        """Coupe une tranche de la console. Login vide = le plein écran."""
+        self._mixer_tab.regler_muet(login, muet)
+
     def add_feed_event(self, kind: str, login: str, text: str) -> None:
         """Ajoute une entrée au fil d'événements de l'Accueil."""
         self._accueil_tab.add_feed_event(kind, login, text)
@@ -6396,6 +6684,7 @@ class PanelWindow(QMainWindow):
         # Conservés aussi pour la fiche d'un participant, qui les affiche.
         self._goals_raw = dict(cache or {})
         self._goals_tab.seed_cache(cache)
+        self._stats_tab.seed_goals(cache)
 
     # -- bigscreen ------------------------------------------------------------
 

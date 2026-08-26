@@ -40,6 +40,18 @@ elif sys.platform == "darwin":
     if os.path.exists("libmpv.2.dylib"):
         binaires_extra.append(("libmpv.2.dylib", "."))
 
+# Extension Stream Deck, livrée AVEC l'application.
+#
+# Sans elle, l'installer supposerait de trouver un dossier caché dans %APPDATA%
+# et de savoir qu'il faut redémarrer le logiciel Elgato : le bouton des
+# paramètres (core/streamdeck_install.py) ne peut poser que ce qu'il a sous la
+# main. zlink-deck.exe est produit juste avant par streamdeck/construire.py ;
+# s'il manque, on embarque quand même le reste, et le bouton dira que
+# l'extension livrée est incomplète plutôt que de disparaître sans explication.
+_EXTENSION = os.path.join("streamdeck", "com.zlink.deck.sdPlugin")
+if sys.platform.startswith("win") and os.path.isdir(_EXTENSION):
+    donnees.append((_EXTENSION, _EXTENSION))
+
 # Icône : un seul SVG fait autorité (assets/zevent.svg), scripts/gen_icons.py
 # en dérive les conteneurs. Windows veut un .ico, macOS un .icns ; Linux n'en
 # lit aucun ici, l'icône de fenêtre y est posée par l'application elle-même.

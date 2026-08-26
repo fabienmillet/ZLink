@@ -56,6 +56,12 @@ def _dossier_utilisateur() -> pathlib.Path:
 #: Où l'application écrit. Depuis les sources, la racine du dépôt.
 DATA_ROOT: pathlib.Path = _dossier_utilisateur() if FROZEN else RESOURCE_ROOT
 
+#: Le dossier de l'utilisateur, quoi qu'il arrive — même lancé depuis les
+#: sources, où DATA_ROOT vaut la racine du dépôt. Ce qu'un programme
+#: EXTÉRIEUR doit pouvoir retrouver s'écrit ici : l'extension Stream Deck,
+#: installée chez Elgato, n'a aucun moyen de deviner où le dépôt est cloné.
+USER_DATA_ROOT: pathlib.Path = _dossier_utilisateur()
+
 # ZLINK_CONFIG déplace le fichier de configuration. Utile pour faire tourner une
 # seconde instance sur un autre profil, et indispensable aux tests : sans lui,
 # le moindre banc qui enregistre un réglage écrit dans la configuration réelle

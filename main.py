@@ -503,6 +503,162 @@ def _brancher_top_audiences(grid, panel, fullscreen, data_manager) -> None:
     data_manager.top_stream_entered.connect(_top_entree)
 
 
+#: La télécommande, maintenue en vie pour la durée de la session. Un objet Qt
+#: sans référence Python est ramassé, et son serveur se ferme avec lui.
+_TELECOMMANDE: list = []
+
+
+def _logins_affiches(grid, fullscreen, selection_store) -> list[str]:
+    """Les chaînes actuellement sous les yeux : le plein écran et la grille.
+
+    Le reste du plateau n'est pas demandé — une durée qu'on ne montre nulle
+    part ne vaut pas une requête.
+    """
+    logins = [fullscreen.current_login] if fullscreen.current_login else []
+    logins += list(selection_store.get_selected() or [])
+    if grid is not None:
+        logins += [c.twitch_login for c in grid.grid._cells if c.twitch_login]
+    return logins
+
+
+def _brancher_domotique(grid, data_manager) -> None:
+    """Fait sortir vers Home Assistant ce que ZLink repère déjà.
+
+    Aucune détection n'est ajoutée : on se branche sur les quatre signaux
+    existants. Sans URL configurée, `annonce` rend False sans rien envoyer —
+    inutile de tester ici ce que le module sait déjà refuser.
+    """
+    from core import domotique
+
+    data_manager.milestone_reached.connect(
+        lambda montant, libelle: domotique.annonce(
+            "palier", {"montant": float(montant), "libelle": str(libelle)}))
+    data_manager.big_donation.connect(
+        lambda login, display, montant, nature: domotique.annonce(
+            "don", {"login": login, "streamer": display,
+                    "montant": float(montant), "nature": nature}))
+    data_manager.goal_imminent.connect(
+        lambda login, display, objectif, reste, _url: domotique.annonce(
+            "objectif", {"login": login, "streamer": display,
+                         "objectif": objectif, "reste": float(reste)}))
+    if grid is not None:
+        grid.hype_alert.connect(
+            lambda login, libelle, score, couleur, extrait: domotique.annonce(
+                "hype", {"login": login, "libelle": libelle,
+                         "score": round(float(score), 3),
+                         "couleur": couleur, "extrait": extrait}))
+
+
+def _brancher_telecommande(grid, panel, fullscreen, data_manager):
+    """Ouvre la télécommande locale et la relie à ce qui existe déjà.
+
+    Elle n'apporte aucun geste nouveau : elle rejoue ceux du clavier et de la
+    console de mixage, depuis un boîtier posé sur le bureau. Rend l'objet, ou
+    None si l'écoute a échoué — auquel cas ZLink tourne sans, exactement comme
+    avant.
+
+    L'état est publié à chaque changement qui se voit sur les touches : la
+    liste des cellules, la chaîne affichée en grand. Rien n'est envoyé en
+    boucle — une touche qui ne change pas n'a pas besoin d'être redessinée.
+    """
+    from core.remote_api import RemoteAPI
+
+    telecommande = RemoteAPI()
+    if not telecommande.demarrer():
+        return None
+
+    telecommande.slot_demande.connect(fullscreen.slot_requested)
+    telecommande.voisin_demande.connect(fullscreen.neighbour_requested)
+    telecommande.action_demandee.connect(fullscreen.run_action)
+    telecommande.chaine_demandee.connect(fullscreen.stream_change_requested)
+    telecommande.volume_demande.connect(fullscreen.set_volume)
+    telecommande.muet_demande.connect(fullscreen.set_muted)
+    # Par la console de mixage quand elle existe, et seulement à défaut par la
+    # grille : la console tient le niveau de chaque tranche, et c'est ce niveau
+    # que la télécommande relit avant chaque cran. La court-circuiter laissait
+    # la molette repartir du même point indéfiniment.
+    if panel is not None:
+        telecommande.volume_chaine_demande.connect(panel.regler_mixage)
+        telecommande.muet_chaine_demande.connect(panel.couper_mixage)
+    elif grid is not None:
+        telecommande.volume_chaine_demande.connect(grid.grid.set_cell_volume)
+        telecommande.muet_chaine_demande.connect(grid.grid.set_cell_muted)
+
+    def _publier(*_args) -> None:
+        # Une lecture d'etat qui echoue ne doit pas emporter le signal qui l'a
+        # declenchee : c'est la mise a jour des streamers, dont depend toute
+        # l'interface. La telecommande garde alors l'etat precedent.
+        try:
+            etat = _etat_pour_telecommande(grid, panel, fullscreen)
+        except Exception:                                     # noqa: BLE001
+            logger.exception("Telecommande : etat illisible, publication sautee")
+            return
+        telecommande.publier_etat(etat)
+
+    data_manager.streamers_updated.connect(_publier)
+    fullscreen.stream_changed.connect(_publier)
+    fullscreen.volume_changed.connect(_publier)
+    fullscreen.etat_bascule.connect(_publier)
+    if grid is not None:
+        grid.grid.audio_pins_changed.connect(_publier)
+    if panel is not None:
+        # Une tranche qui bouge change ce qu'affiche une molette : sans cela,
+        # la télécommande garderait l'ancien niveau et repartirait de lui.
+        panel.cell_volume_changed.connect(_publier)
+        panel.cell_mute_changed.connect(_publier)
+        panel.main_volume_changed.connect(_publier)
+        # L'étoile posée depuis le panel : la touche « Favori » du boîtier
+        # l'affiche, elle doit donc l'apprendre.
+        panel.favori_change.connect(_publier)
+        # Et l'inverse : posée depuis le plein écran, le clavier ou le
+        # boîtier, elle doit apparaître sur la carte du panel. Sans ce
+        # second sens, les deux moitiés affichaient l'inverse l'une de
+        # l'autre selon l'endroit où l'on avait cliqué.
+        fullscreen.favori_change.connect(
+            lambda login, _favori: panel.rafraichir_favori(login))
+    _publier()
+    return telecommande
+
+
+def _etat_pour_telecommande(grid, panel, fullscreen) -> dict:
+    """Ce qu'une touche a besoin de savoir, et rien de plus.
+
+    L'AVATAR est envoyé comme une URL, jamais comme une image : le plugin la
+    télécharge une fois et garde le résultat. Réémettre quelques dizaines de
+    kilo-octets par chaîne à chaque changement d'audience — toutes les trente
+    secondes — n'apporterait rien.
+    """
+    niveaux = panel.niveaux_de_mixage() if panel is not None else {}
+    cellules = []
+    if grid is not None:
+        avatars = {s.twitch_login: getattr(s, "profile_url", "")
+                   for s in (grid.grid._last_streamers or [])}
+        vues = [c for c in grid.grid._cells if c.twitch_login]
+        for cellule in grid.grid._ordered_for_display(vues):
+            login = cellule.twitch_login
+            volume, muet = niveaux.get(login, (100, False))
+            cellules.append({
+                "login": login,
+                "viewers": int(getattr(cellule, "_viewers", 0) or 0),
+                "online": bool(cellule.is_online),
+                "epingle": bool(getattr(cellule, "_audio_pinned", False)),
+                "avatar": avatars.get(login, ""),
+                "volume": volume,
+                "muet": muet,
+            })
+    return {
+        "actif": fullscreen.current_login,
+        "volume": int(getattr(fullscreen, "_volume", 0) or 0),
+        "muet": bool(getattr(fullscreen, "_muted", False)),
+        # Deux états BASCULABLES : une touche « Chat » ou « Favori » doit
+        # montrer si elle est engagée, sinon elle ne dit que ce qu'elle fait,
+        # jamais où l'on en est.
+        "chat": bool(getattr(fullscreen, "chat_ouvert", False)),
+        "favori": bool(getattr(fullscreen, "favori_courant", False)),
+        "cellules": cellules,
+    }
+
+
 def _brancher_raccourcis_grille(grid, fullscreen) -> None:
     """Touches du plein écran qui dépendent de l'ordre de la grille."""
     if grid is None:
@@ -806,6 +962,18 @@ def main() -> int:
             streamers, selection_store.get_selected()
         )
     )
+    # Durée des directs : demandée pour ce qui est AFFICHÉ seulement, et
+    # redessinée quand elle arrive. Trois cents chaînes en direct feraient
+    # douze requêtes toutes les cinq minutes pour des durées que personne ne
+    # regarde.
+    # Mémoire par chaîne : c'est elle qui donne « +320 viewers cette heure ».
+    # Aucune API ne rend de série, on garde donc ce qui passe.
+    from core import tendances
+    data_manager.streamers_updated.connect(tendances.noter)
+    data_manager.streamers_updated.connect(
+        lambda _streamers: data_manager.rafraichir_durees(
+            _logins_affiches(grid, fullscreen, selection_store)))
+    data_manager.durees_updated.connect(fullscreen.rafraichir_duree)
 
     _brancher_panel(
         panel, grid, fullscreen, data_manager, stream_manager,
@@ -826,6 +994,12 @@ def main() -> int:
 
     _brancher_raccourcis_grille(grid, fullscreen)
     _brancher_fil_evenements(panel, grid, data_manager)
+
+    # Télécommande locale (Stream Deck). Gardée dans une variable : sans
+    # référence, Python la ramasserait et l'écoute se fermerait aussitôt.
+    _TELECOMMANDE.append(
+        _brancher_telecommande(grid, panel, fullscreen, data_manager))
+    _brancher_domotique(grid, data_manager)
 
     # Un favori qui lance son direct : annoncé aussi sur le plein écran, où
     # l'utilisateur a les yeux — le fil du panel peut être sur un autre écran.

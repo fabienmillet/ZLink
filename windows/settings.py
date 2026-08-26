@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont
+from PyQt6.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -46,7 +47,7 @@ except Exception:  # noqa: BLE001
     _QTA_OK = False
 
 from core.version import display_version
-from core import config_store
+from core import config_store, domotique, streamdeck_install
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,13 @@ _C_TEXT     = "#cccccc"
 _FOND_TRANSPARENT = "background: transparent;"
 _LICENCE_BSD = "BSD 3-Clause"
 _TITRE_ECRANS = "Écrans"
+#: Répété dans la barre de navigation et dans la page : une constante plutôt
+#: que deux littéraux, pour que renommer l'onglet ne casse pas la sélection.
+_TITRE_DECK = "Stream Deck"
+#: « Domotique » décrivait le domaine, pas ce que fait l'onglet : personne qui
+#: cherche Home Assistant ne l'y reconnaissait. Le jour où une autre box est
+#: gérée, le nom générique redeviendra le bon.
+_TITRE_DOMOTIQUE = "Home Assistant"
 _C_MUTED    = "#555555"
 _C_GREEN    = "#00ff87"
 _C_DANGER   = "#ff4444"
@@ -78,6 +86,12 @@ _SS_BASE = f"""
         font-family: '{_FONT_MONO}'; font-size: 12px;
     }}
     QLineEdit:focus {{ border-color: {_C_ACCENT}; }}
+    /* Sans cette règle, un champ désactivé garde la couleur ci-dessus : une
+       feuille de style qui fixe `color` l'emporte sur la palette « disabled »
+       de Qt, et rien ne distingue plus l'inerte de l'actif. */
+    QLineEdit:disabled {{
+        background: #151515; color: {_C_MUTED}; border-color: #1f1f1f;
+    }}
     QComboBox {{
         background: {_C_SURFACE}; border: 1px solid {_C_BORDER};
         border-radius: 4px; color: {_C_TEXT}; padding: 6px 10px; font-size: 12px;
@@ -768,6 +782,376 @@ _THIRD_PARTY: list[tuple[str, str]] = [
 ]
 
 
+class _PageDomotique(_PageBase):
+    """Page Home Assistant — une URL de webhook, et ce qu'on lui envoie.
+
+    ZLink repère déjà les paliers, les grosses donations, les objectifs
+    imminents et les moments forts : il ne manquait qu'une sortie. Le
+    clignotement, lui, reste chez Home Assistant — vingt requêtes en dix
+    secondes depuis ici laisseraient les lampes éteintes à la première
+    coupure, et personne d'autre que l'utilisateur ne sait quelles lampes.
+    """
+
+    def __init__(self, config: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._config = config
+
+        self._vl.addWidget(_h2(_TITRE_DOMOTIQUE))
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_hint(
+            "Faire réagir un éclairage — ou n'importe quoi d'autre — aux "
+            "événements du ZEvent. ZLink envoie "
+            "un message par événement sur un webhook Home Assistant ; ce que "
+            "les lampes en font — clignoter dix secondes, changer de couleur, "
+            "revenir comme avant — s'écrit dans une automatisation, côté Home "
+            "Assistant."
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Webhook"))
+        conf = domotique.reglages(config)
+        formulaire = self._form()
+        # Le webhook D'ABORD : selon la version de Home Assistant, son éditeur
+        # donne l'URL entière ou le seul identifiant. Le champ prend les deux,
+        # et l'adresse en dessous ne sert qu'au second cas.
+        self._webhook = QLineEdit(conf["webhook_id"] or conf["url"])
+        self._webhook.setPlaceholderText(
+            "https://homeassistant.local:8123/api/webhook/-XyZ123  ou  -XyZ123")
+        self._webhook.setClearButtonEnabled(True)
+        formulaire.addRow(_hint("URL ou ID du webhook"), self._webhook)
+        self._base = QLineEdit(conf["base"])
+        self._base.setPlaceholderText(domotique.BASE_DEFAUT)
+        self._base.setClearButtonEnabled(True)
+        formulaire.addRow(_hint("Adresse de Home Assistant"), self._base)
+        #: La rangée se MASQUE quand une URL entière est collée. La griser ne
+        #: suffisait pas : la feuille de style fixe `color` sans variante
+        #: `:disabled`, ce qui annule le grisé de Qt — le champ paraissait
+        #: actif tout en étant inerte.
+        self._formulaire = formulaire
+        # `_form` rend une disposition NUE : sans cet ajout, les deux champs
+        # existent, sont bien remplis, et ne s'affichent nulle part.
+        self._vl.addLayout(formulaire)
+        self._vl.addWidget(_hint(
+            "Dans Home Assistant : Paramètres → Automatisations → créer une "
+            "automatisation, déclencheur « Webhook ». Recopiez ce qu'il "
+            "affiche — l'URL entière selon les versions, l'identifiant seul "
+            "sinon. L'adresse ne sert que dans ce second cas. Aucun jeton à "
+            "créer : ce webhook tient lieu de secret, ne le publiez pas."
+        ))
+        self._adresse = _hint("")
+        self._vl.addWidget(self._adresse)
+        self._base.textChanged.connect(self._montrer_adresse)
+        self._webhook.textChanged.connect(self._montrer_adresse)
+        self._montrer_adresse()
+
+        rangee = QWidget()
+        hl = QHBoxLayout(rangee)
+        hl.setContentsMargins(0, 0, 0, 0)
+        self._essai = QPushButton("Envoyer un essai")
+        self._essai.setFixedHeight(32)
+        self._essai.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_C_MUTED}; "
+            f"border: 1px solid {_C_BORDER}; border-radius: 4px; "
+            f"padding: 0 16px; font-size: 12px; }}"
+            f"QPushButton:hover {{ color: #ffffff; border-color: {_C_GREEN}; }}"
+        )
+        self._essai.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._essai.clicked.connect(self._sur_essai)
+        hl.addWidget(self._essai)
+        hl.addStretch()
+        self._vl.addWidget(rangee)
+        self._message = _hint("")
+        self._vl.addWidget(self._message)
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Ce qu'on annonce"))
+        self._cases: dict[str, QCheckBox] = {}
+        for cle, libelle in domotique.EVENEMENTS.items():
+            case = QCheckBox(libelle)
+            case.setChecked(cle in conf["evenements"])
+            self._cases[cle] = case
+            self._vl.addWidget(case)
+        self._vl.addWidget(_hint(
+            "Chaque message porte son type — « palier », « don », "
+            "« objectif », « hype » — et de quoi le décrire : le montant et "
+            "son libellé pour un palier, la chaîne concernée pour le reste. "
+            "L'automatisation s'y branche pour ne réagir qu'à ce qui "
+            "l'intéresse."
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("L'automatisation à coller"))
+        self._vl.addWidget(_hint(
+            "Dans Home Assistant, sur l'écran de l'automatisation : le menu ⋮ "
+            "TOUT EN HAUT de la page — pas celui de la carte du déclencheur — "
+            "puis « Modifier en YAML ». Remplacez tout par ceci, en mettant "
+            "vos lampes à la place de « light.salon »."
+        ))
+
+        formulaire_lampe = self._form()
+        # VIDE au départ, pas pré-rempli : un exemple plausible se colle sans
+        # qu'on y pense, et donne une automatisation qui se déclenche sans
+        # rien allumer.
+        self._lampe = QLineEdit(str(conf.get("lampes") or ""))
+        self._lampe.setPlaceholderText("light.salon, light.bureau…")
+        formulaire_lampe.addRow(_hint("Vos lampes"), self._lampe)
+        self._vl.addLayout(formulaire_lampe)
+
+        self._avertissement = _hint("")
+        self._avertissement.setStyleSheet("color: #f5c518;")
+        self._avertissement.setWordWrap(True)
+        self._vl.addWidget(self._avertissement)
+
+        self._yaml = QPlainTextEdit()
+        self._yaml.setReadOnly(True)
+        self._yaml.setFixedHeight(230)
+        self._yaml.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._yaml.setStyleSheet(
+            f"QPlainTextEdit {{ background: #0d0d0d; color: {_C_TEXT}; "
+            f"border: 1px solid {_C_BORDER}; border-radius: 6px; padding: 8px; "
+            f"font-family: '{_FONT_MONO}'; font-size: 11px; }}"
+        )
+        self._vl.addWidget(self._yaml)
+
+        rangee_yaml = QWidget()
+        hy = QHBoxLayout(rangee_yaml)
+        hy.setContentsMargins(0, 0, 0, 0)
+        self._copier = QPushButton("Copier l'automatisation")
+        self._copier.setFixedHeight(32)
+        self._copier.setStyleSheet(
+            f"QPushButton {{ background: {_C_GREEN}; color: #000000; "
+            f"border: none; border-radius: 4px; padding: 0 18px; "
+            f"font-weight: bold; font-size: 12px; }}"
+            f"QPushButton:hover {{ background: #00cc6a; }}"
+        )
+        self._copier.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._copier.clicked.connect(self._sur_copie)
+        hy.addWidget(self._copier)
+        hy.addStretch()
+        self._vl.addWidget(rangee_yaml)
+
+        self._vl.addWidget(_hint(
+            "Home Assistant affichera « scene.zlink_avant : entité non "
+            "trouvée », en rouge. Celui-là est NORMAL : cette scène est créée "
+            "par l'automatisation elle-même, à son exécution, pour "
+            "photographier vos lampes avant de les faire clignoter. "
+            "L'avertissement disparaît après le premier déclenchement.\n\n"
+            "En revanche, le même message sur une entité « light.… » veut "
+            "dire que ce nom de lampe n'existe pas : là, il faut corriger. "
+            "L'automatisation se déclencherait sans rien allumer."
+        ))
+        self._vl.addWidget(_hint(
+            "Enregistrez, puis revenez cliquer « Envoyer un essai » : les "
+            "lampes doivent clignoter dix secondes et revenir comme avant. "
+            "Cette version réagit à TOUT, essai compris — c'est ce qui permet "
+            "de vérifier la chaîne entière. Pour ne garder que les paliers, "
+            "remplacez « conditions: [] » par :"
+        ))
+        filtre = QLineEdit(
+            "conditions: [{condition: template, "
+            "value_template: \"{{ trigger.json.type == 'palier' }}\"}]")
+        filtre.setReadOnly(True)
+        self._vl.addWidget(filtre)
+        self._vl.addWidget(_hint(
+            "Les variantes — une couleur par montant, un effet par type "
+            "d'événement, et quoi faire quand rien ne s'allume — sont dans "
+            "« docs/homeassistant.md »."
+        ))
+        self._lampe.textChanged.connect(self._montrer_yaml)
+        self._montrer_yaml()
+        self._vl.addStretch()
+
+    def _montrer_yaml(self) -> None:
+        """Régénère l'automatisation, et prévient si l'adresse sort du réseau."""
+        url = self._url()
+        self._yaml.setPlainText(domotique.automatisation(
+            self._webhook.text(), self._lampe.text(), url))
+        local = domotique.est_local(url)
+        self._avertissement.setText("" if local or not url else (
+            "⚠ Cette adresse passe par Internet : le déclencheur est donc "
+            "réglé sur « local_only: false », sans quoi Home Assistant "
+            "écarterait la requête EN RÉPONDANT 200 — d'où un essai qui "
+            "réussit sans que rien ne s'allume. L'identifiant du webhook "
+            "devient alors un secret exposé à Internet ; l'adresse locale de "
+            "la box est plus sûre si les deux machines sont sur le même "
+            "réseau."))
+        self._avertissement.setVisible(bool(self._avertissement.text()))
+
+    def _sur_copie(self) -> None:
+        QApplication.clipboard().setText(self._yaml.toPlainText())
+        self._copier.setText("✓ Copié")
+        QTimer.singleShot(1500,
+                          lambda: self._copier.setText("Copier l'automatisation"))
+
+    def _url(self) -> str:
+        return domotique.composer(self._base.text(), self._webhook.text())
+
+    def _montrer_adresse(self) -> None:
+        """Affiche l'adresse retenue, et grise ce qui ne sert pas.
+
+        Une URL entière collée en haut rend l'adresse inutile : la laisser
+        active laisserait croire qu'elle compte, et on chercherait longtemps
+        pourquoi la corriger ne change rien.
+        """
+        entier = self._webhook.text().strip().lower().startswith(
+            ("http://", "https://"))
+        self._formulaire.setRowVisible(1, not entier)
+        url = self._url()
+        self._adresse.setText(f"→ {url}" if url else "")
+        if hasattr(self, "_yaml"):
+            self._montrer_yaml()
+
+    def _sur_essai(self) -> None:
+        self._essai.setEnabled(False)
+        reussi, message = domotique.essayer(self._url())
+        self._message.setText(message)
+        self._message.setStyleSheet(
+            f"color: {_C_GREEN if reussi else _C_DANGER};")
+        self._essai.setEnabled(True)
+
+    def collect(self, config: dict) -> None:
+        config["domotique"] = {
+            "lampes": self._lampe.text().strip(),
+            "base": self._base.text().strip(),
+            "webhook_id": self._webhook.text().strip(),
+            "evenements": [c for c, case in self._cases.items()
+                           if case.isChecked()],
+        }
+
+
+class _PageStreamDeck(_PageBase):
+    """Page Stream Deck — pose l'extension chez Elgato en un bouton.
+
+    Sans elle, installer l'extension supposerait de trouver un dossier caché
+    dans %APPDATA% et de savoir qu'il faut redémarrer le logiciel Elgato :
+    deux choses qu'on ne peut pas demander à quelqu'un qui veut juste regarder
+    des streams.
+    """
+
+    def __init__(self, config: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self._vl.addWidget(_h2(_TITRE_DECK))
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_hint(
+            "Piloter ZLink depuis un boîtier Elgato : choisir le flux affiché "
+            "en grand, clipper, ouvrir le chat, faire un don, et régler le son "
+            "aux molettes. L'extension parle à ZLink sur la machine "
+            "uniquement — rien ne sort sur le réseau."
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("État"))
+        self._etat_lbl = _hint("")
+        self._vl.addWidget(self._etat_lbl)
+
+        self._bouton = QPushButton("Installer l'extension")
+        self._bouton.setFixedHeight(34)
+        self._bouton.setStyleSheet(
+            f"QPushButton {{ background: {_C_GREEN}; color: #000000; "
+            f"border: none; border-radius: 4px; padding: 0 20px; "
+            f"font-weight: bold; font-size: 12px; }}"
+            f"QPushButton:hover {{ background: #00cc6a; }}"
+            f"QPushButton:disabled {{ background: #2a2a2a; color: #666666; }}"
+        )
+        self._bouton.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._bouton.clicked.connect(self._installer)
+        self._bouton_profils = QPushButton("Ouvrir les profils")
+        self._bouton_profils.setFixedHeight(34)
+        self._bouton_profils.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_C_MUTED}; "
+            f"border: 1px solid {_C_BORDER}; border-radius: 4px; "
+            f"padding: 0 16px; font-size: 12px; }}"
+            f"QPushButton:hover {{ color: #ffffff; border-color: {_C_GREEN}; }}"
+            f"QPushButton:disabled {{ color: #4a4a4a; border-color: #2a2a2a; }}"
+        )
+        self._bouton_profils.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._bouton_profils.clicked.connect(self._ouvrir_profils)
+
+        rangee = QWidget()
+        hl = QHBoxLayout(rangee)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(10)
+        hl.addWidget(self._bouton)
+        hl.addWidget(self._bouton_profils)
+        hl.addStretch()
+        self._vl.addWidget(rangee)
+
+        self._message = _hint("")
+        self._message.setWordWrap(True)
+        self._vl.addWidget(self._message)
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Une fois installée"))
+        self._vl.addWidget(_hint(
+            "Quitter puis relancer le logiciel Stream Deck : il ne relit ses "
+            "extensions qu'au démarrage. ZLink apparaît ensuite dans la liste "
+            "des actions, catégorie « ZLink ». Quatre actions à faire glisser "
+            "sur les touches : Flux, Action, Navigation, et Mixage pour les "
+            "molettes."
+        ))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Profils tout faits"))
+        self._vl.addWidget(_hint(
+            "Deux dispositions prêtes, plutôt que vingt touches à régler une "
+            "à une : « ZLink — Grille » pour un Stream Deck 5×3 (treize flux "
+            "et deux flèches de page), « ZLink — Régie » pour un Stream Deck + "
+            "(chat, don, clip, revoir, muet, favori, précédent, suivant, et "
+            "les quatre molettes du mixage).\n\n"
+            "« Ouvrir les profils » montre les deux fichiers : un double-clic "
+            "les importe. Un profil ne s'installe pas comme l'extension — le "
+            "logiciel Stream Deck réécrit ses profils en se fermant, et un "
+            "fichier posé pendant qu'il tourne disparaîtrait à sa sortie."
+        ))
+        self._vl.addStretch()
+
+        self._rafraichir()
+
+    def _rafraichir(self) -> None:
+        situation = streamdeck_install.etat()
+        if not situation["logiciel"]:
+            texte = "Logiciel Stream Deck non détecté sur cette machine."
+        elif situation["a_jour"]:
+            texte = (f"Extension installée, version {situation['installee']} — "
+                     "à jour.")
+        elif situation["installee"]:
+            texte = (f"Extension installée en version "
+                     f"{situation['installee']}, ZLink en apporte la "
+                     f"{situation['disponible']}.")
+        else:
+            texte = "Extension pas encore installée."
+        self._etat_lbl.setText(texte)
+
+        self._bouton.setEnabled(situation["possible"])
+        self._bouton_profils.setEnabled(
+            streamdeck_install.dossier_profils() is not None)
+        self._bouton.setText("Réinstaller l'extension" if situation["installee"]
+                             else "Installer l'extension")
+        if situation["raison"]:
+            self._message.setText(situation["raison"])
+            self._message.setStyleSheet(f"color: {_C_MUTED};")
+
+    def _ouvrir_profils(self) -> None:
+        dossier = streamdeck_install.dossier_profils()
+        if dossier is None:
+            self._message.setText("Aucun profil livré avec cette copie de ZLink.")
+            self._message.setStyleSheet(f"color: {_C_MUTED};")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(dossier)))
+
+    def _installer(self) -> None:
+        self._bouton.setEnabled(False)
+        reussi, message = streamdeck_install.installer()
+        self._message.setText(message)
+        self._message.setStyleSheet(
+            f"color: {_C_GREEN if reussi else _C_DANGER};")
+        self._rafraichir()
+
+    def collect(self, config: dict) -> None:
+        """Page d'action : rien à enregistrer."""
+
+
 class _PageCredits(_PageBase):
     """Page Crédits — sources de données, auteur, licence."""
 
@@ -869,6 +1253,8 @@ _NAV_ITEMS = [
     (_TITRE_ECRANS,       "mdi6.monitor-multiple"),
     ("Alertes",      "mdi6.bell-outline"),
     ("Clips",        "mdi6.record-circle-outline"),
+    (_TITRE_DECK,    "mdi6.view-grid-outline"),
+    (_TITRE_DOMOTIQUE, "mdi6.home-automation"),
     ("Crédits",      "mdi6.heart-outline"),
 ]
 
@@ -972,10 +1358,13 @@ class SettingsPanel(QWidget):
         self._page_screens = _PageScreens(self._config)
         self._page_hype    = _PageHype(self._config)
         self._page_clips   = _PageClips(self._config)
+        self._page_deck    = _PageStreamDeck(self._config)
+        self._page_domo    = _PageDomotique(self._config)
         self._page_credits = _PageCredits(self._config)
 
         for page in (self._page_streams, self._page_screens, self._page_hype,
-                     self._page_clips, self._page_credits):
+                     self._page_clips, self._page_deck, self._page_domo,
+                     self._page_credits):
             self._pages_stack.addWidget(_scroll_wrap(page))
 
         cl.addWidget(self._pages_stack, stretch=1)
@@ -1029,6 +1418,7 @@ class SettingsPanel(QWidget):
         self._page_streams.collect(self._config)
         self._page_hype.collect(self._config)
         self._page_clips.collect(self._config)
+        self._page_domo.collect(self._config)
 
         if not self._page_screens.collect(self._config):
             self._switch_page(_TITRE_ECRANS)

@@ -1,0 +1,97 @@
+{
+  "Name": "ZLink",
+  "Description": "Pilote ZLink depuis le Stream Deck : choix du flux affiché en grand, actions du plein écran, et console de mixage sur les molettes.",
+  "Category": "ZLink",
+  "CategoryIcon": "icones/categorie",
+  "Icon": "icones/plugin",
+  "Author": "Fabien MILLET",
+  "URL": "https://github.com/fabienmillet/ZLink",
+  "Version": "1.2.3.0",
+  "SDKVersion": 2,
+  "CodePathWin": "zlink-deck.exe",
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Actions": [
+    {
+      "Name": "Flux",
+      "UUID": "com.zlink.deck.flux",
+      "Icon": "icones/flux",
+      "Tooltip": "Une cellule de la grille. La touche porte l'avatar de la chaîne et son audience ; l'appui la passe en plein écran.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/flux.html",
+      "States": [
+        {
+          "Image": "touches/flux",
+          "TitleAlignment": "bottom",
+          "FontSize": "10"
+        }
+      ]
+    },
+    {
+      "Name": "Action",
+      "UUID": "com.zlink.deck.action",
+      "Icon": "icones/action",
+      "Tooltip": "Un geste du plein écran : chat, don, clip, revoir, muet, favori.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/action.html",
+      "States": [
+        {
+          "Image": "touches/action",
+          "TitleAlignment": "bottom",
+          "FontSize": "10"
+        }
+      ]
+    },
+    {
+      "Name": "Navigation",
+      "UUID": "com.zlink.deck.navigation",
+      "Icon": "icones/navigation",
+      "Tooltip": "Flux précédent ou suivant, ou page précédente et suivante de la grille.",
+      "Controllers": [
+        "Keypad"
+      ],
+      "PropertyInspectorPath": "pi/navigation.html",
+      "States": [
+        {
+          "Image": "touches/navigation",
+          "TitleAlignment": "bottom",
+          "FontSize": "10"
+        }
+      ]
+    },
+    {
+      "Name": "Mixage",
+      "UUID": "com.zlink.deck.mixage",
+      "Icon": "icones/mixage",
+      "Tooltip": "Une molette de la console : tourner règle le volume, appuyer coupe le son.",
+      "Controllers": [
+        "Encoder"
+      ],
+      "PropertyInspectorPath": "pi/mixage.html",
+      "States": [
+        {
+          "Image": "touches/mixage"
+        }
+      ],
+      "Encoder": {
+        "layout": "$B1",
+        "TriggerDescription": {
+          "Rotate": "Volume",
+          "Push": "Couper le son",
+          "Touch": "Couper le son"
+        }
+      }
+    }
+  ]
+}

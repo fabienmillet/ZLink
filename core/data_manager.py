@@ -187,6 +187,8 @@ class DataManager(QObject):
     _sig_streamers_ready   = pyqtSignal(object, object, list)  # participations, stats, streamers
     _sig_events_ready      = pyqtSignal(list)                  # list[list[EventItem]]
     _sig_goals_ready       = pyqtSignal(list)                  # list[GoalWithStreamer]
+    #: Les durées de direct viennent d'être relevées — de quoi redessiner.
+    durees_updated         = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -205,6 +207,7 @@ class DataManager(QObject):
 
         # Verrous anti-overlap pour les workers background
         self._polling_streamers: bool = False
+        self._polling_durees: bool = False
         self._polling_events: bool = False
 
 
@@ -329,6 +332,34 @@ class DataManager(QObject):
             return
         self._polling_streamers = True
         threading.Thread(target=self._streamers_worker, daemon=True).start()
+
+    def rafraichir_durees(self, logins) -> None:
+        """Relève depuis quand ces chaînes sont en direct, en tâche de fond.
+
+        Seules celles AFFICHÉES sont demandées : trois cents chaînes en direct
+        feraient douze requêtes toutes les cinq minutes à une interface non
+        documentée, pour des durées que personne ne regarde.
+        """
+        from core import live_uptime
+
+        besoin = live_uptime.a_rafraichir(logins)
+        if not besoin or self._polling_durees:
+            return
+        self._polling_durees = True
+        threading.Thread(target=self._durees_worker, args=(besoin,),
+                         daemon=True).start()
+
+    def _durees_worker(self, logins: list[str]) -> None:
+        """Worker thread — gql.twitch.tv."""
+        from core import live_uptime
+
+        try:
+            _run(live_uptime.rafraichir(logins))
+        except Exception:
+            logger.exception("rafraichir_durees")
+        finally:
+            self._polling_durees = False
+        self.durees_updated.emit()
 
     def _streamers_worker(self) -> None:
         """Worker thread — zevent.fr/api/ + gdoc."""

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET. -->
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Action — ZLink</title>
+  <link rel="stylesheet" href="commun.css">
+</head>
+<body>
+  <div class="ligne">
+    <label for="cle">Geste</label>
+    <select id="cle">
+      <option value="clip">Clipper les 30 dernières secondes</option>
+      <option value="replay">Revoir les 30 dernières secondes</option>
+      <option value="chat">Ouvrir le chat</option>
+      <option value="don">Faire un don</option>
+      <option value="favori">Mettre en favori</option>
+      <option value="muet">Couper le son</option>
+    </select>
+  </div>
+  <p class="note">
+    Le geste porte sur la chaîne affichée en plein écran, quelle qu'elle soit
+    au moment de l'appui.
+  </p>
+  <div class="ligne">
+    <label for="libelle">Libellé</label>
+    <span class="case">
+      <input type="checkbox" id="libelle">
+      <label for="libelle">écrire le geste sur la touche</label>
+    </span>
+  </div>
+  <p class="note">
+    À décocher si vous avez saisi votre propre titre : sinon ZLink le
+    remplace.
+  </p>
+
+  <script src="commun.js"></script>
+  <script>
+    relier("cle", "cle", "clip");
+    relier("libelle", "libelle", true);
+  </script>
+</body>
+</html>

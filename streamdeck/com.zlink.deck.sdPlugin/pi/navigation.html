@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET. -->
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Navigation — ZLink</title>
+  <link rel="stylesheet" href="commun.css">
+</head>
+<body>
+  <div class="ligne">
+    <label for="sens">Sens</label>
+    <select id="sens">
+      <option value="precedent">Flux précédent</option>
+      <option value="suivant">Flux suivant</option>
+      <option value="page_precedente">Page précédente</option>
+      <option value="page_suivante">Page suivante</option>
+    </select>
+  </div>
+  <p class="note">
+    « Flux » change la chaîne en plein écran. « Page » fait défiler ce que
+    montrent les touches Flux, quand la grille compte plus de chaînes que le
+    boîtier n'a de touches.
+  </p>
+  <div class="ligne">
+    <label for="libelle">Libellé</label>
+    <span class="case">
+      <input type="checkbox" id="libelle">
+      <label for="libelle">écrire le sens sur la touche</label>
+    </span>
+  </div>
+
+  <script src="commun.js"></script>
+  <script>
+    relier("sens", "sens", "suivant");
+    relier("libelle", "libelle", true);
+  </script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET. -->
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Mixage — ZLink</title>
+  <link rel="stylesheet" href="commun.css">
+</head>
+<body>
+  <div class="ligne">
+    <label for="cible">Piste</label>
+    <select id="cible">
+      <option value="principal">Plein écran</option>
+      <option value="0">1re chaîne épinglée</option>
+      <option value="1">2e chaîne épinglée</option>
+      <option value="2">3e chaîne épinglée</option>
+      <option value="3">4e chaîne épinglée</option>
+    </select>
+  </div>
+  <p class="note">
+    Les pistes épinglées suivent l'ordre de la console de mixage de ZLink.
+    Une molette sans chaîne correspondante reste inerte : rien à régler tant
+    que rien n'est épinglé.
+  </p>
+
+  <script src="commun.js"></script>
+  <script>
+    relier("cible", "cible", "principal");
+  </script>
+</body>
+</html>

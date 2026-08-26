@@ -360,6 +360,80 @@ def test_un_reglage_arrive_avant_la_tranche_est_conserve(qtbot):
     assert m._strips[m._MAIN]._slider.value() == 55
 
 
+# ── Console de mixage : une tranche réglée de l'extérieur ───────────────────
+#
+# La télécommande Stream Deck règle une source épinglée sans toucher au
+# curseur. Quand elle appelait la grille directement, la console gardait
+# l'ancienne valeur — et comme c'est elle que la télécommande relit avant le
+# cran suivant, la molette repartait indéfiniment du même point : le son ne
+# bougeait plus après le premier cran.
+
+def test_une_tranche_reglee_de_l_exterieur_atteint_la_grille(qtbot):
+    m = _mixer(qtbot)
+    m.set_pinned(["theguill84"])
+    recus: list[tuple] = []
+    m.volume_changed.connect(lambda lg, v: recus.append((lg, v)))
+
+    m.regler_volume("theguill84", 40)
+    assert recus == [("theguill84", 40)], "la grille n'a pas été prévenue"
+
+
+def test_une_tranche_reglee_de_l_exterieur_retient_son_niveau(qtbot):
+    """C'est ce niveau que la molette relit avant le cran suivant."""
+    m = _mixer(qtbot)
+    m.set_pinned(["theguill84"])
+
+    m.regler_volume("theguill84", 40)
+    assert m.niveaux()["theguill84"] == (40, False)
+    assert m._strips["theguill84"]._slider.value() == 40
+
+
+def test_deux_crans_de_suite_descendent_bien_deux_fois(qtbot):
+    """La régression telle qu'elle se voyait : le volume sautait puis restait.
+
+    Chaque cran repart du niveau publié. Si la console ne retient pas le
+    premier, le second recalcule depuis la valeur d'origine et renvoie la même
+    consigne — la molette tourne dans le vide.
+    """
+    m = _mixer(qtbot)
+    m.set_pinned(["theguill84"])
+
+    for _cran in range(2):
+        niveau = m.niveaux().get("theguill84", (100, False))[0]
+        m.regler_volume("theguill84", niveau - 5)
+
+    assert m.niveaux()["theguill84"][0] == 90
+
+
+def test_la_tranche_principale_repond_au_login_vide(qtbot):
+    """La télécommande désigne le plein écran par une chaîne vide."""
+    m = _mixer(qtbot)
+    recus: list[int] = []
+    m.main_volume_changed.connect(recus.append)
+
+    m.regler_volume("", 33)
+    assert recus == [33]
+    assert m.niveaux()[""] == (33, False)
+
+
+def test_couper_une_tranche_de_l_exterieur_previent_la_grille(qtbot):
+    m = _mixer(qtbot)
+    m.set_pinned(["theguill84"])
+    recus: list[tuple] = []
+    m.mute_changed.connect(lambda lg, muet: recus.append((lg, muet)))
+
+    m.regler_muet("theguill84", True)
+    assert recus == [("theguill84", True)]
+    assert m.niveaux()["theguill84"][1] is True
+
+
+def test_une_tranche_absente_ne_fait_pas_tomber_la_console(qtbot):
+    """Une chaîne dépinglée entre-temps : la commande arrive quand même."""
+    m = _mixer(qtbot)
+    m.regler_volume("jamais-epingle", 20)
+    assert m.niveaux()["jamais-epingle"] == (20, False)
+
+
 # ── Onglet Goals : la distance, pas seulement la cible ──────────────────────
 #
 # L'ancienne liste n'affichait que le montant visé. « 559 600 € » ne dit pas si
@@ -634,3 +708,132 @@ def test_la_cle_de_cache_n_utilise_pas_un_algorithme_faible():
     url = "https://cdn.test/a.png"
     attendu = "guest_" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
     assert panel._avatar_cache_key("", url) == attendu
+
+
+# ── L'étoile d'une carte doit sortir de la carte ────────────────────────────
+#
+# Le bouton enregistrait bien le favori, mais ne repeignait que lui-même :
+# rien dans l'application ne l'apprenait. La touche « Favori » du Stream Deck
+# restait sur l'état d'avant le clic.
+
+def _carte(qtbot, login="essai_favori_zlink"):
+    from core.api_client import StreamerInfo
+
+    s = StreamerInfo(twitch_login=login, display=login, online=True, game="",
+                     location="LAN", viewers=1, donation=0.0,
+                     donation_formatted="", profile_url="", donation_url="")
+    carte = panel._StreamerCard(s, None)
+    qtbot.addWidget(carte)
+    return carte
+
+
+def test_l_etoile_d_une_carte_est_annoncee(qtbot, monkeypatch):
+    etats = {"pose": False}
+    monkeypatch.setattr(panel.favorites, "toggle",
+                        lambda lg: etats.__setitem__("pose", not etats["pose"])
+                        or etats["pose"])
+    monkeypatch.setattr(panel.favorites, "is_favorite", lambda lg: etats["pose"])
+
+    carte = _carte(qtbot)
+    recus: list[tuple] = []
+    carte.favori_change.connect(lambda lg, f: recus.append((lg, f)))
+
+    carte._toggle_favorite()
+    carte._toggle_favorite()
+
+    assert [f for _lg, f in recus] == [True, False]
+    assert {lg for lg, _f in recus} == {"essai_favori_zlink"}
+
+
+# ── La tranche du plein écran doit suivre le flux ───────────────────────────
+#
+# Sa clé interne est la constante `_MAIN`, identique d'une chaîne à l'autre :
+# la sortie anticipée du rebuild, qui ne comparait que les clés, croyait donc
+# qu'il n'y avait rien à refaire. La console affichait l'avatar et le nom de
+# la chaîne précédente pendant qu'une autre passait en grand.
+
+def test_changer_de_flux_repeint_la_tranche_principale(qtbot):
+    m = _mixer(qtbot)
+    assert m._strips[m._MAIN]._login_reel == "zerator"
+
+    m.set_main_stream("mastu")
+    assert m._strips[m._MAIN]._login_reel == "mastu"
+
+
+def test_le_meme_flux_ne_reconstruit_pas_la_console(qtbot):
+    """La sortie anticipée reste utile : elle évite un rebuild à chaque appel."""
+    m = _mixer(qtbot)
+    avant = m._strips[m._MAIN]
+    m.set_main_stream("zerator")
+    assert m._strips[m._MAIN] is avant
+
+
+def test_changer_de_flux_garde_le_volume_de_la_tranche(qtbot):
+    """Reconstruire ne doit pas remettre le plein écran à fond."""
+    m = _mixer(qtbot)
+    m.regler_volume("", 40)
+    m.set_main_stream("mastu")
+    assert m.niveaux()[""][0] == 40
+
+
+# ── Les colonnes ajoutées au classement ─────────────────────────────────────
+#
+# L'audience et la cagnotte ne disent pas ce qui SE PASSE : depuis combien de
+# temps la chaîne tient, où elle en est de ses objectifs, si elle monte ou
+# redescend. Trois colonnes, trois tris.
+
+def _s(login="zerator", viewers=1000, donation=0.0, online=True):
+    from core.api_client import StreamerInfo
+
+    return StreamerInfo(
+        twitch_login=login, display=login.title(), online=online,
+        game="Minecraft", location="lan", viewers=viewers, donation=donation,
+        donation_formatted="", profile_url="", donation_url="")
+
+
+def test_la_part_des_objectifs_prime_sur_leur_nombre():
+    """Trois sur quatre valent mieux que trois sur vingt."""
+    class But:
+        def __init__(self, done):
+            self.done = done
+
+    cache = {"petit": [But(True)] * 3 + [But(False)],
+             "grand": [But(True)] * 3 + [But(False)] * 17}
+    assert (panel._part_objectifs(cache, _s("petit"))
+            > panel._part_objectifs(cache, _s("grand")))
+
+
+def test_une_chaine_sans_objectif_se_range_a_part():
+    """Zéro objectif atteint et aucun objectif annoncé ne sont pas la même
+    chose : les confondre mettrait les silencieuses au milieu du classement."""
+    assert panel._part_objectifs({}, _s()) == -1.0
+
+
+def test_une_chaine_hors_ligne_n_a_ni_duree_ni_tendance():
+    hors = _s(online=False)
+    assert panel._duree_de(hors) == 0.0
+    assert panel._tendance_de(hors) == 0.0
+
+
+def test_la_ligne_de_l_heure_ne_dit_rien_sans_mesure(qtbot):
+    """Au lancement, il faut un quart d'heure de relevés avant qu'un écart
+    ait un sens — mieux vaut ne rien afficher qu'un chiffre faux."""
+    from core import tendances
+
+    tendances.oublier_tout()
+    assert panel._StreamerCard._ligne_de_l_heure(_s("jamais_vu")) is None
+
+
+def test_la_ligne_de_l_heure_porte_le_sens(qtbot):
+    from core import tendances
+
+    tendances.oublier_tout()
+    t = 1_000_000.0
+    tendances.noter([_s("monte", 1000), _s("descend", 5000)], t)
+    tendances.noter([_s("monte", 3000), _s("descend", 4000)], t + 3600)
+
+    haut = panel._StreamerCard._ligne_de_l_heure(_s("monte", 3000))
+    bas = panel._StreamerCard._ligne_de_l_heure(_s("descend", 4000))
+    assert "+" in haut.text() and "00ff87" in haut.styleSheet()
+    assert "ff6b6b" in bas.styleSheet(), "une baisse ne se lit pas en vert"
+    tendances.oublier_tout()

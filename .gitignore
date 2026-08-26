@@ -65,3 +65,12 @@ htmlcov/
 # Cache local de SonarLint, propre a la machine.
 .sonarlint/
 
+
+# --- Extension Stream Deck ---
+# L'environnement de construction, l'exécutable et l'archive : 17 Mo produits
+# par `streamdeck/construire.py`, qui se refabriquent en une commande.
+streamdeck/.venv/
+streamdeck/build/
+streamdeck/dist/
+streamdeck/com.zlink.deck.sdPlugin/zlink-deck.exe
+streamdeck/com.zlink.deck.sdPlugin/zlink-deck.log

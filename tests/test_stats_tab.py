@@ -130,25 +130,25 @@ def test_a_cagnotte_egale_les_viewers_departagent(onglet):
 
 
 def test_un_clic_sur_viewers_trie_par_viewers(onglet):
-    onglet._sur_clic_entete(4)
+    onglet._sur_clic_entete(panel._C_VUE)
     assert _noms(onglet) == ["anyme023", "jltomy", "mistermv", "low4n", "horty"]
 
 
 def test_recliquer_la_meme_colonne_inverse_l_ordre(onglet):
-    onglet._sur_clic_entete(4)
-    onglet._sur_clic_entete(4)
+    onglet._sur_clic_entete(panel._C_VUE)
+    onglet._sur_clic_entete(panel._C_VUE)
     assert _noms(onglet)[0] == "horty"
 
 
 def test_un_nom_se_trie_de_a_a_z(onglet):
     """Un nombre se regarde par le haut, un nom se lit dans l'autre sens."""
-    onglet._sur_clic_entete(1)
+    onglet._sur_clic_entete(panel._C_NOM)
     assert _noms(onglet) == sorted(_noms(onglet))
 
 
 def test_la_colonne_du_rang_n_est_pas_un_critere(onglet):
     avant = _noms(onglet)
-    onglet._sur_clic_entete(0)
+    onglet._sur_clic_entete(panel._C_RANG)
     assert _noms(onglet) == avant
 
 
@@ -159,11 +159,11 @@ def test_une_colonne_hors_bornes_ne_leve_pas(onglet):
 
 def test_l_entete_dit_sur_quoi_l_ordre_repose(onglet):
     """Sinon rien n'explique l'ordre affiché."""
-    onglet._sur_clic_entete(4)
+    onglet._sur_clic_entete(panel._C_VUE)
     titres = [onglet._ranking_table.horizontalHeaderItem(i).text()
               for i in range(onglet._ranking_table.columnCount())]
     assert "Viewers ▼" in titres
-    onglet._sur_clic_entete(4)
+    onglet._sur_clic_entete(panel._C_VUE)
     titres = [onglet._ranking_table.horizontalHeaderItem(i).text()
               for i in range(onglet._ranking_table.columnCount())]
     assert "Viewers ▲" in titres
@@ -171,7 +171,7 @@ def test_l_entete_dit_sur_quoi_l_ordre_repose(onglet):
 
 def test_le_rang_suit_l_ordre_affiche(onglet):
     """Le rang est une position, pas une propriété du streamer."""
-    onglet._sur_clic_entete(4)
+    onglet._sur_clic_entete(panel._C_VUE)
     t = onglet._ranking_table
     assert [t.item(i, 0).text() for i in range(t.rowCount())] == \
         ["1", "2", "3", "4", "5"]
@@ -211,8 +211,8 @@ def test_le_filtre_actif_se_voit(onglet):
 def test_la_barre_compare_au_plus_grand_de_la_selection(onglet):
     """Une échelle globale écrasait les petits derrière les trois gros."""
     t = onglet._ranking_table
-    onglet._sur_clic_entete(4)
-    parts = [t.item(i, 4).data(panel._BarreDeCellule.PART)
+    onglet._sur_clic_entete(panel._C_VUE)
+    parts = [t.item(i, panel._C_VUE).data(panel._BarreDeCellule.PART)
              for i in range(t.rowCount())]
     assert parts[0] == pytest.approx(1.0)
     assert parts[1] == pytest.approx(8200 / 11900)
@@ -221,16 +221,16 @@ def test_la_barre_compare_au_plus_grand_de_la_selection(onglet):
 def test_le_filtre_recalcule_l_echelle(onglet):
     """Filtrer « à distance » retire le plus gros : l'échelle doit suivre."""
     onglet._appliquer_filtre("remote")
-    onglet._sur_clic_entete(4)
+    onglet._sur_clic_entete(panel._C_VUE)
     t = onglet._ranking_table
-    assert t.item(0, 4).data(panel._BarreDeCellule.PART) == pytest.approx(1.0)
+    assert t.item(0, panel._C_VUE).data(panel._BarreDeCellule.PART) == pytest.approx(1.0)
 
 
 def test_un_streamer_hors_ligne_n_a_pas_de_barre_de_viewers(onglet):
     t = onglet._ranking_table
     ligne = _noms(onglet).index("horty")
-    assert t.item(ligne, 4).data(panel._BarreDeCellule.PART) == 0.0
-    assert t.item(ligne, 4).text() == "—"
+    assert t.item(ligne, panel._C_VUE).data(panel._BarreDeCellule.PART) == 0.0
+    assert t.item(ligne, panel._C_VUE).text() == "—"
 
 
 # ── cellules ─────────────────────────────────────────────────────────────────

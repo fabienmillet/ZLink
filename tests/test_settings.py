@@ -681,3 +681,106 @@ def test_ecouter_joue_les_deux_sons_meme_si_coupes(qtbot, monkeypatch):
     # Le second son part en différé pour ne pas se superposer au premier.
     qtbot.wait(1300)
     assert ("goal", True) in joues
+
+
+# ── Home Assistant : le formulaire ne doit pas faire remplir l'inutile ──────
+#
+# Selon la version, l'éditeur d'automatisation donne l'URL entière ou le seul
+# identifiant. Quand l'URL est là, l'adresse en dessous ne sert plus à rien —
+# et la griser ne suffisait pas : la feuille de style fixe `color` sans
+# variante `:disabled`, ce qui annule le grisé de Qt. Le champ paraissait
+# actif tout en étant inerte.
+
+def _page_ha(qtbot):
+    page = settings._PageDomotique({})
+    qtbot.addWidget(page)
+    return page
+
+
+# `isVisible` répond faux pour tout widget dont le parent n'est pas affiché :
+# ici il aurait validé le premier cas pour la mauvaise raison, et refusé le
+# second. `isHidden` ne rapporte QUE le masquage explicite, celui qu'on teste.
+
+def test_une_url_entiere_masque_l_adresse(qtbot):
+    page = _page_ha(qtbot)
+    page._webhook.setText("https://ha.exemple.fr/api/webhook/-abc")
+    assert page._base.isHidden()
+
+
+def test_un_identifiant_seul_montre_l_adresse(qtbot):
+    page = _page_ha(qtbot)
+    page._webhook.setText("-abc")
+    assert not page._base.isHidden()
+
+
+def test_l_adresse_retenue_est_affichee(qtbot):
+    """De quoi vérifier avant de cliquer, sans aller lire config.json."""
+    page = _page_ha(qtbot)
+    page._webhook.setText("-abc")
+    assert page._adresse.text().endswith("/api/webhook/-abc")
+
+
+def test_ce_qui_est_saisi_est_ce_qui_est_garde(qtbot):
+    page = _page_ha(qtbot)
+    page._webhook.setText("https://ha.exemple.fr/api/webhook/-abc")
+    config: dict = {}
+    page.collect(config)
+    assert config["domotique"]["webhook_id"] ==         "https://ha.exemple.fr/api/webhook/-abc"
+
+
+def test_le_yaml_affiche_porte_le_webhook_saisi(qtbot):
+    """Le but est de coller sans rien remplacer à la main."""
+    page = _page_ha(qtbot)
+    page._webhook.setText("https://ha.exemple.fr/api/webhook/-s8cw0QbBg5c")
+    assert "webhook_id: -s8cw0QbBg5c" in page._yaml.toPlainText()
+
+
+def test_le_yaml_suit_les_lampes_saisies(qtbot):
+    page = _page_ha(qtbot)
+    page._lampe.setText("light.bureau")
+    texte = page._yaml.toPlainText()
+    assert "light.bureau" in texte
+    assert "light.salon" not in texte
+
+
+def test_le_yaml_n_est_pas_modifiable(qtbot):
+    """On le copie, on ne l'édite pas : ce qui s'édite, c'est chez Home Assistant."""
+    assert _page_ha(qtbot)._yaml.isReadOnly()
+
+
+def test_le_bouton_copie_bien_le_yaml(qtbot):
+    from PyQt6.QtWidgets import QApplication
+
+    page = _page_ha(qtbot)
+    page._webhook.setText("-s8cw0QbBg5c")
+    page._sur_copie()
+    assert QApplication.clipboard().text() == page._yaml.toPlainText()
+    assert "webhook_id: -s8cw0QbBg5c" in QApplication.clipboard().text()
+
+
+def test_une_adresse_distante_est_signalee(qtbot):
+    page = _page_ha(qtbot)
+    page._webhook.setText("https://homeassist.exemple.fr/api/webhook/-abc")
+    assert "Internet" in page._avertissement.text()
+    assert "local_only: false" in page._yaml.toPlainText()
+
+
+def test_une_adresse_locale_ne_declenche_aucun_avertissement(qtbot):
+    page = _page_ha(qtbot)
+    page._base.setText("http://192.168.1.42:8123")
+    page._webhook.setText("-abc")
+    assert page._avertissement.text() == ""
+    assert "local_only: true" in page._yaml.toPlainText()
+
+
+def test_le_champ_des_lampes_n_est_pas_prerempli(qtbot):
+    """Un exemple plausible se colle sans qu'on y pense."""
+    assert _page_ha(qtbot)._lampe.text() == ""
+
+
+def test_les_lampes_saisies_sont_sauvegardees(qtbot):
+    page = _page_ha(qtbot)
+    page._lampe.setText("light.bureau")
+    config: dict = {}
+    page.collect(config)
+    assert config["domotique"]["lampes"] == "light.bureau"

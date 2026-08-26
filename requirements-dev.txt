@@ -3,3 +3,8 @@
 pytest>=8.0
 pytest-cov>=5.0
 pytest-qt>=4.4
+
+# Analyse le YAML des automatisations Home Assistant proposées par l'écran de
+# réglages : une indentation fausse ne se verrait sinon qu'au collage, chez
+# l'utilisateur. Les tests concernés se sautent d'eux-mêmes sans elle.
+PyYAML>=6.0

@@ -193,6 +193,25 @@ jobs:
         shell: bash
         run: python scripts/check_bootloader.py
 
+      # L'extension Stream Deck, AVANT l'application : ZLink.spec l'embarque
+      # telle qu'elle est sur le disque à ce moment-là, et c'est ce paquet que
+      # le bouton des paramètres posera chez Elgato. Construite ici, elle
+      # hérite du bootloader recompilé juste au-dessus.
+      - name: Extension Stream Deck (Windows)
+        if: matrix.target == 'windows'
+        shell: bash
+        run: |
+          pip install -r streamdeck/requirements.txt
+          python streamdeck/construire.py
+
+      # Sans exécutable, l'extension livrée serait inerte et le bouton des
+      # paramètres se contenterait de dire qu'elle est incomplète : mieux vaut
+      # arrêter la publication que livrer une moitié d'extension.
+      - name: Contrôler l'extension (Windows)
+        if: matrix.target == 'windows'
+        shell: bash
+        run: test -f streamdeck/com.zlink.deck.sdPlugin/zlink-deck.exe
+
       # La recette vit dans ZLink.spec : elle embarque les sons, qtawesome, et
       # un second exécutable streamlink que l'application invoque en processus
       # séparé — sans lui, une machine sans streamlink installé n'a pas de vidéo.

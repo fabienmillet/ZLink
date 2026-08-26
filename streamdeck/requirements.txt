@@ -1,0 +1,22 @@
+# Dépendances du plugin Stream Deck. Elles ne concernent que lui : ZLink
+# tourne sans, et le plugin n'importe rien de l'application.
+#
+# Installation dans un environnement dédié :
+#     py -3.12 -m venv streamdeck/.venv
+#     streamdeck/.venv/Scripts/pip install -r streamdeck/requirements.txt pyinstaller
+#
+# PyInstaller n'est PAS listé ici volontairement. La chaîne de publication de
+# ZLink installe une version dont elle a recompilé le bootloader — celui livré
+# sur PyPI est identique octet pour octet dans des milliers d'échantillons
+# malveillants, et l'application hérite de leurs détections. Un
+# « pip install -r » qui le réinstallerait depuis PyPI annulerait ce travail
+# sans que rien ne le signale.
+
+# Le WebSocket, dans les deux sens : le logiciel Elgato d'un côté, ZLink de
+# l'autre. Version 12 minimum pour l'API asyncio actuelle.
+websockets>=12.0
+
+# Compose les vignettes : avatar, cadre de la chaîne à l'antenne, voile gris
+# quand elle est hors ligne. Le plugin fonctionne sans — les touches n'ont
+# alors que leur titre — mais l'écran devient nettement moins lisible.
+Pillow>=10.0.0

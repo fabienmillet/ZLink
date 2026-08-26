@@ -1,0 +1,76 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later
+   ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+
+   Le panneau de réglages s'ouvre sous la touche, dans la fenêtre du logiciel
+   Elgato, qui est sombre. Une page laissée à ses couleurs par défaut y ferait
+   une tache blanche : ces quelques règles la remettent au ton de l'hôte. */
+
+:root {
+  color-scheme: dark;
+  --fond: #2d2d2d;
+  --texte: #d8d8d8;
+  --discret: #969696;
+  --champ: #3d3d3d;
+  --bord: #4f4f4f;
+  --accent: #38d18a;
+}
+
+body {
+  margin: 0;
+  padding: 12px 14px 16px;
+  background: var(--fond);
+  color: var(--texte);
+  font: 13px -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.ligne {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.ligne > label {
+  flex: 0 0 92px;
+  text-align: right;
+  color: var(--discret);
+}
+
+select,
+input[type="number"] {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--bord);
+  border-radius: 4px;
+  background: var(--champ);
+  color: var(--texte);
+  font: inherit;
+}
+
+select:focus,
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.case {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Une phrase sous le champ, pas un pavé : le panneau est haut de quelques
+   centimètres, et ce qui déborde est perdu. */
+.note {
+  margin: -4px 0 12px 102px;
+  color: var(--discret);
+  font-size: 11px;
+  line-height: 1.45;
+}

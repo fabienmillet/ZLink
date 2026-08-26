@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET. -->
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <title>Flux — ZLink</title>
+  <link rel="stylesheet" href="commun.css">
+</head>
+<body>
+  <div class="ligne">
+    <label for="rang">Cellule</label>
+    <input type="number" id="rang" min="1" max="32" step="1">
+  </div>
+  <p class="note">
+    Rang de la cellule dans la grille, de gauche à droite. Les touches
+    « Flux » posées sur le boîtier forment une page : les flèches
+    « Page suivante » décalent l'ensemble.
+  </p>
+
+  <script src="commun.js"></script>
+  <script>
+    // Le plugin compte à partir de zéro, le panneau à partir de un : personne
+    // ne pense « cellule 0 » en regardant la première case de sa grille.
+    const champ = document.getElementById("rang");
+    auChargement(function (r) {
+      champ.value = String((parseInt(r.rang, 10) || 0) + 1);
+    });
+    champ.addEventListener("change", function () {
+      const vu = Math.max(1, Math.min(32, parseInt(champ.value, 10) || 1));
+      champ.value = String(vu);
+      enregistrer("rang", vu - 1);
+    });
+  </script>
+</body>
+</html>
