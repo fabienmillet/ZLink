@@ -66,8 +66,18 @@ class CommandPalette(QWidget):
     #: Largeur de la boîte. Assez pour un pseudo, un jeu et une audience.
     _LARGEUR = 620
 
-    def __init__(self, parent: QWidget, tab_names: list[str]) -> None:
+    def __init__(self, parent: QWidget, tab_names: list[str],
+                 actions: "list[str] | None" = None) -> None:
         super().__init__(parent)
+        # Les actions que l'HÔTE sait exécuter, et elles seules.
+        #
+        # La liste `_ACTIONS` est commune aux deux palettes, mais le plein
+        # écran ne sait pas montrer le récapitulatif de session — seul le panel
+        # le peut. Sans ce filtre, la palette du plein écran proposait une
+        # commande que `run_action` laissait tomber dans un `logger.debug` :
+        # listée, cliquable, sans effet.
+        self._actions = [(cle, libelle) for cle, libelle in self._ACTIONS
+                         if actions is None or cle in actions]
         # La palette EST sa boîte : plus de voile plein écran, qui tournait au
         # noir opaque au-dessus de la vidéo.
         #
@@ -199,7 +209,7 @@ class CommandPalette(QWidget):
         for name in self._tab_names:
             if q in name.lower():
                 self._results.append(("tab", name, f"Onglet · {name}"))
-        for cle, libelle in self._ACTIONS:
+        for cle, libelle in self._actions:
             if q in libelle.lower() or q in cle:
                 self._results.append(("action", cle, f"Action · {libelle}"))
 

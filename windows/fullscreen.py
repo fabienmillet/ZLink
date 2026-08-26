@@ -1975,6 +1975,8 @@ class FullscreenWindow(QMainWindow):
         #: minuteur est gardé pour être remplacé, pas empilé.
         self._annonce: QWidget | None = None
         self._annonce_timer: QTimer | None = None
+        #: Rend au bouton de clip son libellé, trois secondes après.
+        self._clip_timer: QTimer | None = None
         #: Vrai entre une demande de replay et son abandon : le fil de reprise
         #: peut encore rendre un fichier, il ne doit plus être joué.
         self._replay_annule: bool = False
@@ -2314,7 +2316,8 @@ class FullscreenWindow(QMainWindow):
 
         # Palette de commandes (Ctrl+K). Pas d'onglets ici : en plein écran on
         # cherche une chaîne ou une action, il n'y a rien d'autre à atteindre.
-        self._palette = CommandPalette(central, [])
+        self._palette = CommandPalette(central, [],
+                                       actions=self.ACTIONS)
         self._palette.stream_requested.connect(self.stream_change_requested)
         self._palette.grid_requested.connect(self.grid_add_requested)
         self._palette.action_requested.connect(self.run_action)
@@ -2353,7 +2356,7 @@ class FullscreenWindow(QMainWindow):
         Met à jour l'overlay immédiatement (le stream MPV démarre
         via on_stream_ready() une fois l'URL résolue par StreamManager).
         """
-        self._ad_watcher.unwatch(self._current_login)
+        self._cesser_de_surveiller(self._current_login)
         self._dismiss_ad_banner()
         self._ad_active = False
         self._current_login = twitch_login
@@ -2373,6 +2376,12 @@ class FullscreenWindow(QMainWindow):
         self._ov_viewers.setText(
             f"{self._fmt_viewers(viewers)} viewers" if viewers else "",
         )
+
+        # L'icône du son, DÈS MAINTENANT : `_apply_volume` n'était appelé
+        # qu'à la première image, et le bouton restait nu tant qu'aucun flux
+        # n'avait démarré — indéfiniment si la résolution échoue, y compris
+        # avec une coupure enregistrée que rien ne montrait alors.
+        self._apply_volume()
 
         self._hint_lbl.setText("Chargement…")
         self._hint_lbl.setStyleSheet("color: #888888;")
@@ -2415,7 +2424,7 @@ class FullscreenWindow(QMainWindow):
     def clear_stream(self) -> None:
         if self._pip_active:
             self._close_donate_view()
-        self._ad_watcher.unwatch(self._current_login)
+        self._cesser_de_surveiller(self._current_login)
         self._dismiss_ad_banner()
         self._ad_active = False
         self._mpv.stop()
@@ -2493,7 +2502,12 @@ class FullscreenWindow(QMainWindow):
 
     def _show_overlay(self) -> None:
         """Affiche l'overlay + bouton télécommande et (re)démarre le timer d'auto-hide."""
-        if not self._current_login or self._pip_active or self._ad_active:
+        # `_replay_active` compte autant que les deux autres : `_geometrie_replay`
+        # dégage la barre, et le moindre mouvement de souris la rappelait —
+        # affichant les infos du DIRECT alors qu'il n'est plus qu'une vignette
+        # dans un coin.
+        if (not self._current_login or self._pip_active or self._ad_active
+                or self._replay_active):
             return
         self._overlay.show()
         self._overlay.raise_()
@@ -2591,6 +2605,21 @@ class FullscreenWindow(QMainWindow):
             toast.switch_requested.connect(self.stream_change_requested)
             toast.show()
             toast.raise_()
+            # Plus personne n'attend cette chaîne : la veille, maintenue le
+            # temps de l'attente, n'a plus de raison de tourner.
+            if login != self._current_login:
+                self._ad_watcher.unwatch(login)
+
+    def _cesser_de_surveiller(self, login: str) -> None:
+        """Arrête la veille des pubs — SAUF sur une chaîne qu'on attend.
+
+        « Préviens-moi quand la pub sera finie » n'a de sens que si l'on part
+        voir ailleurs : c'est même son unique cas d'usage. Or c'était le
+        départ lui-même qui coupait la veille, et le toast ne pouvait donc
+        jamais arriver.
+        """
+        if login and login not in self._ad_notify_logins:
+            self._ad_watcher.unwatch(login)
 
     def _on_ad_notify_requested(self, login: str) -> None:
         """L'utilisateur a demandé à être notifié quand la pub est terminée."""
@@ -2909,7 +2938,11 @@ class FullscreenWindow(QMainWindow):
         restant = joueur.restant()
         if restant is None:
             return
-        mesuree = float(pos) + float(restant) - float(self._replay_origine or pos)
+        # `is None`, PAS `or` : un dump-cache local commence toujours à zéro,
+        # et `or` prenait cette origine légitime pour une absence — la mesure
+        # retranchait alors la position au lieu de l'origine.
+        origine = pos if self._replay_origine is None else self._replay_origine
+        mesuree = float(pos) + float(restant) - float(origine)
         if not _DUREE_REPLAY_MIN <= mesuree <= _DUREE_REPLAY_MAX:
             # Horodatage absolu, fichier encore incomplet : on garde la durée
             # demandée plutôt qu'une valeur qui ferait n'importe quoi.
@@ -3195,7 +3228,23 @@ class FullscreenWindow(QMainWindow):
         else:
             self._clip_btn.setText("✗ Erreur")
             self.annoncer("Clip impossible à enregistrer", "#ff5f56")
-        QTimer.singleShot(3000, lambda: self._clip_btn.setText(original))
+        # Un QTimer PARENTÉ, pas un `singleShot` statique : celui-ci survit à
+        # la destruction du bouton qu'il capture, et tire alors sur un objet
+        # C++ déjà libéré. Sans conséquence tant que la fenêtre vit, mais un
+        # minuteur rattaché à `self` meurt avec elle — et c'est la même
+        # famille de piège que le widget détaché qui devient une fenêtre.
+        # Gardé sur l'instance, comme celui des annonces : deux clips coup sur
+        # coup remplacent le minuteur au lieu de l'empiler, et il reste
+        # atteignable — un rappel qu'on ne peut pas déclencher ne se teste
+        # qu'en attendant trois secondes pour de vrai.
+        if self._clip_timer is not None:
+            self._clip_timer.stop()
+            self._clip_timer.deleteLater()
+        self._clip_timer = QTimer(self)
+        self._clip_timer.setSingleShot(True)
+        self._clip_timer.timeout.connect(
+            lambda: self._clip_btn.setText(original))
+        self._clip_timer.start(3000)
 
     # ── volume ─────────────────────────────────────────────────────
 
@@ -3235,8 +3284,18 @@ class FullscreenWindow(QMainWindow):
         self._apply_volume()
 
     def set_volume(self, value: int) -> None:
-        """Règle le volume depuis l'extérieur (clavier, télécommande)."""
-        self._vol_slider.setValue(max(0, min(100, int(value))))
+        """Règle le volume depuis l'extérieur (clavier, télécommande).
+
+        L'application est FORCÉE, pas laissée au signal du curseur : poser une
+        valeur identique à celle affichée n'émet rien, et une télécommande qui
+        envoie un volume absolu — c'est ce que fait une molette de Stream Deck
+        — ne rétablissait donc pas un son coupé au clavier.
+        """
+        valeur = max(0, min(100, int(value)))
+        bloque = self._vol_slider.blockSignals(True)
+        self._vol_slider.setValue(valeur)
+        self._vol_slider.blockSignals(bloque)
+        self._on_volume_changed(valeur)
 
     def _persist_volume(self) -> None:
         _save_settings({"volume": self._volume, "muted": self._muted})

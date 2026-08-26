@@ -58,7 +58,18 @@ TIMEOUT_S = 15.0
 #: Garde-fou de taille : un segment anormalement gros n'est pas un segment.
 MAX_OCTETS = 400 * 1024 * 1024
 
-_EXTINF = re.compile(r"^#EXTINF:([\d.]+)", re.M)
+# Un SEUL point, et des chiffres autour. « [\d.]+ » acceptait « 1.2.3 », que
+# `float()` refuse ensuite — depuis deux fonctions que ce module présente comme
+# de la logique pure, sans panne possible. La garde existante ne protégeait que
+# des durées ne correspondant PAS au motif ; celles qui y correspondaient sans
+# être des nombres passaient au travers, et transformaient un replay
+# récupérable en aucun replay.
+#
+# La virgule finale n'est pas décorative : le format HLS l'impose après la
+# durée, et c'est elle qui fait REJETER « 1.2.3 » au lieu d'en retenir
+# « 1.2 » — une durée partielle serait pire qu'aucune, puisqu'elle se
+# glisserait dans le total sans qu'on la remarque.
+_EXTINF = re.compile(r"^#EXTINF:(\d+(?:\.\d+)?)\s*(?:,|$)", re.M)
 _EXT_MAP = re.compile(r'#EXT-X-MAP:URI="([^"]+)"')
 
 

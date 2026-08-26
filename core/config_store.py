@@ -89,6 +89,11 @@ def _write(config: dict) -> bool:
         logger.exception("Écriture de la configuration impossible")
         try:
             tmp.unlink(missing_ok=True)
-        except (OSError, NameError):
-            pass
+        except (OSError, NameError) as menage:
+            # Nettoyage de dernier recours : l'échec d'écriture est déjà
+            # rapporté juste au-dessus, et l'orphelin qui reste ne gêne
+            # personne. On le NOTE quand même — CLAUDE.md interdit le
+            # `except: pass` muet, et un `.tmp` qui s'accumule est
+            # exactement ce qu'on ne comprendrait pas six mois plus tard.
+            logger.debug("Fichier temporaire non effacé — %s", menage)
         return False

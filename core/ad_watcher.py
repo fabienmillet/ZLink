@@ -9,8 +9,11 @@ Principes :
   (quelques Ko toutes les 3 s).
 - Marqueurs surveillés : EXT-X-DATERANGE avec CLASS="twitch-stitched-ad",
   EXT-X-CUE-OUT, et les valeurs SCTE35 indiquant un ad break.
-- Pour éviter les faux positifs, une pub n'est confirmée qu'après 2 polls positifs
-  consécutifs ; la fin de pub est confirmée après 3 polls négatifs consécutifs.
+- Pour éviter les faux positifs, une pub n'est confirmée qu'après 3 relevés
+  positifs consécutifs (`_AD_CONFIRM`) ; sa fin après 2 relevés négatifs
+  (`_END_CONFIRM`). Entrer est plus coûteux que sortir : annoncer une pub qui
+  n'a pas lieu fait quitter une chaîne pour rien, alors qu'annoncer sa fin
+  trop tôt ne coûte qu'un aller-retour.
 """
 
 from __future__ import annotations

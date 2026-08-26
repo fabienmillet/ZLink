@@ -29,6 +29,13 @@ def _read() -> set[str]:
         if not CONFIG_PATH.exists():
             return set()
         raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        # La RACINE aussi est vérifiée : un config.json dont le contenu n'est
+        # pas un objet — une liste, un nombre — faisait lever `.get`. Un
+        # `except Exception` l'attrapait par hasard ; le dire ici vaut mieux
+        # que de compter sur une clause large.
+        if not isinstance(raw, dict):
+            logger.warning("Favoris : configuration inattendue, ignorée")
+            return set()
         valeurs = raw.get(_KEY)
         # Le type est vérifié, pas seulement la présence : sur une chaîne, la
         # compréhension itérait les CARACTÈRES et fabriquait des favoris à une
@@ -36,7 +43,7 @@ def _read() -> set[str]:
         if not isinstance(valeurs, list):
             return set()
         return {str(v).lower() for v in valeurs if v}
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         logger.warning("Favoris illisibles — %s", exc)
         return set()
 
@@ -86,5 +93,5 @@ def _save(logins: set[str]) -> None:
                        encoding="utf-8")
         os.replace(tmp, CONFIG_PATH)
         os.chmod(CONFIG_PATH, 0o600)
-    except Exception:
+    except (OSError, ValueError):
         logger.exception("Sauvegarde des favoris impossible")

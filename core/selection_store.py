@@ -39,7 +39,7 @@ class SelectionStore:
                         if isinstance(x, str) and x not in seen and not seen.add(x)  # type: ignore[func-returns-value]
                     ]
                     logger.info("SelectionStore: %d logins chargés (ordre préservé)", len(self._selected))
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("SelectionStore._load: %s", exc)
 
     def save(self) -> None:
@@ -50,7 +50,7 @@ class SelectionStore:
                 json.dumps(self._selected, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("SelectionStore.save: %s", exc)
 
     # -- API ------------------------------------------------------------------

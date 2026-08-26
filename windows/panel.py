@@ -4876,8 +4876,22 @@ class _StreamersTab(QWidget):
             QTimer.singleShot(0, self._deferred_rebuild)
 
     def set_max_streams(self, n: int) -> None:
-        """Propage le maximum de streams autorisés (depuis settings)."""
+        """Propage le maximum de streams autorisés (depuis settings).
+
+        Et ROGNE la sélection en cours si elle dépasse. Abaisser ce réglage
+        est un aveu : la machine ne suit plus. Se contenter de réécrire le
+        compteur laissait les flux excédentaires ouverts — exactement ceux
+        qu'on venait de dire de trop — et affichait « 5 / 3 », un total
+        supérieur à son propre maximum.
+        """
         self.MAX_SELECTED = max(1, n)
+        if len(self._selected) > self.MAX_SELECTED:
+            retires = self._selected[self.MAX_SELECTED:]
+            self._selected = self._selected[:self.MAX_SELECTED]
+            logger.info("Plafond abaissé à %d : %d chaîne(s) retirée(s) — %s",
+                        self.MAX_SELECTED, len(retires), ", ".join(retires))
+            self._renumber_slots()
+            self.grid_selection_changed.emit(list(self._selected))
         self._update_counter()
 
     # -- fast-path & deferred rebuild -----------------------------------------
@@ -5409,6 +5423,55 @@ def _est_sur_place(location: str) -> bool:
     return bool(lieu) and lieu not in ("online", "remote", "distance")
 
 
+#: Couleur de la variation horaire. La couleur porte le SENS : sans elle, il
+#: faudrait lire le signe pour savoir si la chaîne monte ou descend.
+#:
+#: « inconnu » et « stable » ne sont PAS la même chose — l'un veut dire qu'on
+#: ne sait pas encore, l'autre que rien n'a bougé — et se distinguent donc
+#: aussi par leur gris.
+_COULEURS_TENDANCE = {
+    "inconnu": "#555555",
+    "stable": "#666666",
+    "hausse": "#00ff87",
+    "baisse": "#ff6b6b",
+}
+
+
+def _sens_tendance(delta: int | None) -> str:
+    """Dans quel sens va la chaîne : inconnu, stable, hausse ou baisse."""
+    if delta is None:
+        return "inconnu"
+    if delta > 0:
+        return "hausse"
+    return "baisse" if delta < 0 else "stable"
+
+
+def _texte_tendance(delta: int | None) -> str:
+    """« +6.0k », « -2.5k », « = » quand rien n'a bougé, « — » quand on ignore."""
+    if delta is None:
+        return "—"
+    if not delta:
+        return "="
+    return f"{'+' if delta > 0 else '-'}{_fmt_viewers(abs(delta))}"
+
+
+def _objectif_atteint(but: object) -> bool:
+    """Un objectif de dons est-il tombé.
+
+    `DonationGoal` — ce que `DataManager` met dans le cache — expose
+    `accomplished`. Lire `done` rendait TOUJOURS faux : la colonne affichait
+    « 0/N » quel que soit le nombre d'objectifs atteints, et le tri mettait à
+    égalité toutes les chaînes qui en publient.
+
+    `done` reste accepté en second : CLAUDE.md documente la compatibilité
+    historique « accomplished ?? done » des données communautaires.
+    """
+    atteint = getattr(but, "accomplished", None)
+    if atteint is None:
+        atteint = getattr(but, "done", False)
+    return bool(atteint)
+
+
 def _duree_de(s: StreamerInfo) -> float:
     """Secondes de direct, 0 si inconnu — pour trier, pas pour afficher."""
     from core import live_uptime
@@ -5432,7 +5495,7 @@ def _part_objectifs(cache: dict, s: StreamerInfo) -> float:
     buts = cache.get(s.twitch_login) or []
     if not buts:
         return -1.0
-    return sum(1 for b in buts if getattr(b, "done", False)) / len(buts)
+    return sum(1 for b in buts if _objectif_atteint(b)) / len(buts)
 
 
 #: Rang de chaque colonne du classement. Nommés : six index nus dans le
@@ -5818,7 +5881,7 @@ class _StatsTab(QWidget):
             cellule = _CelluleNombre("—", -1.0)
             cellule.setForeground(QBrush(QColor("#555555")))
         else:
-            faits = sum(1 for b in buts if getattr(b, "done", False))
+            faits = sum(1 for b in buts if _objectif_atteint(b))
             cellule = _CelluleNombre(f"{faits}/{len(buts)}", faits / len(buts))
             cellule.setForeground(QBrush(QColor(
                 "#00ff87" if faits else "#777777")))
@@ -5836,18 +5899,9 @@ class _StatsTab(QWidget):
         from core import tendances
 
         delta = tendances.viewers(s.twitch_login) if s.online else None
-        if delta is None:
-            cellule = _CelluleNombre("—", 0.0)
-            cellule.setForeground(QBrush(QColor("#555555")))
-        else:
-            signe = "+" if delta > 0 else ""
-            cellule = _CelluleNombre(f"{signe}{_fmt_viewers(abs(delta))}"
-                                     if delta else "=", float(delta))
-            if delta:
-                cellule.setText(f"{signe}{'-' if delta < 0 else ''}"
-                                f"{_fmt_viewers(abs(delta))}")
-            cellule.setForeground(QBrush(QColor(
-                "#00ff87" if delta > 0 else "#ff6b6b" if delta < 0 else "#666666")))
+        sens = _sens_tendance(delta)
+        cellule = _CelluleNombre(_texte_tendance(delta), float(delta or 0))
+        cellule.setForeground(QBrush(QColor(_COULEURS_TENDANCE[sens])))
         cellule.setTextAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return cellule
