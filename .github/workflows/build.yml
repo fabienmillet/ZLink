@@ -23,19 +23,63 @@ jobs:
 
       # PyQt6 tourne en mode « offscreen » pendant les tests, mais ses
       # bibliothèques natives sont chargées quand même : sans ces paquets,
-      # l'import de QtWidgets échoue sur un runner nu.
+      # l'import échoue avant qu'un seul test ne démarre.
+      #
+      # Trois familles, et chacune a coûté un échec de CI :
+      #   QtWidgets    — EGL, GL, xkbcommon, la série xcb
+      #   QtMultimedia — PulseAudio et ALSA (core/sounds.py)
+      #   QtWebEngine  — NSS, ATK, GBM… importé au niveau module par
+      #                  windows/panel.py, donc chargé par presque tous les tests
+      #
+      # Les paquets sont installés UN PAR UN et les échecs tolérés : Ubuntu a
+      # renommé plusieurs d'entre eux en « t64 » lors de la transition 64 bits
+      # de time_t, et les deux graphies coexistent selon l'image du runner. Un
+      # nom absent ne doit pas faire tomber l'étape ; c'est la vérification
+      # d'import, juste après, qui tranche.
       - name: Bibliothèques système de Qt
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          for paquet in \
             libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3 \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libpulse0 libasound2t64 libasound2 \
+            libnss3 libnspr4 libxdamage1 libxrandr2 libxcomposite1 \
+            libxfixes3 libxtst6 libdrm2 libgbm1 libpango-1.0-0 libcairo2 \
+            libatk1.0-0t64 libatk1.0-0 libatk-bridge2.0-0t64 \
+            libatk-bridge2.0-0 libcups2t64 libcups2
+          do
+            sudo apt-get install -y --no-install-recommends "$paquet" \
+              || echo "  (absent de cette image : $paquet)"
+          done
 
       - name: Dépendances Python
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+
+      # Le diagnostic AVANT les tests : un import qui échoue ici nomme la
+      # bibliothèque manquante en une ligne, au lieu de la faire découvrir au
+      # milieu d'une collecte pytest interrompue.
+      - name: Qt s'importe-t-il ?
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'FIN'
+          import importlib
+          import sys
+
+          manquants = []
+          for module in ("PyQt6.QtWidgets", "PyQt6.QtMultimedia",
+                         "PyQt6.QtWebEngineWidgets", "pyqtgraph", "qtawesome"):
+              try:
+                  importlib.import_module(module)
+                  print(f"  ok      {module}")
+              except Exception as exc:
+                  print(f"  ECHEC   {module} : {exc}")
+                  manquants.append(module)
+          sys.exit(1 if manquants else 0)
+          FIN
 
       # Le rapport que SonarQube attend. Sans cette étape, coverage.xml
       # n'existe pas au moment du scan et la couverture reste vide côté
