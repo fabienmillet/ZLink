@@ -78,73 +78,105 @@ def build_layout(app: QApplication) -> DisplayLayout:
     return DisplayLayout(mode=mode, assignments=assignments)
 
 
+def _lire_screen_cfg() -> dict | None:
+    """`screen_assignments` tel qu'il est dans config.json, ou None.
+
+    None a un seul sens ici : rien d'exploitable, l'auto-detection reprend la
+    main. Fichier absent, illisible, cle vide ou d'un autre type — chaque cas
+    est trace, mais aucun n'empeche l'application de demarrer.
+    """
+    try:
+        from core.paths import CONFIG_PATH as cfg_path
+        if not cfg_path.exists():
+            return None
+        screen_cfg = json.loads(
+            cfg_path.read_text(encoding="utf-8")
+        ).get("screen_assignments", {})
+    except Exception as exc:
+        logger.warning("_apply_screen_config: lecture config impossible — %s", exc)
+        return None
+    if not screen_cfg:
+        return None
+    if not isinstance(screen_cfg, dict):
+        # Le type est verifie, pas seulement la presence : une chaine ou une
+        # liste passait le `if not`, puis .get() levait une AttributeError HORS
+        # du try — et l'application ne demarrait plus du tout.
+        logger.warning(
+            "Config ecrans : screen_assignments n'est pas un objet (%s) — "
+            "repli sur l'auto-detection", type(screen_cfg).__name__)
+        return None
+    return screen_cfg
+
+
+def _assignations_depuis(screens: list[QScreen],
+                         screen_cfg: dict) -> list[ScreenAssignment]:
+    """Les ecrans a qui la config donne un role connu. Les autres sont ecartes."""
+    connus = {r.value: r for r in WindowRole}
+    assignments: list[ScreenAssignment] = []
+    for i, screen in enumerate(screens):
+        role = connus.get(screen_cfg.get(str(i), ""))
+        if role is not None:
+            assignments.append(
+                ScreenAssignment(screen=screen, role=role, index=i))
+    return assignments
+
+
+def _sans_grille_orpheline(
+        assignments: list[ScreenAssignment]) -> list[ScreenAssignment]:
+    """Retire la grille si aucun ecran ne porte le panel.
+
+    Il n'y a pas de mode « direct + grille » : faute de panel, le calcul du
+    mode retenait SINGLE, main n'ouvrait que le direct, et la grille etait
+    perdue sans un mot. Les reglages ne s'ouvrant que depuis le panel, cette
+    disposition enfermait de surcroit dans un ecran qu'on ne pouvait plus
+    changer.
+
+    On retombe donc en mode un ecran DELIBEREMENT : les trois vues s'y
+    superposent et les reglages redeviennent accessibles. Le selecteur
+    l'interdit desormais ; ce garde-fou vaut pour un config.json ecrit a la
+    main.
+    """
+    roles = {a.role for a in assignments}
+    if WindowRole.GRID not in roles or WindowRole.PANEL in roles:
+        return assignments
+    logger.warning(
+        "Config ecrans : grille sans panel — grille ignoree, tout passe sur "
+        "l'ecran du direct (les reglages ne s'ouvrent que du panel)")
+    return [a for a in assignments if a.role != WindowRole.GRID]
+
+
+def _mode_et_assignations(
+        assignments: list[ScreenAssignment],
+) -> tuple[DisplayMode, list[ScreenAssignment]]:
+    """Le mode d'affichage que decrivent ces roles."""
+    roles = {a.role for a in assignments}
+    if WindowRole.PANEL not in roles:
+        return DisplayMode.SINGLE, assignments
+    if WindowRole.GRID in roles:
+        return DisplayMode.TRIPLE, assignments
+    # Sans ecran dedie, la grille partage celui du panel.
+    panel_a = next(a for a in assignments if a.role == WindowRole.PANEL)
+    return DisplayMode.DUAL, assignments + [
+        ScreenAssignment(screen=panel_a.screen, role=WindowRole.GRID,
+                         index=panel_a.index)]
+
+
 def _apply_screen_config(screens: list[QScreen]) -> DisplayLayout | None:
     """Lit screen_assignments depuis config.json et retourne un DisplayLayout.
 
     Retourne None si la config est absente, invalide, ou si aucun écran
     n'est assigné au rôle Fullscreen (fallback auto-détection).
     """
-    try:
-        from core.paths import CONFIG_PATH as cfg_path
-        if not cfg_path.exists():
-            return None
-        screen_cfg: dict[str, str] = json.loads(
-            cfg_path.read_text(encoding="utf-8")
-        ).get("screen_assignments", {})
-        if not screen_cfg:
-            return None
-        if not isinstance(screen_cfg, dict):
-            # Le type est verifie, pas seulement la presence : une chaine ou une
-            # liste passait le `if not`, puis .get() levait une AttributeError
-            # HORS du try — et l'application ne demarrait plus du tout.
-            logger.warning(
-                "Config ecrans : screen_assignments n'est pas un objet (%s) — "
-                "repli sur l'auto-detection", type(screen_cfg).__name__)
-            return None
-    except Exception as exc:
-        logger.warning("_apply_screen_config: lecture config impossible — %s", exc)
+    screen_cfg = _lire_screen_cfg()
+    if screen_cfg is None:
         return None
 
-    assignments: list[ScreenAssignment] = []
-    for i, screen in enumerate(screens):
-        role_str = screen_cfg.get(str(i), "disabled")
-        if role_str == "panel":
-            assignments.append(ScreenAssignment(screen=screen, role=WindowRole.PANEL, index=i))
-        elif role_str == "fullscreen":
-            assignments.append(ScreenAssignment(screen=screen, role=WindowRole.FULLSCREEN, index=i))
-        elif role_str == "grid":
-            assignments.append(ScreenAssignment(screen=screen, role=WindowRole.GRID, index=i))
-
-    roles = {a.role for a in assignments}
-    if WindowRole.FULLSCREEN not in roles:
+    assignments = _assignations_depuis(screens, screen_cfg)
+    if WindowRole.FULLSCREEN not in {a.role for a in assignments}:
         logger.warning("Config écrans : aucun écran Fullscreen — fallback auto-détection")
         return None
 
-    has_panel = WindowRole.PANEL in roles
-    has_grid = WindowRole.GRID in roles
-
-    if has_grid and not has_panel:
-        # Il n'y a pas de mode « direct + grille » : faute de panel, le calcul
-        # ci-dessous retenait SINGLE, et main n'ouvrait que le direct — la
-        # grille etait perdue sans un mot. Les reglages ne s'ouvrant que depuis
-        # le panel, cette disposition enfermait de surcroit dans un ecran qu'on
-        # ne pouvait plus changer. Le selecteur l'interdit desormais ; ce
-        # garde-fou vaut pour un config.json ecrit a la main.
-        logger.warning(
-            "Config ecrans : grille sans panel — grille ignoree, tout passe "
-            "sur l'ecran du direct (les reglages ne s'ouvrent que du panel)")
-        assignments = [a for a in assignments if a.role != WindowRole.GRID]
-        has_grid = False
-
-    if has_panel and has_grid:
-        mode = DisplayMode.TRIPLE
-    elif has_panel:
-        mode = DisplayMode.DUAL
-        # La grille partage l'écran du panel en mode DUAL
-        panel_a = next(a for a in assignments if a.role == WindowRole.PANEL)
-        assignments.append(ScreenAssignment(screen=panel_a.screen, role=WindowRole.GRID, index=panel_a.index))
-    else:
-        mode = DisplayMode.SINGLE
+    mode, assignments = _mode_et_assignations(_sans_grille_orpheline(assignments))
 
     logger.info("Mode config : %s (%d écran(s) assignés)", mode.name, len(screens))
     for a in assignments:
