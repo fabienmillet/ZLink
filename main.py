@@ -302,17 +302,27 @@ def _installer_polices_de_repli() -> None:
 
 def _creer_fenetres(
     layout, fs_assignment, _startup_config, data_manager, stream_manager,
-) -> tuple[FullscreenWindow, PanelWindow | None, GridWindow | None]:
-    """Instancie les fenêtres selon le mode d'affichage détecté."""
+) -> tuple[FullscreenWindow, PanelWindow | None, GridWindow | None,
+           SingleModeShell | None]:
+    """Instancie les fenêtres selon le mode d'affichage détecté.
+
+    Le coordinateur du mode 1 écran fait partie du retour, et ce n'est pas un
+    détail : il détient la barre de navigation et le minuteur qui la révèle,
+    et rien d'autre ne les référence. En variable locale, il était ramassé
+    dès la sortie de cette fonction — les trois fenêtres survivaient, étant
+    rendues, mais la barre disparaissait avec lui et ne pouvait plus jamais
+    s'afficher.
+    """
     panel: PanelWindow | None = None
     grid: GridWindow | None = None
+    shell: SingleModeShell | None = None
 
     if layout.mode == DisplayMode.SINGLE:
         # ── Mode 1 écran : tout dans une fenêtre unique ──────────────────
-        _shell = SingleModeShell(fs_assignment.screen)
-        fullscreen = _shell.fullscreen
-        panel      = _shell.panel
-        grid       = _shell.grid
+        shell = SingleModeShell(fs_assignment.screen)
+        fullscreen = shell.fullscreen
+        panel      = shell.panel
+        grid       = shell.grid
         fullscreen.set_clip_config(_startup_config)
         grid.grid.set_max_streams(_startup_config.get("max_active_streams", 20))
         grid.grid.set_sort_mode(_startup_config.get("grid_sort", "viewers"))
@@ -352,7 +362,7 @@ def _creer_fenetres(
             else:
                 # Mode triple — Echap ferme la fenêtre
                 grid.back_to_panel.connect(grid.close)
-    return fullscreen, panel, grid
+    return fullscreen, panel, grid, shell
 
 
 def _brancher_panel(
@@ -950,7 +960,10 @@ def main() -> int:
         logger.error("Aucun écran assigné pour le fullscreen — abandon")
         return 1
 
-    fullscreen, panel, grid = _creer_fenetres(
+    # `_shell` n'est utilisé nulle part ailleurs, et doit pourtant être retenu :
+    # il porte la barre de navigation du mode 1 écran. main() ne rend la main
+    # qu'à la fermeture, cette variable locale suffit donc à le garder en vie.
+    fullscreen, panel, grid, _shell = _creer_fenetres(
         layout, fs_assignment, _startup_config, data_manager, stream_manager,
     )
 

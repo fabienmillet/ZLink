@@ -463,3 +463,101 @@ def test_sans_streamers_on_date_quand_meme_ce_qu_on_regarde():
             return []
 
     assert main._logins_a_dater(None, plein, _Selection(), None) == ["zerator"]
+
+
+# ── création des fenêtres : mode un écran ────────────────────────────────────
+
+class _FenetreSignal(QObject):
+    """Le minimum que `_creer_fenetres` demande à une fenêtre en mode 1 écran."""
+
+    stream_selected = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.grid = self
+        self.clips: list = []
+        self.max_streams: list[int] = []
+        self.tris: list[str] = []
+
+    def set_clip_config(self, config):
+        self.clips.append(config)
+
+    def set_max_streams(self, n):
+        self.max_streams.append(n)
+
+    def set_sort_mode(self, mode):
+        self.tris.append(mode)
+
+
+class _Pilule:
+    """Tient lieu de barre de navigation : on ne surveille que sa survie."""
+
+
+class _FauxShell:
+    """Coordinateur du mode 1 écran, réduit à ce qui compte ici.
+
+    Le vrai construirait trois fenêtres plein écran sur le moniteur de qui
+    lance les tests, et autant de lecteurs mpv.
+    """
+
+    def __init__(self, screen) -> None:
+        self.screen = screen
+        self.fullscreen = _FenetreSignal()
+        self.panel = _FenetreSignal()
+        self.grid = _FenetreSignal()
+        self._pill = _Pilule()
+
+
+class _Assignation:
+    screen = "écran unique"
+
+
+class _Disposition:
+    def __init__(self, mode) -> None:
+        self.mode = mode
+
+    @staticmethod
+    def get_screen(_role):
+        return None
+
+
+def _creer_en_mode(monkeypatch, mode):
+    monkeypatch.setattr(main, "SingleModeShell", _FauxShell)
+    # Hors mode 1 écran, la fenêtre plein écran se construit pour de vrai :
+    # elle s'ouvrirait sur le moniteur de qui lance les tests, avec son mpv.
+    monkeypatch.setattr(main, "FullscreenWindow",
+                        lambda **_kw: _FenetreSignal())
+    return main._creer_fenetres(
+        _Disposition(mode), _Assignation(), {}, _FauxDataManager(),
+        _FauxStreamManager(),
+    )
+
+
+def test_le_coordinateur_un_ecran_est_rendu_a_l_appelant(monkeypatch):
+    """Personne d'autre ne le référence : ne pas le rendre, c'est le perdre."""
+    _fs, _panel, _grid, shell = _creer_en_mode(
+        monkeypatch, main.DisplayMode.SINGLE)
+    assert isinstance(shell, _FauxShell)
+
+
+def test_la_barre_de_navigation_survit_au_ramasse_miettes(monkeypatch):
+    """La barre du haut ne s'affichait jamais en mode un écran.
+
+    Le coordinateur était une variable locale de `_creer_fenetres`. Les trois
+    fenêtres survivaient — elles étaient rendues — mais lui était ramassé à la
+    sortie, emportant la barre de navigation et le minuteur qui la révèle.
+    Rien ne se voyait au démarrage : l'écran affichait bien le direct.
+    """
+    import gc
+    import weakref
+
+    resultat = _creer_en_mode(monkeypatch, main.DisplayMode.SINGLE)
+    temoin = weakref.ref(resultat[3]._pill)
+    gc.collect()
+    assert temoin() is not None, "la barre a été ramassée avec le coordinateur"
+
+
+def test_hors_mode_un_ecran_il_n_y_a_pas_de_coordinateur(monkeypatch):
+    """À deux ou trois écrans, chaque vue a son moniteur : rien à coordonner."""
+    resultat = _creer_en_mode(monkeypatch, main.DisplayMode.DUAL)
+    assert resultat[3] is None
