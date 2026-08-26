@@ -486,3 +486,35 @@ def test_les_lampes_sont_conservees_entre_deux_ouvertures():
     """Les ressaisir à chaque fois inviterait à recoller l'exemple."""
     conf = domotique.reglages({"domotique": {"lampes": "light.bureau"}})
     assert conf["lampes"] == "light.bureau"
+
+
+# ── Le clair : risque réel, et seulement là où il l'est ─────────────────────
+#
+# Home Assistant sert sur 8123 sans TLS et n'a pas de certificat pour
+# « homeassistant.local » : exiger https ferait échouer l'installation par
+# défaut de tout le monde, pour un trafic qui ne quitte pas la maison. Dès que
+# l'adresse est publique, en revanche, l'identifiant du webhook — qui tient
+# lieu de mot de passe — voyagerait en clair.
+
+@pytest.mark.parametrize("url", [
+    "http://homeassistant.local:8123/api/webhook/x",
+    "http://192.168.1.42:8123/api/webhook/x",
+    "http://10.0.0.7:8123/x",
+    "https://homeassist.exemple.fr/api/webhook/x",
+    "",
+])
+def test_rien_a_dire_quand_le_clair_ne_sort_pas_du_reseau(url):
+    assert domotique.avertissement_clair(url) == ""
+
+
+def test_le_clair_sur_internet_est_signale():
+    message = domotique.avertissement_clair("http://homeassist.exemple.fr/api/webhook/x")
+    assert "en clair" in message
+    assert "https" in message
+
+
+def test_le_defaut_reste_en_clair():
+    """Sinon la connexion échouerait chez tous ceux qui n'ont pas de certificat."""
+    assert domotique.BASE_DEFAUT.startswith("http://")
+    assert domotique.est_local(domotique.BASE_DEFAUT), (
+        "un défaut en clair n'est acceptable que parce qu'il est local")

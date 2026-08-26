@@ -41,6 +41,11 @@ URL entière est collée au-dessus. L'adresse retenue s'affiche sous les champs 
 > L'identifiant du webhook **tient lieu de mot de passe** : qui le connaît peut
 > déclencher l'automatisation. Ne le publiez pas, et laissez `local_only: true`
 > si ZLink et Home Assistant sont sur le même réseau.
+>
+> Sur le réseau local, `http://` convient : Home Assistant sert sur 8123 sans
+> TLS et n'a pas de certificat pour `homeassistant.local`. Mais **une adresse
+> publique en `http://` fait voyager cet identifiant en clair sur Internet** —
+> ZLink le signale, et `https://` s'impose alors.
 
 ---
 

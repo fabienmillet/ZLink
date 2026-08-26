@@ -80,7 +80,17 @@ def url_valable(url: str) -> bool:
 
 
 #: Adresse par défaut d'une installation Home Assistant sur le réseau local.
-BASE_DEFAUT = "http://homeassistant.local:8123"
+#:
+#: En CLAIR, et c'est délibéré : Home Assistant sert sur 8123 sans TLS, et ne
+#: dispose d'aucun certificat pour `homeassistant.local`. Proposer `https`
+#: ferait échouer la connexion chez tout le monde, pour un trafic qui ne quitte
+#: pas le réseau domestique.
+#:
+#: Le risque existe en revanche dès que l'adresse est PUBLIQUE : l'identifiant
+#: du webhook tient lieu de mot de passe, et il voyagerait en clair sur
+#: Internet. `avertissement_clair` le signale à l'écran plutôt que de laisser
+#: la question ouverte.
+BASE_DEFAUT = "http://homeassistant.local:8123"  # NOSONAR — voir ci-dessus
 
 
 def composer(base: str, identifiant: str) -> str:
@@ -214,6 +224,23 @@ def automatisation(webhook: str, lampe: str = "",
     return _MODELE.format(webhook=identifiant(webhook) or SANS_WEBHOOK,
                           lampe=lampe.strip() or LAMPES_DEFAUT,
                           local="true" if est_local(adresse) else "false")
+
+
+def avertissement_clair(url: str) -> str:
+    """Ce qu'il faut dire quand l'adresse sort du réseau SANS chiffrement.
+
+    Rend "" quand il n'y a rien à dire : en `https`, ou sur une adresse locale
+    — le trafic ne quitte alors pas la maison, et exiger un certificat pour
+    `homeassistant.local` reviendrait à interdire l'installation par défaut de
+    Home Assistant.
+    """
+    adresse = str(url or "").strip()
+    if not adresse.lower().startswith("http://") or est_local(adresse):
+        return ""
+    return ("Cette adresse sort du réseau local SANS chiffrement : "
+            "l'identifiant du webhook, qui tient lieu de mot de passe, "
+            "voyagerait en clair. Préférez « https:// », ou l'adresse locale "
+            "de la box.")
 
 
 def reglages(config: dict | None = None) -> dict:

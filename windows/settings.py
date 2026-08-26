@@ -967,6 +967,13 @@ class _PageDomotique(_PageBase):
         self._yaml.setPlainText(domotique.automatisation(
             self._webhook.text(), self._lampe.text(), url))
         local = domotique.est_local(url)
+        # Le clair sur Internet passe AVANT : c'est le seul des deux qui
+        # expose un secret, l'autre ne fait qu'empêcher le déclenchement.
+        en_clair = domotique.avertissement_clair(url)
+        if en_clair:
+            self._avertissement.setText(en_clair)
+            self._avertissement.setVisible(True)
+            return
         self._avertissement.setText("" if local or not url else (
             "⚠ Cette adresse passe par Internet : le déclencheur est donc "
             "réglé sur « local_only: false », sans quoi Home Assistant "

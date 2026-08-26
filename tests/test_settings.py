@@ -784,3 +784,11 @@ def test_les_lampes_saisies_sont_sauvegardees(qtbot):
     config: dict = {}
     page.collect(config)
     assert config["domotique"]["lampes"] == "light.bureau"
+
+
+def test_une_adresse_en_clair_sur_internet_est_signalee(qtbot):
+    """Des deux avertissements, celui-là passe en premier : c'est le seul qui
+    expose un secret, l'autre n'empêche que le déclenchement."""
+    page = _page_ha(qtbot)
+    page._webhook.setText("http://homeassist.exemple.fr/api/webhook/-abc")
+    assert "en clair" in page._avertissement.text()
