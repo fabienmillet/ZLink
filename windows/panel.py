@@ -5700,8 +5700,12 @@ class _StatsTab(QWidget):
         # Le rectangle de focus se dessine PAR-DESSUS la ligne, en pointillés
         # clairs : illisible sur fond sombre, et redondant avec la sélection.
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        table.setItemDelegateForColumn(4, _BarreDeCellule("#38bdf8", table))
-        table.setItemDelegateForColumn(5, _BarreDeCellule("#00ff87", table))
+        # Par constante, jamais par numéro : les colonnes ajoutées depuis ont
+        # décalé Viewers et Cagnotte, et les barres se peignaient sur « Depuis »
+        # et « Objectifs », qui n'ont pas de valeur à comparer. Elles avaient
+        # donc simplement disparu du tableau.
+        table.setItemDelegateForColumn(_C_VUE, _BarreDeCellule("#38bdf8", table))
+        table.setItemDelegateForColumn(_C_DON, _BarreDeCellule("#00ff87", table))
         table.setStyleSheet(_STYLE_CLASSEMENT)
 
     # -- interactions ---------------------------------------------------------

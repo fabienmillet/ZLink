@@ -263,6 +263,44 @@ def test_une_cellule_de_nombre_se_range_devant_une_cellule_de_texte(qtbot):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Stats — où les barres de grandeur sont posées
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_les_barres_de_grandeur_sont_sur_les_colonnes_chiffrees(stats):
+    """Les barres avaient disparu du classement.
+
+    Elles étaient posées par NUMÉRO de colonne. Les colonnes ajoutées depuis
+    — Depuis, Objectifs — ont décalé Viewers et Cagnotte de deux rangs, et les
+    barres se peignaient sur des cellules sans valeur à comparer, donc nulle
+    part. Ce test tient le lien par constante.
+    """
+    table = stats._ranking_table
+    for colonne in (panel._C_VUE, panel._C_DON):
+        assert isinstance(table.itemDelegateForColumn(colonne),
+                          panel._BarreDeCellule), f"colonne {colonne} sans barre"
+
+
+@pytest.mark.parametrize("colonne", ["_C_RANG", "_C_NOM", "_C_LIEU", "_C_JEU",
+                                     "_C_DUREE", "_C_OBJ", "_C_TEND"])
+def test_les_colonnes_sans_grandeur_n_ont_pas_de_barre(stats, colonne):
+    """Une durée ou un nom n'ont pas de proportion : une barre y serait un
+    repère faux, pas un repère absent."""
+    delegue = stats._ranking_table.itemDelegateForColumn(getattr(panel, colonne))
+    assert not isinstance(delegue, panel._BarreDeCellule)
+
+
+def test_les_deux_colonnes_qui_s_etirent_sont_celles_qui_portent_une_barre(stats):
+    """La place en trop devient de la longueur de barre : les deux réglages
+    doivent désigner les mêmes colonnes, sinon l'un des deux est à côté."""
+    from PyQt6.QtWidgets import QHeaderView
+
+    entete = stats._ranking_table.horizontalHeader()
+    etirees = {c for c in range(stats._ranking_table.columnCount())
+               if entete.sectionResizeMode(c) == QHeaderView.ResizeMode.Stretch}
+    assert etirees == {panel._C_VUE, panel._C_DON}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Stats — colonnes Depuis / Objectifs / +/h
 # ═══════════════════════════════════════════════════════════════════════════
 
