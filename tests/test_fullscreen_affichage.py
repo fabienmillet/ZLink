@@ -617,6 +617,11 @@ def _ligne_pincee(qtbot, texte, lignes_max, tiers=3):
     # `contentsRect` retire les marges : on vise la largeur UTILE.
     marges = lbl.width() - lbl.contentsRect().width()
     lbl.resize(max(40, entier // tiers) + marges, 200)
+    # `resize` POSTE un événement : sans boucle qui le distribue, le repli
+    # n'est jamais recalculé et le widget garde son texte d'origine. Le test
+    # passait alors selon l'ordre d'exécution, pas selon le code. `set_texte`
+    # rend la main sur ce calcul, à la largeur qu'on vient de poser.
+    lbl.set_texte(texte)
     return lbl
 
 
