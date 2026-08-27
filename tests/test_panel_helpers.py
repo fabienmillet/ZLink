@@ -842,3 +842,31 @@ def test_la_ligne_de_l_heure_porte_le_sens(qtbot):
     assert "+" in haut.text() and "00ff87" in haut.styleSheet()
     assert "ff6b6b" in bas.styleSheet(), "une baisse ne se lit pas en vert"
     tendances.oublier_tout()
+
+
+# ── bascule d'un rappel par sa seule clé ─────────────────────────────────────
+
+def test_basculer_un_rappel_par_sa_cle_le_persiste(qtbot, config_vierge):
+    """La frise de l'Accueil propose le rappel mais ne le détient pas : c'est
+    l'onglet Programme qui garde l'ensemble et l'écrit. Deux états séparés se
+    contrediraient — cloche éteinte ici, rappel actif là."""
+    onglet = panel._ProgrammeTab()
+    qtbot.addWidget(onglet)
+    onglet._subscribed_ids = set()
+
+    assert onglet.basculer_rappel_par_cle("ev-1") is True
+    assert "ev-1" in panel._load_reminders()
+    assert onglet.basculer_rappel_par_cle("ev-1") is False
+    assert "ev-1" not in panel._load_reminders()
+
+
+def test_se_reabonner_redeclenche_le_rappel(qtbot, config_vierge):
+    """Sans purge, un show déjà rappelé restait marqué à vie."""
+    onglet = panel._ProgrammeTab()
+    qtbot.addWidget(onglet)
+    onglet._subscribed_ids = {"ev-1"}
+    onglet._reminded_ids = {"ev-1"}
+
+    onglet.basculer_rappel_par_cle("ev-1")     # désabonnement
+    onglet.basculer_rappel_par_cle("ev-1")     # réabonnement
+    assert "ev-1" not in onglet._reminded_ids

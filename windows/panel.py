@@ -486,6 +486,22 @@ from core.version import (
 )
 
 
+def cle_evenement(ev) -> str:
+    """Identifiant d'un show pour les rappels.
+
+    Fonction de MODULE : l'onglet Programme pose les abonnements, la timeline
+    de l'Accueil les propose aussi. Deux calculs de clé qui divergeraient d'un
+    caractère feraient deux abonnements distincts pour un même show.
+
+    L'identifiant de l'API quand il existe ; sinon jour + heure + nom, qui ne
+    bougent pas non plus d'un sondage à l'autre.
+    """
+    ident = getattr(ev, "id", "")
+    if ident:
+        return str(ident)
+    return f"{ev.day}_{ev.start_local}_{ev.name}"
+
+
 def _load_reminders() -> set[str]:
     """Clés d'événements dont le rappel est actif, depuis config.json."""
     try:
@@ -1822,6 +1838,10 @@ class _AccueilTab(QWidget):
     add_to_grid     = pyqtSignal(str)  # twitch_login
     #: (login du présentateur, nom du show) — un show vient de commencer.
     show_started    = pyqtSignal(str, str)
+    #: Clé d'un show dont on demande à basculer le rappel. L'état vit dans
+    #: l'onglet Programme, qui le détient et le persiste : la frise le
+    #: demande, elle ne le décide pas.
+    rappel_bascule  = pyqtSignal(str)
 
     #: Largeur maximale de la colonne « EN LIVE ». Un avatar de 28 px, un nom,
     #: un jeu et une audience : au-delà, la place ne sert qu'à écarter les noms
@@ -2169,19 +2189,60 @@ class _AccueilTab(QWidget):
         if not login:
             return  # pas de présentateur résolvable
 
+        menu = self.menu_d_un_show(ev, login)
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            return
+        action = str(chosen.data() or "")
+        if action == "fullscreen":
+            self.stream_selected.emit(login)
+        elif action == "grille":
+            self.add_to_grid.emit(login)
+        elif action == "rappel":
+            self.rappel_bascule.emit(cle_evenement(ev))
+
+    def menu_d_un_show(self, ev: EventItem, login: str) -> QMenu:
+        """Ce qu'on peut faire d'un show depuis la frise.
+
+        Rendu plutôt qu'exécuté : un menu qui s'ouvre tout seul ne se teste
+        qu'en le cliquant.
+        """
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
         host_act = QAction(f"{ev.name or 'Événement'}  —  {login}", menu)
         host_act.setEnabled(False)
         menu.addAction(host_act)
         menu.addSeparator()
-        act_fs   = menu.addAction("▶  Charger en fullscreen")
-        act_grid = menu.addAction("⊞  Ajouter à la grille")
-        chosen = menu.exec(QCursor.pos())
-        if chosen == act_fs:
-            self.stream_selected.emit(login)
-        elif chosen == act_grid:
-            self.add_to_grid.emit(login)
+        menu.addAction("▶  Charger en fullscreen").setData("fullscreen")
+        menu.addAction("⊞  Ajouter à la grille").setData("grille")
+        menu.addSeparator()
+        menu.addAction(self._action_rappel(menu, ev))
+        return menu
+
+    def _action_rappel(self, menu: QMenu, ev: EventItem) -> QAction:
+        """L'entrée « me rappeler », dans l'état où elle se trouve.
+
+        Le rappel existait déjà, mais seulement sous forme de cloche dans
+        l'onglet Programme : depuis la frise de l'Accueil — là où l'on
+        découvre justement qu'un show approche — il fallait changer d'onglet
+        et retrouver la bonne carte.
+
+        Un show déjà commencé garde son entrée, grisée : la masquer ferait
+        croire que le rappel n'existe pas pour ce show-là, alors qu'il est
+        seulement trop tard.
+        """
+        debut, _fin = self._ev_bounds(ev)
+        passe = debut is not None and debut <= time.time()
+        abonne = cle_evenement(ev) in _load_reminders()
+        if passe:
+            action = QAction("\U0001f514  Rappel — le show a déjà commencé", menu)
+            action.setEnabled(False)
+            return action
+        action = QAction(
+            "\U0001f514  Désactiver le rappel" if abonne
+            else "\U0001f514  Me rappeler 5 min avant", menu)
+        action.setData("rappel")
+        return action
 
     def update_events(self, events: list[EventItem]) -> None:
         self._events = events
@@ -2966,8 +3027,9 @@ class _ProgrammeTab(QWidget):
             out = [((uid[:12] + "…" if len(uid) > 12 else uid), "", "") for uid in uuids]
         return out
 
-    def _event_key(self, ev: EventItem) -> str:
-        return ev.id if ev.id else f"{ev.day}_{ev.start_local}_{ev.name}"
+    @staticmethod
+    def _event_key(ev: EventItem) -> str:
+        return cle_evenement(ev)
 
     # ── Card ─────────────────────────────────────────────────────────
 
@@ -3222,6 +3284,31 @@ class _ProgrammeTab(QWidget):
         # se désabonner puis se réabonner ne redéclenchait plus rien.
         self._reminded_ids.discard(key)
         _save_reminders(self._subscribed_ids)
+
+    def basculer_rappel_par_cle(self, cle: str) -> bool:
+        """Bascule le rappel d'un show désigné par sa seule clé.
+
+        La frise de l'Accueil propose le rappel mais ne le détient pas : c'est
+        cet onglet qui garde l'ensemble et l'écrit. Passer par ici plutôt que
+        d'écrire la configuration des deux côtés évite que les deux vues se
+        contredisent — une cloche éteinte ici et un rappel actif là.
+
+        Rend le nouvel état, pour que l'appelant puisse le dire.
+        """
+        if cle in self._subscribed_ids:
+            self._subscribed_ids.discard(cle)
+        else:
+            self._subscribed_ids.add(cle)
+        # Sans cette purge, un show déjà rappelé restait marqué à vie : se
+        # désabonner puis se réabonner ne redéclenchait plus rien.
+        self._reminded_ids.discard(cle)
+        _save_reminders(self._subscribed_ids)
+        # Les cloches se peignent à la construction des cartes : les
+        # reconstruire les remet toutes d'accord, sans avoir à retrouver le
+        # bouton exact — et il n'y en a peut-être aucun, si l'onglet n'a
+        # jamais été ouvert.
+        self._render_current_day()
+        return cle in self._subscribed_ids
 
     def _check_reminders(self) -> None:
         """Vérifie si un événement souscrit commence dans les 5 prochaines minutes."""
@@ -6812,6 +6899,11 @@ class PanelWindow(QMainWindow):
         self._programme_tab.reminder_triggered.connect(
             lambda _name, msg: self.add_feed_event("event", "", msg)
         )
+        # La frise de l'Accueil propose le rappel ; l'onglet Programme le
+        # détient et l'écrit. Sans ce relais, chacun tiendrait son propre état
+        # et les deux vues se contrediraient.
+        self._accueil_tab.rappel_bascule.connect(
+            self._programme_tab.basculer_rappel_par_cle)
         self._stack.addWidget(self._programme_tab)
 
         self._stats_tab = _StatsTab()

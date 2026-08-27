@@ -1910,3 +1910,114 @@ def test_un_objectif_coupe_porte_son_texte_entier_en_infobulle(qtbot):
     bulles = [w.toolTip() for w in item.findChildren(QLabel) if w.toolTip()]
     assert any("interminable" in b for b in bulles)
     assert any("rose fluo" in b for b in bulles)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Programme — s'abonner depuis la frise
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _Show:
+    """Un EventItem réduit à ce que la frise et les rappels consultent."""
+
+    def __init__(self, ident="ev-1", nom="Blind Test Musical",
+                 debut_dans=3600.0):
+        import time as _t
+        self.id = ident
+        self.name = nom
+        self.day = "2026-09-04"
+        self.start_local = "18:00"
+        self.end_local = "19:00"
+        self.description = ""
+        self.host_uuids = ["antoinedaniel"]
+        self.participant_uuids = []
+        self.start_ts = _t.time() + debut_dans
+        self.end_ts = self.start_ts + 3600.0
+        self.names = {}
+        self.logins = {}
+        self.profile_urls = {}
+
+
+@pytest.fixture
+def accueil(qtbot, monkeypatch):
+    monkeypatch.setattr(panel, "QWebEngineView", _FausseVueWeb)
+    o = panel._AccueilTab()
+    qtbot.addWidget(o)
+    return o
+
+
+def _entrees(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def test_la_frise_propose_le_rappel(accueil, config_vierge):
+    """Le rappel n'existait que sous forme de cloche dans l'onglet Programme :
+    depuis la frise — là où l'on découvre qu'un show approche — il fallait
+    changer d'onglet et retrouver la bonne carte."""
+    menu = accueil.menu_d_un_show(_Show(), "antoinedaniel")
+    assert any("Me rappeler" in t for t in _entrees(menu))
+
+
+def test_un_show_deja_abonne_propose_de_se_desabonner(accueil, config_vierge,
+                                                      monkeypatch):
+    monkeypatch.setattr(panel, "_load_reminders", lambda: {"ev-1"})
+    menu = accueil.menu_d_un_show(_Show(), "antoinedaniel")
+    assert any("Désactiver le rappel" in t for t in _entrees(menu))
+
+
+def test_un_show_passe_garde_son_entree_grisee(accueil, config_vierge):
+    """La masquer ferait croire que le rappel n'existe pas pour ce show-là,
+    alors qu'il est seulement trop tard."""
+    menu = accueil.menu_d_un_show(_Show(debut_dans=-600.0), "antoinedaniel")
+    rappel = next(a for a in menu.actions() if "Rappel" in a.text())
+    assert rappel.isEnabled() is False
+    assert "déjà commencé" in rappel.text()
+
+
+@pytest.mark.parametrize("choix,signal,attendu", [
+    ("rappel", "rappel_bascule", "ev-1"),
+    ("fullscreen", "stream_selected", "antoinedaniel"),
+    ("grille", "add_to_grid", "antoinedaniel"),
+])
+def test_chaque_entree_de_la_frise_emet_ce_qu_elle_annonce(
+        accueil, config_vierge, monkeypatch, choix, signal, attendu):
+    """`exec` est bloquant : on lui fait rendre l'entrée voulue."""
+    show = _Show()
+    accueil._events = [show]
+    accueil._uuid_to_login = {"antoinedaniel": "antoinedaniel"}
+    accueil._all_logins = {"antoinedaniel"}
+    monkeypatch.setattr(
+        panel.QMenu, "exec",
+        lambda self, *a: next(x for x in self.actions() if x.data() == choix))
+    recu: list[str] = []
+    getattr(accueil, signal).connect(recu.append)
+    accueil._on_timeline_click(show)
+    assert recu == [attendu]
+
+
+def test_fermer_le_menu_de_la_frise_sans_choisir_ne_fait_rien(
+        accueil, config_vierge, monkeypatch):
+    show = _Show()
+    accueil._uuid_to_login = {"antoinedaniel": "antoinedaniel"}
+    accueil._all_logins = {"antoinedaniel"}
+    monkeypatch.setattr(panel.QMenu, "exec", lambda self, *a: None)
+    recu: list[str] = []
+    accueil.rappel_bascule.connect(recu.append)
+    accueil.stream_selected.connect(recu.append)
+    accueil._on_timeline_click(show)
+    assert recu == []
+
+
+def test_la_cle_d_un_show_est_la_meme_des_deux_cotes():
+    """Deux calculs qui divergeraient d'un caractère feraient deux
+    abonnements distincts pour un même show."""
+    show = _Show()
+    assert panel.cle_evenement(show) == panel._ProgrammeTab._event_key(show)
+
+
+def test_sans_identifiant_la_cle_reste_stable():
+    """L'API peut ne pas fournir d'id : jour, heure et nom ne bougent pas non
+    plus d'un sondage à l'autre."""
+    show = _Show(ident="")
+    cle = panel.cle_evenement(show)
+    assert cle == "2026-09-04_18:00_Blind Test Musical"
+    assert panel.cle_evenement(_Show(ident="")) == cle
