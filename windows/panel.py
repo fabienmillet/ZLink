@@ -5903,6 +5903,15 @@ class _StatsTab(QWidget):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_QSS)
 
+        # En-tête non cliquable : il DIT de qui on parle et où en sont ses
+        # objectifs. « Objectifs de dons » était une entrée à part, qui ouvrait
+        # la fiche — exactement ce que fait « Ouvrir la fiche » deux lignes
+        # plus bas. Deux entrées pour un seul geste, alors que le compte
+        # n'était qu'une information. Le menu du Programme ouvre déjà de cette
+        # façon.
+        menu.addAction(self._entete_de_ligne(menu, login))
+        menu.addSeparator()
+
         # Mêmes glyphes que les autres menus de l'application : on reconnaît
         # une action à sa marque avant d'avoir lu son libellé.
         menu.addAction("▶  Regarder en plein écran").triggered.connect(
@@ -5918,29 +5927,32 @@ class _StatsTab(QWidget):
                              else "Ajouter aux favoris")
         ).triggered.connect(lambda: self._basculer_favori(login))
         menu.addSeparator()
-        menu.addAction(self._action_objectifs(menu, login))
         menu.addAction("ℹ  Ouvrir la fiche").triggered.connect(
             lambda: self.sheet_requested.emit(login))
         return menu
 
-    def _action_objectifs(self, menu: QMenu, login: str):
-        """L'entrée « Objectifs de dons », et ce qu'elle dit quand il n'y en a pas.
+    def _entete_de_ligne(self, menu: QMenu, login: str) -> QAction:
+        """Le titre du menu : de qui on parle, et où en sont ses objectifs.
 
-        Les objectifs ne sont chargés que pour le haut du classement et les
-        favoris : il n'existe aucun appel à la demande. Ouvrir la fiche sur
-        une section vide ne dirait pas pourquoi — l'entrée porte donc la
-        raison, et le moyen d'y remédier.
+        Grisé, donc non cliquable — c'est une information, pas une action. Les
+        objectifs ne sont chargés que pour le haut du classement et les
+        favoris, il n'existe aucun appel à la demande : quand ils manquent,
+        l'en-tête dit pourquoi et comment y remédier plutôt que de laisser
+        croire que la chaîne n'en publie aucun.
         """
+        nom = login
+        for s_ in self._streamers:
+            if s_.twitch_login == login:
+                nom = s_.display
+                break
         buts = self._goals.get(login) or []
-        if not buts:
-            action = QAction(
-                "◎  Objectifs de dons — chargés pour les favoris", menu)
-            action.setEnabled(False)
-            return action
-        faits = sum(1 for b in buts if _objectif_atteint(b))
-        action = QAction(
-            f"◎  Objectifs de dons ({faits}/{len(buts)})", menu)
-        action.triggered.connect(lambda: self.sheet_requested.emit(login))
+        if buts:
+            faits = sum(1 for b in buts if _objectif_atteint(b))
+            texte = f"{nom}  —  {faits}/{len(buts)} objectifs"
+        else:
+            texte = f"{nom}  —  objectifs chargés pour les favoris"
+        action = QAction(texte, menu)
+        action.setEnabled(False)
         return action
 
     def _basculer_favori(self, login: str) -> None:

@@ -537,9 +537,13 @@ def test_avec_les_clips_le_menu_offre_garder_et_revoir(cellule,
 
 def test_le_toast_d_objectif_s_efface_de_lui_meme(grille):
     """Sans effacement, les toasts s'empilent : un palier de cagnotte en
-    déclenche des dizaines en quelques minutes."""
+    déclenche des dizaines en quelques minutes.
+
+    La chaîne est volontairement ABSENTE de la grille : une chaîne affichée
+    n'a plus de toast, son liseré suffit et dit mieux de qui il s'agit.
+    """
     _peupler(grille, ("a", 10))
-    grille.goal_achieved_flash("a", "Manger un piment")
+    grille.goal_achieved_flash("absente", "Manger un piment")
     toast = grille.findChildren(G._GoalAchievedToast)[-1]
     toast._start_fade()
     assert toast.graphicsEffect() is not None

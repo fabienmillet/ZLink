@@ -1780,7 +1780,7 @@ def test_le_menu_contextuel_propose_les_memes_leviers_que_les_cartes(stats):
     _remplir(stats, _S("morrigh4n"))
     menu = stats.menu_de_la_ligne(0)
     libelles = " | ".join(a.text() for a in menu.actions() if not a.isSeparator())
-    for attendu in ("plein écran", "grille", "favoris", "Objectifs", "fiche"):
+    for attendu in ("plein écran", "grille", "favoris", "fiche"):
         assert attendu in libelles, f"« {attendu} » absent de : {libelles}"
 
 
@@ -1827,23 +1827,37 @@ def test_le_menu_bascule_le_favori_et_le_dit(stats, monkeypatch, tmp_path):
                for a in stats.menu_de_la_ligne(0).actions())
 
 
-def test_sans_objectifs_charges_l_entree_dit_pourquoi(stats):
-    """Il n'existe aucun appel à la demande : ouvrir la fiche sur une section
-    vide ne dirait pas ce qui manque."""
+def test_sans_objectifs_charges_l_entete_dit_pourquoi(stats):
+    """Il n'existe aucun appel à la demande : laisser l'en-tête muet ferait
+    croire que la chaîne ne publie aucun objectif."""
     _remplir(stats, _S("morrigh4n"))
-    action = next(a for a in stats.menu_de_la_ligne(0).actions()
-                  if "Objectifs" in a.text())
-    assert action.isEnabled() is False
-    assert "favoris" in action.text()
+    entete = stats.menu_de_la_ligne(0).actions()[0]
+    assert entete.isEnabled() is False
+    assert "favoris" in entete.text()
 
 
-def test_avec_des_objectifs_l_entree_porte_le_compte(stats):
-    _remplir(stats, _S("morrigh4n"))
+def test_l_entete_porte_le_nom_et_le_compte_des_objectifs(stats):
+    _remplir(stats, _S("morrigh4n", display="Morrigh4n"))
     stats.seed_goals({"morrigh4n": [_G("a", accompli=True), _G("b"), _G("c")]})
-    action = next(a for a in stats.menu_de_la_ligne(0).actions()
-                  if "Objectifs" in a.text())
-    assert action.isEnabled() is True
-    assert "(1/3)" in action.text()
+    entete = stats.menu_de_la_ligne(0).actions()[0]
+    assert entete.isEnabled() is False, "un titre n'est pas une action"
+    assert "Morrigh4n" in entete.text()
+    assert "1/3" in entete.text()
+
+
+def test_le_menu_n_ouvre_la_fiche_que_par_une_seule_entree(stats):
+    """« Objectifs de dons » et « Ouvrir la fiche » faisaient la même chose :
+    deux entrées pour un seul geste, alors que le compte n'est qu'une
+    information — il est passé dans le titre du menu."""
+    _remplir(stats, _S("morrigh4n"))
+    stats.seed_goals({"morrigh4n": [_G("a")]})
+    recu: list[str] = []
+    stats.sheet_requested.connect(recu.append)
+    cliquables = [a for a in stats.menu_de_la_ligne(0).actions()
+                  if a.isEnabled() and not a.isSeparator()]
+    for action in cliquables:
+        action.trigger()
+    assert recu == ["morrigh4n"], "une seule entrée doit ouvrir la fiche"
 
 
 @pytest.mark.parametrize("delta,attendu", [

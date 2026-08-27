@@ -824,3 +824,26 @@ def test_ecrans_refuse_une_grille_sans_panel(qtbot):
     assert page.collect(config) is False
     assert "screen_assignments" not in config
     assert "panel" in page._error_lbl.text()
+
+
+def test_la_restriction_des_objectifs_est_proposee_et_enregistree(qtbot):
+    """Trois cents participants publient des dizaines d'objectifs : tout
+    signaler revient à ne rien signaler."""
+    from core.alerts import CLE_OBJECTIFS_FAVORIS
+
+    page = _page(qtbot, settings._PageHype)
+    assert page._objectifs_favoris_cb.isChecked() is False, "aucune coupe non demandée"
+    page._objectifs_favoris_cb.setChecked(True)
+    config: dict = {}
+    page.collect(config)
+    assert config[CLE_OBJECTIFS_FAVORIS] is True
+    # Hors du dict des familles : ce n'est pas une famille, c'est une
+    # restriction qui en traverse deux.
+    assert CLE_OBJECTIFS_FAVORIS not in config["alerts"]
+
+
+def test_la_restriction_des_objectifs_est_relue(qtbot):
+    from core.alerts import CLE_OBJECTIFS_FAVORIS
+
+    page = _page(qtbot, settings._PageHype, {CLE_OBJECTIFS_FAVORIS: True})
+    assert page._objectifs_favoris_cb.isChecked() is True

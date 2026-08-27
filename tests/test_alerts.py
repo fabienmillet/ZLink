@@ -24,8 +24,15 @@ TOUTES = [cle for cle, _lib, _def, _aide in alerts.FAMILLES]
 
 @pytest.fixture(autouse=True)
 def etats_neufs(monkeypatch):
-    """Isole chaque test de l'état global laissé par le précédent."""
+    """Isole chaque test de l'état global laissé par le précédent.
+
+    Les DEUX réglages, pas seulement les familles : la restriction aux favoris
+    est elle aussi un état de module, et l'oublier ici la laissait active pour
+    tous les fichiers de test suivants — sept d'entre eux tombaient d'un coup,
+    en passant pourtant chacun isolément.
+    """
     monkeypatch.setattr(alerts, "_ETATS", dict(alerts._DEFAUTS))
+    monkeypatch.setattr(alerts, "_OBJECTIFS_FAVORIS_SEULEMENT", False)
 
 
 # ── le catalogue lui-même ────────────────────────────────────────────────────
@@ -156,3 +163,59 @@ def test_states_rend_une_copie():
     copie = alerts.states()
     copie["raid"] = False
     assert alerts.enabled("raid") is True
+
+
+# ── objectifs restreints aux favoris ─────────────────────────────────────────
+
+@pytest.fixture
+def favoris(monkeypatch):
+    """Ensemble de favoris contrôlé, sans toucher au fichier de l'utilisateur."""
+    table: set[str] = set()
+    from core import favorites
+    monkeypatch.setattr(favorites, "get", lambda: table)
+    return table
+
+
+def test_par_defaut_les_objectifs_alertent_pour_tout_le_monde(favoris):
+    """Couper des alertes sans qu'on l'ait demandé serait pire que d'en
+    recevoir trop : on ne remarque pas ce qui n'arrive pas."""
+    alerts.configure({})
+    assert alerts.objectifs_favoris_seulement() is False
+    assert alerts.enabled_pour("goal_done", "inconnu") is True
+
+
+@pytest.mark.parametrize("famille", ["goal_done", "goal_imminent"])
+def test_restreints_aux_favoris_les_objectifs_se_taisent_pour_les_autres(
+        favoris, famille):
+    alerts.configure({alerts.CLE_OBJECTIFS_FAVORIS: True})
+    favoris.add("morrigh4n")
+    assert alerts.enabled_pour(famille, "morrigh4n") is True
+    assert alerts.enabled_pour(famille, "quelqu_un_d_autre") is False
+
+
+def test_la_restriction_ne_touche_pas_les_autres_familles(favoris):
+    """Elle ne vise QUE les objectifs : un raid ou un palier restent annoncés."""
+    alerts.configure({alerts.CLE_OBJECTIFS_FAVORIS: True})
+    for famille in ("raid", "milestone", "hype", "favorite_live"):
+        assert alerts.enabled_pour(famille, "quelqu_un_d_autre") is True
+
+
+def test_une_famille_eteinte_le_reste_meme_pour_un_favori(favoris):
+    """La restriction affine, elle ne rallume rien."""
+    alerts.configure({"alerts": {"goal_done": False},
+                      alerts.CLE_OBJECTIFS_FAVORIS: True})
+    favoris.add("morrigh4n")
+    assert alerts.enabled_pour("goal_done", "morrigh4n") is False
+
+
+def test_une_alerte_sans_chaine_passe(favoris):
+    """La restriction n'a rien à mordre : l'alerte ne vise personne."""
+    alerts.configure({alerts.CLE_OBJECTIFS_FAVORIS: True})
+    assert alerts.enabled_pour("goal_done", "") is True
+
+
+def test_la_casse_du_login_n_ecarte_pas_un_favori(favoris):
+    """Les favoris sont rangés en minuscules, les logins arrivent tels quels."""
+    alerts.configure({alerts.CLE_OBJECTIFS_FAVORIS: True})
+    favoris.add("morrigh4n")
+    assert alerts.enabled_pour("goal_done", "Morrigh4n") is True

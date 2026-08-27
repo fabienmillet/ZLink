@@ -49,16 +49,58 @@ FAMILLES: list[tuple[str, str, bool, str]] = [
 _DEFAUTS = {cle: defaut for cle, _lib, defaut, _aide in FAMILLES}
 _ETATS: dict[str, bool] = dict(_DEFAUTS)
 
+#: Familles qui parlent des OBJECTIFS d'une chaîne, et qu'on peut donc
+#: restreindre à ses favoris. Trois cents participants publient des dizaines
+#: d'objectifs chacun : tout signaler revient à ne rien signaler.
+FAMILLES_OBJECTIFS: tuple[str, ...] = ("goal_imminent", "goal_done")
+
+#: Clé du réglage dans config.json.
+CLE_OBJECTIFS_FAVORIS = "alerts_objectifs_favoris_seulement"
+
+#: Faux par défaut : couper des alertes sans qu'on l'ait demandé serait pire
+#: que d'en recevoir trop — on ne remarque pas ce qui n'arrive pas.
+_OBJECTIFS_FAVORIS_SEULEMENT: bool = False
+
 
 def configure(config: dict) -> None:
     """Applique la configuration. Une famille absente garde son défaut."""
-    brut = (config or {}).get("alerts")
+    global _OBJECTIFS_FAVORIS_SEULEMENT
+    config = config or {}
+    brut = config.get("alerts")
     brut = brut if isinstance(brut, dict) else {}
     for cle, defaut in _DEFAUTS.items():
         _ETATS[cle] = bool(brut.get(cle, defaut))
+    _OBJECTIFS_FAVORIS_SEULEMENT = bool(config.get(CLE_OBJECTIFS_FAVORIS, False))
     coupees = [c for c, v in _ETATS.items() if not v]
     if coupees:
         logger.info("Alertes désactivées : %s", ", ".join(sorted(coupees)))
+    if _OBJECTIFS_FAVORIS_SEULEMENT:
+        logger.info("Alertes d'objectifs restreintes aux favoris")
+
+
+def objectifs_favoris_seulement() -> bool:
+    """Vrai si les alertes d'objectifs ne concernent que les favoris."""
+    return _OBJECTIFS_FAVORIS_SEULEMENT
+
+
+def enabled_pour(famille: str, login: str) -> bool:
+    """Comme `enabled`, mais pour une alerte qui vise UNE chaîne.
+
+    Le contrôle reste à la source : une alerte écartée ici n'est jamais
+    produite, plutôt que d'être filtrée à l'affichage — sans quoi elle
+    resterait dans le fil d'événements et dans le journal.
+
+    Un login vide passe : l'alerte ne vise alors personne en particulier, et
+    la restriction n'a rien à mordre.
+    """
+    if not enabled(famille):
+        return False
+    if not _OBJECTIFS_FAVORIS_SEULEMENT or famille not in FAMILLES_OBJECTIFS:
+        return True
+    if not login:
+        return True
+    from core import favorites
+    return str(login).lower() in favorites.get()
 
 
 def enabled(famille: str) -> bool:

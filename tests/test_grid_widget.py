@@ -892,8 +892,28 @@ def test_un_objectif_accompli_fait_pulser_la_cellule(grille):
     assert grille._cell_map["a"]._pulse_gen == 1
 
 
-def test_un_objectif_d_une_chaine_absente_affiche_quand_meme_le_toast(grille):
-    grille.goal_achieved_flash("inconnu", "Objectif")   # ne doit pas lever
+def _toasts(grille):
+    return grille.findChildren(G._GoalAchievedToast)
+
+
+def test_une_chaine_affichee_pulse_sans_toast(grille):
+    """Le toast recouvrait une cellule — donc un flux — dans la seule fenêtre
+    entièrement faite de vidéo, pour dire ce que le liseré disait déjà, et
+    mieux : lui désigne QUI."""
+    _peupler(grille, ("a", 10))
+    grille.goal_achieved_flash("a", "Manger un piment")
+    assert _toasts(grille) == []
+
+
+def test_une_chaine_absente_de_la_grille_garde_son_toast(grille):
+    """Aucune cellule ne peut la signaler : sans toast, rien ne le dirait."""
+    _peupler(grille, ("a", 10))
+    grille.goal_achieved_flash("inconnu", "Objectif")
+    assert len(_toasts(grille)) == 1
+
+
+def test_un_objectif_sur_une_grille_vide_ne_leve_pas(grille):
+    grille.goal_achieved_flash("inconnu", "Objectif")
 
 
 def test_le_toast_de_hype_propose_de_garder_le_moment(grille, monkeypatch):

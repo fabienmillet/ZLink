@@ -436,6 +436,15 @@ def _brancher_grille_streams(
     grid.grid.set_quality_provider(stream_manager.resolve_grid_quality)
     data_manager.streamers_updated.connect(lambda _: grid.refresh_hype_cells())
     grid.hype_alert.connect(fullscreen.show_hype_alert)
+    # L'objectif accompli s'annonce LÀ OÙ ON REGARDE, c'est-à-dire le direct.
+    # Le toast de la grille recouvrait une cellule — donc un flux — dans la
+    # seule fenêtre entièrement faite de vidéo, et la cellule concernée n'y
+    # est même pas forcément affichée. La cellule, elle, réagit toujours par
+    # son liseré : c'est ce qui désigne QUI, sans rien masquer.
+    data_manager.goal_accomplished.connect(
+        lambda login, nom, f=fullscreen: f.annoncer(
+            f"✓  {login} — objectif accompli : {nom}", "#00ff87", 5.0)
+    )
     data_manager.goal_accomplished.connect(grid.grid.goal_achieved_flash)
     # Un palier n'appartient à aucun streamer : toute la grille réagit.
     data_manager.milestone_reached.connect(

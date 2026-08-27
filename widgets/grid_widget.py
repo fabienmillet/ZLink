@@ -1739,12 +1739,21 @@ class GridWidget(QWidget):
                 cell.pulse_hype(color, pulses=pulses)
 
     def goal_achieved_flash(self, login: str, goal_name: str) -> None:
-        """Pulse la cellule en vert et affiche un toast quand un objectif est accompli."""
+        """Signale un objectif accompli sur la grille.
+
+        La chaîne concernée pulse en vert. Le TOAST, lui, ne s'affiche que si
+        elle n'est pas dans la grille : sinon il recouvrait une cellule — donc
+        un flux — dans la seule fenêtre entièrement faite de vidéo, pour dire
+        ce que le liseré disait déjà, et mieux, puisqu'il désigne qui.
+
+        L'annonce complète, elle, se fait sur le direct, là où on regarde.
+        """
         cell = self._cell_map.get(login)
         if cell is not None:
             # Dix secondes : un objectif atteint doit rester visible le temps
             # qu'on lève les yeux vers la grille, pas le temps d'un battement.
             cell.pulse_hype("#00ff87", seconds=10.0)
+            return
         toast = _GoalAchievedToast(login, goal_name, self)
         toast.show()
         toast.raise_()

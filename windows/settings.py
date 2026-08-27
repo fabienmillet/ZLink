@@ -480,6 +480,20 @@ class _PageHype(_PageBase):
             "n'est pas seulement masquée : elle n'est plus calculée du tout."
         ))
 
+        # Les objectifs se comptent par dizaines chez trois cents
+        # participants : tout signaler revient à ne rien signaler. Restreindre
+        # aux favoris garde l'alerte utile sans l'éteindre.
+        from core.alerts import CLE_OBJECTIFS_FAVORIS
+        self._objectifs_favoris_cb = QCheckBox(
+            "Objectifs : ne m'alerter que pour mes favoris")
+        self._objectifs_favoris_cb.setFont(QFont(_FONT_UI, 11))
+        self._objectifs_favoris_cb.setChecked(
+            bool(config.get(CLE_OBJECTIFS_FAVORIS, False)))
+        self._objectifs_favoris_cb.setToolTip(
+            "S'applique aux deux familles ci-dessus qui parlent d'objectifs :\n"
+            "« sur le point de tomber » et « atteints ».")
+        self._vl.addWidget(self._objectifs_favoris_cb)
+
         self._vl.addWidget(_sep())
         self._vl.addWidget(_section_title("HypeWatcher"))
 
@@ -660,8 +674,12 @@ class _PageHype(_PageBase):
         self._advanced.setVisible(self._enabled_cb.isChecked())
 
     def collect(self, config: dict) -> None:
+        from core.alerts import CLE_OBJECTIFS_FAVORIS
         config["alerts"] = {
             cle: cb.isChecked() for cle, cb in self._alert_boxes.items()}
+        # Hors du dict « alerts » : ce n'est pas une famille, c'est une
+        # restriction qui en traverse deux.
+        config[CLE_OBJECTIFS_FAVORIS] = self._objectifs_favoris_cb.isChecked()
         hw = config.setdefault("hypewatcher", {})
         hw["enabled"] = self._enabled_cb.isChecked()
         hw["score_high"] = self._score_high.value() / 100.0

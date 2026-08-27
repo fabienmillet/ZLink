@@ -858,6 +858,12 @@ class DataManager(QObject):
         self._imminent_announced.add(cle)
         if not self._imminent_init_done:
             return
+        # La restriction aux favoris se contrôle ici, pas à l'affichage : une
+        # alerte écartée plus tard resterait dans le fil et dans le journal.
+        # On la marque quand même comme annoncée juste au-dessus, sinon elle
+        # reviendrait à chaque sondage le jour où la restriction est levée.
+        if not _alerts.enabled_pour("goal_imminent", g.streamer_login):
+            return
         logger.info("Objectif imminent : %s — %s (reste %.0f €)",
                     g.streamer_login, g.goal_name, reste)
         self.goal_imminent.emit(
@@ -884,7 +890,7 @@ class DataManager(QObject):
         }
         if self._goals_init_done:
             for login, name in current - self._accomplished_goals:
-                if _alerts.enabled("goal_done"):
+                if _alerts.enabled_pour("goal_done", login):
                     self.goal_accomplished.emit(login, name)
         self._accomplished_goals = current
         self._goals_init_done = True
