@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -1456,6 +1457,7 @@ class _AccueilStreamerItem(QWidget):
         game = (s.game or "")[:20] + ("…" if len(s.game or "") > 20 else "")
         full = f"{s.display}  ·  {game}" if game else s.display
         self._name_lbl = QLabel(full)
+        self._name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         self._name_lbl.setFont(QFont(_FONT_SEGOE, 12))
         self._name_lbl.setStyleSheet("color: #aaaaaa; background: transparent;")
         h.addWidget(self._name_lbl, stretch=1)
@@ -1821,6 +1823,11 @@ class _AccueilTab(QWidget):
     #: (login du présentateur, nom du show) — un show vient de commencer.
     show_started    = pyqtSignal(str, str)
 
+    #: Largeur maximale de la colonne « EN LIVE ». Un avatar de 28 px, un nom,
+    #: un jeu et une audience : au-delà, la place ne sert qu'à écarter les noms
+    #: des chiffres qui leur correspondent, et l'œil perd la ligne.
+    _LARGEUR_LIVE = 460
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._prev_viewers: int = 0
@@ -1889,19 +1896,26 @@ class _AccueilTab(QWidget):
         self._streamers_list = _AccueilStreamersList()
         self._streamers_list.stream_selected.connect(self.stream_selected)
         self._goals_widget = _AccueilGoalsWidget()
-        central_layout.addWidget(self._streamers_list, stretch=7)
+        # « EN LIVE » ne porte qu'un avatar, un nom, un jeu et une audience :
+        # son contenu tient dans 350 px. Avec un stretch de 7 contre 3, elle
+        # réclamait les deux tiers de l'onglet et laissait NEUF CENTS PIXELS de
+        # vide entre les noms et la colonne des audiences, pendant que les deux
+        # autres blocs s'entassaient dans un tiers.
+        self._streamers_list.setMaximumWidth(self._LARGEUR_LIVE)
+        central_layout.addWidget(self._streamers_list, stretch=3)
 
-        # Colonne droite : objectifs au-dessus, fil d'événements en dessous.
-        # Le fil occupe ainsi l'espace laissé vide par les objectifs hors event.
+        # Objectifs et fil d'événements CÔTE À CÔTE, dans la place ainsi
+        # rendue. Empilés, chacun n'avait qu'une demi-hauteur dans une colonne
+        # étroite : cinq objectifs et un seul événement visibles à la fois.
         right = QWidget()
-        right_l = QVBoxLayout(right)
+        right_l = QHBoxLayout(right)
         right_l.setContentsMargins(0, 0, 0, 0)
-        right_l.setSpacing(0)
+        right_l.setSpacing(16)
         right_l.addWidget(self._goals_widget, stretch=1)
         self._feed = _EventFeed()
         self._feed.stream_requested.connect(self.stream_selected.emit)
         right_l.addWidget(self._feed, stretch=1)
-        central_layout.addWidget(right, stretch=3)
+        central_layout.addWidget(right, stretch=7)
         # Hors event, aucun objectif n'existe : la colonne se masque d'elle-même
         # et le fil récupère toute la hauteur.
         self._goals_widget.setVisible(False)
@@ -3558,6 +3572,24 @@ class _GoalsTab(QWidget):
         # Un nom de streamer n'a pas besoin de 1900 px : largeur fixe, puis on
         # pousse le reste à droite plutôt que d'étirer le champ.
         self._combo.setFixedWidth(280)
+
+        # ON TAPE, ON TROUVE. Il y a plus de trois cents participants : dérouler
+        # une liste alphabétique jusqu'à « Ponce » demandait de faire défiler
+        # une page et demie. Le champ devient éditable, et le complètement
+        # filtre sur ce que le nom CONTIENT — « ponc » comme « nce » ramènent
+        # Ponce, alors qu'un complètement par préfixe impose de savoir par quoi
+        # le nom commence, ce qui est justement ce qu'on cherche.
+        self._combo.setEditable(True)
+        self._combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._combo.lineEdit().setPlaceholderText("Taper trois lettres…")
+        completeur = self._combo.completer()
+        completeur.setCompletionMode(
+            QCompleter.CompletionMode.PopupCompletion)
+        completeur.setFilterMode(Qt.MatchFlag.MatchContains)
+        completeur.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        # Une saisie qui ne correspond à personne ne doit pas laisser le champ
+        # sur un nom inventé, alors que la fiche affichée est encore l'ancienne.
+        self._combo.lineEdit().editingFinished.connect(self._recaler_la_saisie)
         self._combo.currentIndexChanged.connect(self._on_streamer_changed)
         h.addWidget(self._combo)
         h.addStretch(1)
@@ -3648,14 +3680,40 @@ class _GoalsTab(QWidget):
 
     # -- public ---------------------------------------------------------------
 
+    def _recaler_la_saisie(self) -> None:
+        """Ramène le champ sur le streamer réellement affiché.
+
+        Éditable, il accepte n'importe quoi. Laisser « zerat » écrit alors que
+        la fiche montre encore quelqu'un d'autre ferait croire à un affichage
+        figé.
+        """
+        saisie = self._combo.currentText()
+        if self._combo.findText(saisie, Qt.MatchFlag.MatchExactly) >= 0:
+            return
+        courant: StreamerInfo | None = self._combo.currentData()
+        self._combo.setEditText(courant.display if courant else "")
+
     def set_streamers(self, streamers: list[StreamerInfo]) -> None:
-        """Met à jour la liste des streamers dans le combo."""
+        """Met à jour la liste des streamers dans le combo.
+
+        Les favoris d'abord, puis ceux en direct, puis les autres par audience
+        décroissante — l'ordre de la palette Ctrl+K. L'ordre alphabétique
+        plaçait « Antoine Daniel » en tête quoi qu'il arrive, alors que le
+        premier nom proposé devrait être celui qu'on a le plus de chances de
+        vouloir.
+        """
         current = self._combo.currentText()
 
         self._streamers = streamers
+        favs = favorites.get()
+        ordonnes = sorted(
+            streamers,
+            key=lambda x: (x.twitch_login.lower() not in favs,
+                           not x.online, -x.viewers, x.display.lower()),
+        )
         self._combo.blockSignals(True)
         self._combo.clear()
-        for s in sorted(streamers, key=lambda x: x.display.lower()):
+        for s in ordonnes:
             self._combo.addItem(s.display, userData=s)
         idx = self._combo.findText(current)
         self._combo.setCurrentIndex(idx if idx >= 0 else 0)

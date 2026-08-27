@@ -223,12 +223,17 @@ def test_une_popup_sans_personne_ne_leve_pas(qtbot):
 
 class _FauxStreamer:
     def __init__(self, login: str, pid: str = "p1",
-                 donation: float = 0.0) -> None:
+                 donation: float = 0.0, online: bool = True,
+                 viewers: int = 0) -> None:
         self.twitch_login = login
         self.display = login
         self.participation_id = pid
         self.donation = donation
         self.profile_url = ""
+        # Le sélecteur de l'onglet Goals classe favoris → en direct → audience :
+        # sans ces deux champs, la doublure ne représente plus un StreamerInfo.
+        self.online = online
+        self.viewers = viewers
 
 
 class _FauxObjectif:
