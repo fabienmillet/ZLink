@@ -1295,6 +1295,184 @@ def ouvrir_page_de_don(url: str) -> bool:
     return True
 
 
+def _mots(texte: str) -> list[str]:
+    """Découpe sur l'espace ORDINAIRE, et lui seul.
+
+    Les montants portent une fine insécable — « 22 622 € » — dont c'est tout
+    le rôle : replier entre « 22 » et « 622 » donnerait deux nombres.
+    """
+    return [mot for mot in str(texte).split(" ") if mot]
+
+
+def _finir_par_points(ligne: str, fm: QFontMetrics, largeur: int) -> str:
+    """Termine une ligne coupée par « … », en lâchant des mots s'il le faut."""
+    if ligne.endswith("…"):
+        return ligne
+    mots = _mots(ligne)
+    while mots:
+        essai = " ".join(mots) + "…"
+        if len(mots) == 1 or fm.horizontalAdvance(essai) <= largeur:
+            return essai
+        mots.pop()
+    return "…"
+
+
+def _ligne_rallongee(courante: str, mot: str, fm: QFontMetrics,
+                     largeur: int) -> str:
+    """La ligne en cours augmentée du mot, ou "" s'il n'y tient pas.
+
+    Une ligne encore vide n'est pas « rallongée » : c'est `_ouvrir_une_ligne`
+    qui décide de la façon dont un mot commence une ligne.
+    """
+    if not courante:
+        return ""
+    essai = courante + " " + mot
+    return essai if fm.horizontalAdvance(essai) <= largeur else ""
+
+
+def _ouvrir_une_ligne(mot: str, fm: QFontMetrics,
+                      largeur: int) -> tuple[str, str]:
+    """Commence une ligne avec ce mot : (ligne à poursuivre, ligne close).
+
+    Un mot plus large que la colonne à lui seul ne peut pas être coupé au
+    mot : sa ligne est close immédiatement, élidée, et l'appelant apprend
+    ainsi qu'il manque du texte.
+    """
+    if fm.horizontalAdvance(mot) <= largeur:
+        return mot, ""
+    return "", fm.elidedText(mot, Qt.TextElideMode.ElideRight, largeur)
+
+
+def _decouper_en_lignes(mots: list[str], fm: QFontMetrics, largeur: int,
+                        lignes_max: int) -> tuple[list[str], list[str], bool]:
+    """Pose les mots ligne par ligne, sans jamais en couper un.
+
+    Rend les lignes remplies, les mots restés à la porte faute de lignes, et
+    si l'un d'eux a dû être élidé parce qu'il ne tenait pas à lui seul.
+    """
+    lignes: list[str] = []
+    courante = ""
+    elide = False
+    for i, mot in enumerate(mots):
+        rallongee = _ligne_rallongee(courante, mot, fm, largeur)
+        if rallongee:
+            courante = rallongee
+            continue
+        if courante:
+            lignes.append(courante)
+            courante = ""
+        if len(lignes) >= lignes_max:
+            return lignes, list(mots[i:]), elide
+        courante, close = _ouvrir_une_ligne(mot, fm, largeur)
+        if close:
+            lignes.append(close)
+            elide = True
+    if courante:
+        # Une ligne n'est ouverte que s'il en restait une à remplir : celle-ci
+        # a donc toujours sa place.
+        lignes.append(courante)
+    return lignes, [], elide
+
+
+def _replier_au_mot(texte: str, fm: QFontMetrics, largeur: int,
+                    lignes_max: int) -> tuple[str, bool]:
+    """Répartit `texte` sur au plus `lignes_max` lignes de `largeur` pixels.
+
+    Rend le texte à afficher et s'il a fallu en retirer. La coupe tombe entre
+    deux MOTS : « plus que 22 622 € — « Je repein » n'apprend rien de plus
+    que rien du tout, alors que la même phrase repliée se lit en entier.
+    """
+    mots = _mots(texte)
+    if largeur <= 0 or not mots:
+        return texte, False
+    lignes, restants, elide = _decouper_en_lignes(mots, fm, largeur, lignes_max)
+    if restants and lignes:
+        lignes[-1] = _finir_par_points(lignes[-1], fm, largeur)
+    return "\n".join(lignes), bool(restants) or elide
+
+
+class _LigneRepliee(QLabel):
+    """Texte qui se replie ou s'élide, mais ne se coupe jamais en plein mot.
+
+    Le contenu vient d'une API — un nom d'objectif fait trois mots ou vingt —
+    et la largeur du toast, elle, ne bouge pas. Qt coupait donc net, au
+    pixel : « plus que 22 622 € — « Je repein ». On replie sur `lignes_max`
+    lignes, on ne coupe qu'entre deux mots, et l'infobulle garde le texte
+    entier — le survol arrête aussi le décompte, donc on a le temps de lire.
+
+    `au_mot=False` pour un NOM propre, qui tient sur une ligne : « Samuel
+    Etien… » se reconnaît, « Samuel… » se confond avec un autre Samuel.
+    """
+
+    #: Largeur minimale réclamée au layout — de quoi montrer un début de mot.
+    _LARGEUR_PLANCHER = 40
+
+    def __init__(self, texte: str = "", parent: QWidget | None = None,
+                 lignes_max: int = 3, au_mot: bool = True) -> None:
+        super().__init__(parent)
+        self._complet = str(texte or "")
+        self._lignes_max = lignes_max
+        self._au_mot = au_mot
+        # Le repli est calculé ici, pas par Qt : lui ne sait pas élider une
+        # dernière ligne, et couperait de nouveau au pixel au-delà du compte.
+        self.setWordWrap(False)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self._rendre()
+
+    def set_texte(self, texte: str) -> None:
+        self._complet = str(texte or "")
+        self._rendre()
+
+    def texte_complet(self) -> str:
+        """Le texte tel qu'on l'a reçu, replis et « … » exclus."""
+        return self._complet
+
+    def _rendre(self) -> None:
+        # `contentsRect`, pas `width` : les marges internes indentent le
+        # message sous le nom, et les compter comme du texte le ferait
+        # dépasser de leur largeur.
+        fm = QFontMetrics(self.font())
+        largeur = self.contentsRect().width()
+        if largeur <= 0:
+            # Tant que le layout n'a pas placé le widget, il mesure zéro :
+            # élider là ne laisserait qu'un « … ». On garde tout, le prochain
+            # calcul de géométrie tranchera.
+            rendu, tronque = self._complet, False
+        elif self._au_mot:
+            rendu, tronque = _replier_au_mot(self._complet, fm, largeur,
+                                             self._lignes_max)
+        else:
+            rendu = fm.elidedText(self._complet, Qt.TextElideMode.ElideRight,
+                                  largeur)
+            tronque = rendu != self._complet
+        if rendu != self.text():
+            super().setText(rendu)
+            self.updateGeometry()
+        self.setToolTip(_infobulle(self._complet) if tronque else "")
+
+    def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+        """Ne réclame PAS la largeur du texte entier.
+
+        Un QLabel exige d'ordinaire de quoi tout afficher, et la rangée du
+        toast n'ayant pas cette place, le layout la prenait sur les boutons —
+        « Regarder » s'affichait « EGARDE ». Celui-ci sait se replier : il
+        cède la place et coupe proprement.
+        """
+        base = super().minimumSizeHint()
+        return QSize(min(base.width(), self._LARGEUR_PLANCHER), base.height())
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._rendre()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        # La police est posée APRÈS la construction : sans ce rappel, le repli
+        # resterait calculé sur les mesures de la police par défaut.
+        if event.type() == QEvent.Type.FontChange:
+            self._rendre()
+
+
 class _FavoriteLiveToast(QWidget):
     """Annonce en haut à droite qu'un favori vient de lancer son direct.
 
@@ -1316,7 +1494,12 @@ class _FavoriteLiveToast(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self._login = login
-        self.setFixedSize(self._W, self._H)
+        # Largeur figée, hauteur libre : le message peut demander deux ou
+        # trois lignes, et le toast n'a pas de layout parent pour s'en
+        # apercevoir (voir `_ajuster_hauteur`).
+        self.setFixedWidth(self._W)
+        self.setMinimumHeight(self._H)
+        self.resize(self._W, self._H)
         self.setStyleSheet(
             "QWidget#favToast { background: rgba(8,8,8,228);"
             " border: 1px solid #f5c518; border-radius: 6px; }"
@@ -1349,16 +1532,15 @@ class _FavoriteLiveToast(QWidget):
             star.setPixmap(qta.icon("mdi6.star", color="#f5c518").pixmap(12, 12))
         star.setStyleSheet(_FOND_TRANSPARENT_SANS_BORDURE)
         top.addWidget(star)
-        title = QLabel(display or login)
-        title.setTextFormat(Qt.TextFormat.PlainText)
+        # Un nom d'affichage un peu long — « Samuel Etienne » suffit — dépasse
+        # la colonne laissée par les boutons et Qt le coupait sans rien dire.
+        title = _LigneRepliee(display or login, self, lignes_max=1,
+                              au_mot=False)
         title.setFont(QFont(_POLICE_UI_VARIABLE, 11, QFont.Weight.Bold))
         title.setStyleSheet("color: #ffffff; background: transparent; border: none;")
+        self._title = title
         top.addWidget(title, stretch=1)
         col.addLayout(top)
-        self._sub = QLabel("vient de passer en direct")
-        self._sub.setFont(QFont(_POLICE_UI_VARIABLE, 9))
-        self._sub.setStyleSheet("color: #9a9a9a; background: transparent; border: none;")
-        col.addWidget(self._sub)
         hl.addLayout(col, stretch=1)
 
         watch = QPushButton("Regarder")
@@ -1376,6 +1558,16 @@ class _FavoriteLiveToast(QWidget):
         self._boutons.addWidget(watch, 0, Qt.AlignmentFlag.AlignVCenter)
         hl.addLayout(self._boutons)
         root.addWidget(body, stretch=1)
+
+        # Le message est sur SA propre rangée, sous les boutons : coincé dans
+        # la colonne du nom il n'avait que 159 px des 394 du toast, soit un
+        # gros tiers de la phrase à annoncer. Il reste indenté sous le nom,
+        # pour qu'on lise la carte comme un bloc.
+        self._sub = _LigneRepliee("vient de passer en direct", self)
+        self._sub.setContentsMargins(54, 0, 12, 6)
+        self._sub.setFont(QFont(_POLICE_UI_VARIABLE, 9))
+        self._sub.setStyleSheet("color: #9a9a9a; background: transparent; border: none;")
+        root.addWidget(self._sub)
 
         # Barre de temps restant : 3 px sur toute la largeur, en bas.
         self._bar = QProgressBar()
@@ -1400,10 +1592,23 @@ class _FavoriteLiveToast(QWidget):
         self.show()
         self.raise_()
 
+    def _ajuster_hauteur(self) -> None:
+        """Redonne au toast la hauteur que réclame son message.
+
+        Il est posé à la main dans la fenêtre, sans layout parent : personne
+        d'autre ne le redimensionnera. Le layout est activé d'abord pour que
+        la ligne de message connaisse sa largeur — c'est elle qui décide du
+        nombre de replis, donc de la hauteur demandée.
+        """
+        lay = self.layout()
+        if lay is not None:
+            lay.activate()
+        self.resize(self.width(), max(self._H, self.sizeHint().height()))
+
     def set_message(self, texte: str, couleur: str = "") -> None:
         """Réutilise le toast pour une autre annonce que « en direct »."""
-        self._sub.setTextFormat(Qt.TextFormat.PlainText)
-        self._sub.setText(texte)
+        self._sub.set_texte(texte)
+        self._ajuster_hauteur()
         if couleur:
             self.setStyleSheet(
                 "QWidget#favToast { background: rgba(8,8,8,228);"
@@ -1449,6 +1654,9 @@ class _FavoriteLiveToast(QWidget):
         b.clicked.connect(self._on_donate)
         self._boutons.insertWidget(0, b, 0, Qt.AlignmentFlag.AlignVCenter)
         self.setFixedWidth(self._W + 74)
+        # Le message gagne ces 74 px : il peut lui suffire d'une ligne de
+        # moins, donc la hauteur se recalcule.
+        self._ajuster_hauteur()
         parent = self.parentWidget()
         if parent is not None:
             self.move(parent.width() - self.width() - 16, self.y())

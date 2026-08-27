@@ -24,7 +24,7 @@ import json
 
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, Qt
-from PyQt6.QtGui import QEnterEvent, QKeyEvent, QMouseEvent
+from PyQt6.QtGui import QEnterEvent, QFontMetrics, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from windows import fullscreen
@@ -530,7 +530,9 @@ def test_on_n_annonce_pas_le_show_de_la_chaine_affichee(direct):
 def test_un_objectif_imminent_dit_ce_qui_manque(direct):
     """Sans le montant restant, l'alerte ne dit pas si l'objectif est à portée."""
     direct.show_goal_imminent("aypierre", "Aypierre", "Rasage de crâne", 1200.0)
-    texte = _textes(_toasts(direct)[0])
+    # Le message se replie sur plusieurs lignes : c'est la phrase qui compte,
+    # pas l'endroit où le repli tombe.
+    texte = _textes(_toasts(direct)[0]).replace("\n", " ")
     assert "Rasage de crâne" in texte
     assert "1" in texte and "200" in texte
 
@@ -564,6 +566,130 @@ def test_une_entree_dans_le_top_donne_le_rang_et_l_audience(direct):
     texte = _textes(_toasts(direct)[0])
     assert "n°3" in texte
     assert "42" in texte
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ce que le toast a la place de dire
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Relevé à l'écran : « plus que 22 622 € — « Je repein ». Le message vivait
+# dans la colonne du nom, entre l'avatar et les boutons — 159 px des 394 du
+# toast — et Qt le coupait au pixel, sans le moindre signe. Une phrase
+# tranchée en plein mot n'apprend rien : c'est comme si elle n'était pas là.
+
+_BUT_LONG = ("Je repeins intégralement le décor du plateau en rose bonbon "
+             "avec des paillettes et un manteau de fourrure")
+
+
+def _lignes_qui_debordent(lbl) -> list:
+    """Les lignes affichées qui ne tiennent PAS dans la place du label."""
+    fm = QFontMetrics(lbl.font())
+    largeur = lbl.contentsRect().width()
+    return [ligne for ligne in lbl.text().split("\n")
+            if fm.horizontalAdvance(ligne) > largeur + 1]
+
+
+def test_le_message_d_un_objectif_imminent_tient_dans_le_toast(direct):
+    """Le défaut d'origine : la phrase dépassait, donc elle était rognée."""
+    direct.show_goal_imminent("aypierre", "Aypierre",
+                              "Je repeins le décor en rose", 22622.0,
+                              "https://zevent.fr/dons")
+    sub = _toasts(direct)[0]._sub
+    assert _lignes_qui_debordent(sub) == []
+
+
+def test_un_message_replie_ne_perd_pas_un_seul_mot(direct):
+    """Se replier n'est pas se couper : la phrase doit rester entière."""
+    direct.show_goal_imminent("aypierre", "Aypierre",
+                              "Je repeins le décor en rose", 22622.0,
+                              "https://zevent.fr/dons")
+    sub = _toasts(direct)[0]._sub
+    assert sub.text().replace("\n", " ") == sub.texte_complet()
+    assert "\n" in sub.text()          # sans repli, le test ne prouverait rien
+
+
+def test_un_objectif_au_nom_interminable_coupe_entre_deux_mots(direct):
+    """Au-delà de trois lignes il faut bien couper — mais jamais en plein mot,
+    et jamais sans annoncer qu'il manque quelque chose."""
+    direct.show_goal_imminent("aypierre", "Aypierre", _BUT_LONG, 22622.0,
+                              "https://zevent.fr/dons")
+    sub = _toasts(direct)[0]._sub
+    assert _lignes_qui_debordent(sub) == []
+    assert sub.text().endswith("…")
+    dernier = sub.text().replace("\n", " ").rstrip("…").split()[-1]
+    assert dernier in sub.texte_complet().split()
+
+
+def test_un_objectif_au_nom_interminable_se_lit_en_entier_en_infobulle(direct):
+    """Couper sans laisser de quoi lire la suite, c'est ne rien dire du tout.
+
+    Le survol arrête aussi le décompte du toast : on a le temps de lire.
+    """
+    direct.show_goal_imminent("aypierre", "Aypierre", _BUT_LONG, 22622.0,
+                              "https://zevent.fr/dons")
+    assert _BUT_LONG in _toasts(direct)[0]._sub.toolTip()
+
+
+def test_un_message_qui_tient_sur_une_ligne_ne_promet_pas_de_suite(direct):
+    """Une infobulle sur un texte complet ferait chercher ce qui n'existe pas."""
+    direct.show_favorite_live("domingo", "Domingo")
+    sub = _toasts(direct)[0]._sub
+    assert "\n" not in sub.text()
+    assert sub.toolTip() == ""
+
+
+def test_un_message_court_ne_fait_pas_grandir_le_toast(direct):
+    """La hauteur ne varie que lorsqu'elle sert : les annonces d'un mot
+    gardent la carte compacte qu'on connaît."""
+    direct.show_favorite_live("domingo", "Domingo")
+    assert _toasts(direct)[0].height() == fullscreen._FavoriteLiveToast._H
+
+
+def test_un_message_long_fait_grandir_le_toast(direct):
+    """Il grandit vers le BAS depuis un coin haut fixe : rien ne se décale."""
+    direct.show_goal_imminent("aypierre", "Aypierre", _BUT_LONG, 22622.0,
+                              "https://zevent.fr/dons")
+    toast = _toasts(direct)[0]
+    assert toast.height() > fullscreen._FavoriteLiveToast._H
+    assert toast.pos().y() == 16 + direct._pinned_audio.height_hint()
+
+
+def test_la_barre_de_temps_reste_au_bas_d_un_toast_agrandi(direct):
+    """Elle dit le temps qui reste : recouverte par le message, elle ne dirait
+    plus rien."""
+    direct.show_goal_imminent("aypierre", "Aypierre", _BUT_LONG, 22622.0,
+                              "https://zevent.fr/dons")
+    toast = _toasts(direct)[0]
+    QApplication.processEvents()
+    bas_du_message = toast._sub.y() + toast._sub.height()
+    assert toast._bar.y() >= bas_du_message
+    assert toast._bar.y() + toast._bar.height() <= toast.height()
+
+
+def test_le_nom_du_streamer_s_elide_au_lieu_d_etre_coupe(direct):
+    """« Samuel Etienne » dépasse la colonne laissée par les deux boutons.
+
+    Coupé au pixel il devenait « Samuel Etienn », sans rien pour le signaler ;
+    élidé, les « … » le disent et l'infobulle rend le nom entier.
+    """
+    direct.show_goal_imminent("samuel", "Samuel Etienne", "Un objectif",
+                              500.0, "https://zevent.fr/dons")
+    titre = _toasts(direct)[0]._title
+    assert _lignes_qui_debordent(titre) == []
+    if titre.text() != "Samuel Etienne":
+        assert titre.text().endswith("…")
+        assert "Samuel Etienne" in titre.toolTip()
+
+
+def test_le_nom_du_streamer_n_ecrase_pas_les_boutons(direct):
+    """Un QLabel réclame de quoi tout afficher, et le layout prenait cette
+    place sur les boutons : « Regarder » s'affichait « EGARDE »."""
+    direct.show_goal_imminent("samuel", "Samuel Etienne", "Un objectif",
+                              500.0, "https://zevent.fr/dons")
+    boutons = _toasts(direct)[0].findChildren(QPushButton)
+    assert boutons
+    for bouton in boutons:
+        assert bouton.width() >= bouton.sizeHint().width()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

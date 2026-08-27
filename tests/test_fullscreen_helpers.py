@@ -43,6 +43,118 @@ def test_infobulle_neutralise_le_texte_riche():
     assert sortie.startswith("<qt>") and sortie.endswith("</qt>")
 
 
+# ── replier un texte plutôt que le trancher ──────────────────────────────────
+#
+# Un toast est large de 394 px et le nom d'un objectif fait ce qu'il veut. Ce
+# qui s'affichait avant : « plus que 22 622 € — « Je repein ». Ces mesures
+# sont en pixels, donc dépendantes de la police : rien n'y est comparé à une
+# chaîne attendue, seulement à ce que la métrique dit tenir.
+
+_PHRASE = "plus que 22 622 euros pour repeindre le decor du plateau en rose"
+
+
+@pytest.fixture
+def metrique(qapp):
+    """Métrique de la police du toast — il faut une QApplication pour l'avoir."""
+    from PyQt6.QtGui import QFont, QFontMetrics
+    return QFontMetrics(QFont("Segoe UI", 9))
+
+
+def _tiennent(lignes: list[str], fm, largeur: int) -> bool:
+    return all(fm.horizontalAdvance(ligne) <= largeur for ligne in lignes)
+
+
+def test_un_texte_qui_tient_reste_sur_une_ligne(metrique):
+    largeur = metrique.horizontalAdvance(_PHRASE) + 10
+    rendu, tronque = fullscreen._replier_au_mot(_PHRASE, metrique, largeur, 3)
+    assert rendu == _PHRASE and tronque is False
+
+
+def test_le_repli_tombe_entre_deux_mots(metrique):
+    """Coupé en plein mot, un message n'apprend rien : c'est le défaut relevé."""
+    largeur = metrique.horizontalAdvance(_PHRASE) // 3
+    rendu, tronque = fullscreen._replier_au_mot(_PHRASE, metrique, largeur, 5)
+    assert "\n" in rendu          # sans repli, le test ne prouverait rien
+    assert rendu.replace("\n", " ") == _PHRASE
+    assert tronque is False
+    assert _tiennent(rendu.split("\n"), metrique, largeur)
+
+
+def test_un_montant_ne_se_replie_pas_en_deux_nombres(metrique):
+    """La fine insécable de « 22 622 € » n'est pas un endroit où couper."""
+    texte = "plus que 22 622 €"
+    # De quoi tenir le plus large des deux morceaux, mais pas les deux :
+    # le repli doit donc tomber APRES « que », jamais dans le montant.
+    largeur = max(metrique.horizontalAdvance("plus que"),
+                  metrique.horizontalAdvance(texte[9:])) + 4
+    rendu, _ = fullscreen._replier_au_mot(texte, metrique, largeur, 4)
+    assert "22 622" in rendu
+
+
+def test_au_dela_du_compte_de_lignes_la_phrase_s_arrete_sur_des_points(metrique):
+    """Trois lignes suffisent à un toast ; au-delà on coupe, mais on le DIT."""
+    largeur = metrique.horizontalAdvance(_PHRASE) // 6
+    rendu, tronque = fullscreen._replier_au_mot(_PHRASE, metrique, largeur, 2)
+    lignes = rendu.split("\n")
+    assert len(lignes) == 2
+    assert tronque is True
+    assert rendu.endswith("…")
+    assert _tiennent(lignes, metrique, largeur)
+    # Le dernier mot montré est un mot ENTIER de la phrase d'origine.
+    assert rendu.replace("\n", " ").rstrip("…").split()[-1] in _PHRASE.split()
+
+
+def test_un_mot_plus_large_que_la_place_est_signale_comme_tronque(metrique):
+    """Aucune coupe au mot n'est possible : reste l'infobulle, qu'on déclenche
+    en rendant `tronque` vrai."""
+    mot = "Anticonstitutionnellement" * 2
+    largeur = metrique.horizontalAdvance("Anti")
+    rendu, tronque = fullscreen._replier_au_mot(mot, metrique, largeur, 3)
+    assert tronque is True
+    assert rendu.endswith("…")
+
+
+def test_une_largeur_encore_inconnue_rend_le_texte_tel_quel(metrique):
+    """Avant le premier calcul de layout, un widget mesure zéro : replier là
+    donnerait une ligne par mot."""
+    rendu, tronque = fullscreen._replier_au_mot(_PHRASE, metrique, 0, 3)
+    assert rendu == _PHRASE and tronque is False
+
+
+def test_un_texte_vide_ne_leve_pas(metrique):
+    assert fullscreen._replier_au_mot("", metrique, 100, 3) == ("", False)
+
+
+def test_les_points_de_suspension_font_lacher_un_mot_de_plus(metrique):
+    """Les « … » prennent de la place eux aussi : ajoutés à une ligne pleine,
+    ils la feraient déborder, donc on lâche le dernier mot."""
+    ligne = "un deux trois"
+    largeur = metrique.horizontalAdvance(ligne)
+    rendu = fullscreen._finir_par_points(ligne, metrique, largeur)
+    assert metrique.horizontalAdvance(rendu) <= largeur
+    assert rendu == "un deux…"
+
+
+def test_une_ligne_vide_se_reduit_aux_points(metrique):
+    """Garde-fou : rien à montrer, mais il manque quelque chose — dis-le."""
+    assert fullscreen._finir_par_points("", metrique, 100) == "…"
+
+
+def test_un_nom_sans_largeur_connue_est_rendu_tel_quel(qtbot):
+    """Un widget mesure zéro tant que le layout ne l'a pas placé : élider là
+    ne laisserait qu'un « … », et rien à lire."""
+    from PyQt6.QtWidgets import QWidget
+
+    hote = QWidget()
+    qtbot.addWidget(hote)
+    lbl = fullscreen._LigneRepliee("Samuel Etienne", hote, lignes_max=1,
+                                   au_mot=False)
+    lbl.resize(0, 20)
+    lbl._rendre()   # Qt ne renvoie pas d'événement pour une taille nulle
+    assert lbl.text() == "Samuel Etienne"
+    assert lbl.toolTip() == ""
+
+
 # ── ouverture d'une page de don ──────────────────────────────────────────────
 
 @pytest.fixture
