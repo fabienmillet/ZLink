@@ -1,4 +1,4 @@
-![Banner](./assets/ZLINK-Banner2.png)
+![Banner](./assets/ZLINK-Banner.png)
 
 <p align="center">
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-00ff87?style=flat-square"></a>
