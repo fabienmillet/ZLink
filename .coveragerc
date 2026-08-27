@@ -17,8 +17,22 @@ omit =
     */.venv/*
     */tests/*
     # Scripts de publication : exécutés par la CI, pas par l'application.
-    scripts/gen_release_key.py
-    scripts/sign_release.py
+    #
+    # Le dossier ENTIER, et non deux fichiers nommés. Seuls gen_release_key et
+    # sign_release y figuraient ; check_bootloader, gen_icons et gen_sounds
+    # remontaient donc à 0 %, comme s'il s'agissait d'un oubli. C'en était un,
+    # mais dans la liste d'exclusion — pas dans les tests.
+    scripts/*
+    # Chaîne de construction de l'extension Stream Deck : même nature que
+    # scripts/ — elle bâtit un livrable, elle ne tourne pas dans ZLink.
+    #
+    # Elle n'entrait pas dans la mesure jusqu'ici, faute d'être importée. Un
+    # test l'a fait, et elle s'est installée à 27 % — un manque apparent que
+    # personne n'a l'intention de combler. Le test garde sa valeur : il
+    # empêche une régression, pas il ne remplit un compteur.
+    streamdeck/construire.py
+    streamdeck/gen_icones.py
+    streamdeck/gen_profils.py
     # Outil de diagnostic, hors application.
     tools_gpu_watch.py
     # main.py doit rester EXCLU, bien que SonarQube l'analyse.
