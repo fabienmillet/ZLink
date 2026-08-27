@@ -209,3 +209,83 @@ def test_le_fond_ne_deteint_pas_sur_les_enfants(palette):
     la ligne de saisie et la liste."""
     assert palette.objectName() == "commandPalette"
     assert "#commandPalette" in palette.styleSheet()
+
+
+# ── la boîte suit son contenu ────────────────────────────────────────────────
+
+def _STREAMERS_TEST():
+    """Assez de chaînes pour que la liste atteigne son plafond."""
+    return [_FauxStreamer(f"zed{i}", 100 - i) for i in range(12)] + [
+        _FauxStreamer("artemize", 0, online=False)]
+
+
+@pytest.fixture
+def palette_peuplee(palette):
+    """La palette garnie, sur un hôte AFFICHÉ.
+
+    Qt n'applique la géométrie aux enfants d'une fenêtre cachée qu'à son
+    affichage : sans ce `show`, le cadre resterait haut de trente pixels et
+    toute mesure de débordement porterait sur du vide.
+    """
+    palette._parent_du_test.show()
+    palette.set_streamers(_STREAMERS_TEST())
+    return palette
+
+
+def _boite_et_aide(palette):
+    boite = palette._boite
+    return boite, boite.layout().itemAt(2).widget()
+
+
+def test_la_hauteur_suit_le_nombre_de_resultats(palette_peuplee):
+    """La palette gardait la taille de son PREMIER affichage.
+
+    `setFixedHeight` sur la liste marque la mise en page à refaire, mais Qt ne
+    la refait qu'au traitement d'un événement posté : `adjustSize`, appelé
+    dans la foulée, lisait l'ancienne taille.
+    """
+    p = palette_peuplee
+    p.open()
+    large = p.height()
+    p._input.setText("zed1")
+    etroite = p.height()
+    assert etroite < large, "la palette doit se resserrer sur peu de résultats"
+    p._input.setText("")
+    assert p.height() == large, "et se rouvrir quand ils reviennent"
+
+
+def test_rien_ne_deborde_de_la_palette(palette_peuplee):
+    """Les lignes se peignaient par-dessus la ligne d'aide."""
+    p = palette_peuplee
+    p.open()
+    for texte in ("", "zed", "zed1", "", "artem", "ze"):
+        p._input.setText(texte)
+        boite, aide = _boite_et_aide(p)
+        bas = boite.y() + aide.y() + aide.height()
+        assert bas <= p.height(), f"débordement de {bas - p.height()} px sur {texte!r}"
+
+
+def test_aucun_vide_au_dessus_du_champ(palette_peuplee):
+    """La boîte flottait au milieu d'une palette restée trop haute."""
+    p = palette_peuplee
+    p.open()
+    for texte in ("zed1", "artem", ""):
+        p._input.setText(texte)
+        assert p._boite.y() == 0, f"{p._boite.y()} px de vide sur {texte!r}"
+
+
+def test_une_palette_ouverte_sans_streamers_s_agrandit_ensuite(palette_peuplee):
+    """Le cas réel : Ctrl+K avant que le premier sondage ait répondu.
+
+    La palette se figeait alors à sa taille minimale, et les résultats
+    suivants débordaient par le bas.
+    """
+    p = palette_peuplee
+    p.set_streamers([])
+    p.open()
+    minuscule = p.height()
+    p.set_streamers(_STREAMERS_TEST())
+    p._input.setText("zed")
+    assert p.height() > minuscule
+    boite, aide = _boite_et_aide(p)
+    assert boite.y() + aide.y() + aide.height() <= p.height()

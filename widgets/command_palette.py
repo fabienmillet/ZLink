@@ -148,6 +148,7 @@ class CommandPalette(QWidget):
         bl.addWidget(hint)
 
         root.addWidget(box)
+        self._boite = box
 
     # -- données ---------------------------------------------------------------
 
@@ -165,8 +166,32 @@ class CommandPalette(QWidget):
         self._input.setFocus()
 
     def _se_placer(self) -> None:
-        """Centre la boîte horizontalement, un peu au-dessus du milieu."""
+        """Ajuste la hauteur au contenu, puis centre la boîte horizontalement.
+
+        `setFixedHeight` sur la liste marque bien la mise en page à refaire,
+        mais Qt ne la refait qu'au traitement d'un événement POSTÉ. Or
+        `adjustSize` est appelé dans la foulée : il lisait encore l'ancienne
+        taille, et la palette gardait celle qu'elle avait à son tout premier
+        affichage.
+
+        Les deux symptômes en découlaient : un grand vide au-dessus du champ
+        quand les résultats se raréfiaient — la boîte flottait au milieu d'une
+        palette trop haute — et des lignes peintes par-dessus l'aide quand ils
+        se multipliaient, la palette étant restée trop basse.
+
+        On force donc les deux mises en page à se refaire AVANT de mesurer.
+        """
+        interieur, exterieur = self._boite.layout(), self.layout()
+        for mise_en_page in (interieur, exterieur):
+            if mise_en_page is not None:
+                mise_en_page.activate()
         self.adjustSize()
+        # Une seconde fois APRÈS la mesure : `adjustSize` change la taille de
+        # la palette, et le cadre ne s'y conforme qu'à la mise en page
+        # suivante. Sans ce tour, il gardait la géométrie calculée pour
+        # l'ancienne taille — c'est lui qu'on voyait déborder ou flotter.
+        if exterieur is not None:
+            exterieur.activate()
         parent = self.parentWidget()
         if parent is None:
             return
@@ -248,8 +273,12 @@ class CommandPalette(QWidget):
         # La boîte suit le nombre de résultats plutôt que l'inverse.
         lignes = max(1, len(self._results))
         self._list.setFixedHeight(lignes * self._LIGNE + 4)
-        if self.isVisible():
-            self._se_placer()
+        # Sans condition de visibilité : `isVisible` est faux tant que la
+        # fenêtre hôte n'est pas affichée, et la palette gardait alors la
+        # taille de son premier calcul. Redimensionner une palette cachée ne
+        # coûte rien, et la faire dépendre de son état rendait le défaut
+        # intermittent — donc introuvable.
+        self._se_placer()
 
     def _photo(self, login: str) -> QPixmap:
         """Photo du streamer, ou un pixmap vide tant qu'elle n'est pas arrivée.
