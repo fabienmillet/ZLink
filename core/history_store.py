@@ -139,6 +139,29 @@ class HistoryStore:
         # et l'extrapoler produirait une projection négative.
         return rate if rate >= 0.0 else None
 
+    def _horizon(self, end_ts: float) -> float | None:
+        """Jusqu'où extrapoler, ou None si extrapoler n'a pas de sens.
+
+        Pendant l'édition, c'est sa fin. En dehors, rien : projeter jusqu'au
+        7 septembre depuis une date d'août donnait des milliards, et c'est
+        pour ça que le garde-fou existe.
+
+        En test, ce garde-fou fermait la porte que DEBUG venait d'ouvrir : la
+        série et la vitesse revenaient bien, mais la projection restait vide et
+        l'Accueil affichait « disponible au début de l'event » alors que le
+        mode mock injectait des dons à chaque seconde. On extrapole alors sur
+        la DURÉE d'une édition comptée depuis le premier relevé — le mock
+        simule un événement en cours, la projection porte donc sur un
+        événement de même longueur, et garde un ordre de grandeur plausible
+        au lieu de courir sur deux semaines.
+        """
+        maintenant = time.time()
+        if _EVENT_START <= maintenant <= _EVENT_END:
+            return end_ts
+        if not DEBUG or self._live_depuis is None:
+            return None
+        return self._live_depuis + (_EVENT_END - _EVENT_START)
+
     def projected_total(self, end_ts: float, window_s: float = 3600.0) -> float | None:
         """Extrapole la cagnotte finale à la vitesse récente.
 
@@ -149,9 +172,10 @@ class HistoryStore:
         Retourne None hors de l'édition : extrapoler quatorze jours avant le
         coup d'envoi n'a aucun sens et donnait des milliards.
         """
-        now_wall = time.time()
-        if not (_EVENT_START <= now_wall <= _EVENT_END):
+        horizon = self._horizon(end_ts)
+        if horizon is None:
             return None
+        end_ts = horizon
         ts_all, vals_all = self.get_donation_series()
         if not ts_all:
             return None

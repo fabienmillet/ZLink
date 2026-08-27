@@ -349,10 +349,50 @@ def test_une_pente_nulle_reste_une_vitesse(horloge):
 
 # ── projection ───────────────────────────────────────────────────────────────
 
-def test_pas_de_projection_hors_de_l_edition(horloge):
+def test_pas_de_projection_hors_de_l_edition(horloge, monkeypatch):
     """Extrapoler quatorze jours avant le coup d'envoi donnait des milliards."""
+    monkeypatch.setattr(history_store, "DEBUG", False)
     store = HistoryStore()
     _remplir(store, horloge, [(0, 0.0, 10), (600, 6000.0, 10)])
+    horloge["t"] = _EVENT_START - 1.0
+    assert store.projected_total(_EVENT_END) is None
+
+
+def test_en_test_la_projection_porte_sur_une_edition_simulee(horloge, monkeypatch):
+    """Le garde-fou ci-dessus refermait la porte que DEBUG venait d'ouvrir.
+
+    La série et la vitesse revenaient bien, mais la projection restait vide :
+    l'Accueil affichait « disponible au début de l'event » pendant que le mode
+    mock injectait des dons à chaque seconde.
+
+    L'horizon devient la DURÉE d'une édition comptée depuis le premier relevé,
+    et non le 7 septembre : projeter sur deux semaines redonnerait les
+    milliards que le garde-fou évitait.
+    """
+    monkeypatch.setattr(history_store, "DEBUG", True)
+    store = HistoryStore()
+    depart = _EVENT_START - 14 * 86400.0
+    horloge["t"] = depart
+    store.add_point(0.0, 10)
+    horloge["t"] = depart + 600.0
+    store.add_point(6000.0, 10)
+
+    projete = store.projected_total(_EVENT_END)
+    assert projete is not None
+    # L'horizon est la durée d'une édition depuis le PREMIER relevé, dont dix
+    # minutes sont déjà écoulées quand on projette.
+    reste_min = (_EVENT_END - _EVENT_START) / 60.0 - 10.0
+    attendu = 6000.0 + store.donation_rate() * reste_min
+    assert projete == pytest.approx(attendu, rel=0.001)
+    # Et surtout : un ordre de grandeur d'événement, pas les milliards que le
+    # garde-fou évitait en projetant jusqu'au 7 septembre.
+    assert projete < 100_000_000.0
+
+
+def test_sans_releve_en_direct_aucune_projection_hors_edition(horloge, monkeypatch):
+    """Rien d'observé, rien à extrapoler — même en test."""
+    monkeypatch.setattr(history_store, "DEBUG", True)
+    store = HistoryStore()
     horloge["t"] = _EVENT_START - 1.0
     assert store.projected_total(_EVENT_END) is None
 
