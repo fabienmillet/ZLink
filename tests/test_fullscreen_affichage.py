@@ -598,36 +598,75 @@ def test_le_message_d_un_objectif_imminent_tient_dans_le_toast(direct):
     assert _lignes_qui_debordent(sub) == []
 
 
-def test_un_message_replie_ne_perd_pas_un_seul_mot(direct):
-    """Se replier n'est pas se couper : la phrase doit rester entière."""
-    direct.show_goal_imminent("aypierre", "Aypierre",
-                              "Je repeins le décor en rose", 22622.0,
-                              "https://zevent.fr/dons")
-    sub = _toasts(direct)[0]._sub
+def _ligne_pincee(qtbot, texte, lignes_max, tiers=3):
+    """Un `_LigneRepliee` large d'un TIERS de son texte, quelle que soit la police.
+
+    Passer par le vrai toast liait ces tests aux métriques du poste : sa
+    largeur est fixe, celle du texte non. Sans base de polices, Linux mesure la
+    même phrase plus étroite — elle tenait sur une ligne, le repli n'avait
+    jamais lieu, et la CI tombait là où Windows passait. Une largeur en pixels
+    codée en dur aurait le même défaut à l'envers.
+
+    On mesure donc le texte AVEC LA POLICE DU WIDGET, et on prend une fraction
+    de cette largeur : il faut alors le même nombre de lignes partout, et c'est
+    `lignes_max` seul qui décide s'il faut couper.
+    """
+    lbl = fullscreen._LigneRepliee(texte, lignes_max=lignes_max)
+    qtbot.addWidget(lbl)
+    entier = QFontMetrics(lbl.font()).horizontalAdvance(texte)
+    # `contentsRect` retire les marges : on vise la largeur UTILE.
+    marges = lbl.width() - lbl.contentsRect().width()
+    lbl.resize(max(40, entier // tiers) + marges, 200)
+    return lbl
+
+
+def test_un_message_replie_ne_perd_pas_un_seul_mot(qtbot):
+    """Se replier n'est pas se couper : la phrase doit rester entière.
+
+    Dix lignes autorisées pour un tiers de largeur : le repli est certain — il
+    en faut au moins trois — et la coupe impossible, on en permet dix.
+    """
+    texte = "plus que 22 622 € — « Je repeins le décor en rose »"
+    sub = _ligne_pincee(qtbot, texte, lignes_max=10)
     assert sub.text().replace("\n", " ") == sub.texte_complet()
-    assert "\n" in sub.text()          # sans repli, le test ne prouverait rien
+    assert "\n" in sub.text(), "sans repli, le test ne prouverait rien"
+    assert _lignes_qui_debordent(sub) == []
+    assert sub.toolTip() == "", "rien n'a été perdu : rien à promettre"
 
 
-def test_un_objectif_au_nom_interminable_coupe_entre_deux_mots(direct):
-    """Au-delà de trois lignes il faut bien couper — mais jamais en plein mot,
-    et jamais sans annoncer qu'il manque quelque chose."""
-    direct.show_goal_imminent("aypierre", "Aypierre", _BUT_LONG, 22622.0,
-                              "https://zevent.fr/dons")
-    sub = _toasts(direct)[0]._sub
+def test_un_objectif_au_nom_interminable_coupe_entre_deux_mots(qtbot):
+    """Au-delà du compte de lignes il faut bien couper — mais jamais en plein
+    mot, et jamais sans annoncer qu'il manque quelque chose.
+
+    Une seule ligne autorisée pour un texte qui en réclame trois : la coupe est
+    certaine, quelle que soit la police.
+    """
+    sub = _ligne_pincee(qtbot, _BUT_LONG, lignes_max=1)
     assert _lignes_qui_debordent(sub) == []
     assert sub.text().endswith("…")
     dernier = sub.text().replace("\n", " ").rstrip("…").split()[-1]
-    assert dernier in sub.texte_complet().split()
+    assert dernier in sub.texte_complet().split(), "coupé en plein mot"
 
 
-def test_un_objectif_au_nom_interminable_se_lit_en_entier_en_infobulle(direct):
+def test_un_objectif_au_nom_interminable_se_lit_en_entier_en_infobulle(qtbot):
     """Couper sans laisser de quoi lire la suite, c'est ne rien dire du tout.
 
     Le survol arrête aussi le décompte du toast : on a le temps de lire.
     """
-    direct.show_goal_imminent("aypierre", "Aypierre", _BUT_LONG, 22622.0,
+    sub = _ligne_pincee(qtbot, _BUT_LONG, lignes_max=1)
+    assert _BUT_LONG in sub.toolTip()
+
+
+def test_le_toast_reel_ne_perd_ni_ne_deborde(direct):
+    """Le même contrat, mais sur le vrai toast : ses dimensions dépendent de la
+    police, donc on n'y éprouve que ce qui en est indépendant."""
+    direct.show_goal_imminent("aypierre", "Aypierre",
+                              "Je repeins le décor en rose", 22622.0,
                               "https://zevent.fr/dons")
-    assert _BUT_LONG in _toasts(direct)[0]._sub.toolTip()
+    sub = _toasts(direct)[0]._sub
+    assert _lignes_qui_debordent(sub) == []
+    rendu = sub.text().replace("\n", " ").rstrip("…").strip()
+    assert sub.texte_complet().startswith(rendu), "aucun mot inventé ni mutilé"
 
 
 def test_un_message_qui_tient_sur_une_ligne_ne_promet_pas_de_suite(direct):
