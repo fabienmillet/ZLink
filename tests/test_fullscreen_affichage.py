@@ -1051,7 +1051,7 @@ def test_toute_action_proposee_par_la_palette_est_executable(direct):
     """Une commande listée qui ne fait rien est indiscernable d'une panne.
 
     `CommandPalette._ACTIONS` est le catalogue COMMUN aux deux palettes ;
-    `_actions` est ce que celle-ci propose vraiment, filtré sur ce que son
+    `_actions_de_l_hote` est ce que celle-ci propose vraiment, filtré sur ce que son
     hôte sait exécuter. `FullscreenWindow.ACTIONS` est cette liste-là.
 
     Le panel intercepte « recap » avant de relayer le reste ; le plein écran
@@ -1059,7 +1059,7 @@ def test_toute_action_proposee_par_la_palette_est_executable(direct):
     inconnue meurt dans un `logger.debug`. Sans filtre, la commande était
     listée, cliquable, et sans effet.
     """
-    proposees = {cle for cle, _libelle in direct._palette._actions}
+    proposees = {cle for cle, _libelle in direct._palette._actions_de_l_hote}
     assert proposees <= set(direct.ACTIONS)
     assert "recap" not in proposees, "seul le panel sait montrer le récapitulatif"
 
@@ -1436,3 +1436,30 @@ def test_la_veille_se_relache_une_fois_le_toast_montre(direct, monkeypatch):
     direct._on_ad_ended("zerator")
 
     assert arretees == ["zerator"], "plus personne n'attend cette chaîne"
+
+
+# ── horloge du coin ──────────────────────────────────────────────────────────
+
+def test_l_heure_s_affiche_dans_le_coin_du_plein_ecran(direct):
+    """Le plein écran rétracte la barre des tâches : plus aucune horloge."""
+    from PyQt6.QtCore import QTime
+
+    direct.rafraichir_heure(QTime(21, 47))
+    assert direct._ov_heure.text() == "21:47"
+
+
+def test_l_horloge_du_plein_ecran_bat_a_la_seconde(direct):
+    assert direct._horloge.interval() == 1000
+    assert direct._horloge.isActive()
+
+
+def test_l_heure_du_plein_ecran_n_est_reecrite_que_si_elle_change(direct):
+    from PyQt6.QtCore import QTime
+
+    direct.rafraichir_heure(QTime(9, 5))
+    ecritures = []
+    direct._ov_heure.setText = ecritures.append
+    direct.rafraichir_heure(QTime(9, 5))
+    assert ecritures == []
+    direct.rafraichir_heure(QTime(9, 6))
+    assert ecritures == ["09:06"]

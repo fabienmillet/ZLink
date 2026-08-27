@@ -25,6 +25,7 @@ from PyQt6.QtCore import (
     QRectF,
     QSize,
     Qt,
+    QTime,
     QTimer,
     pyqtProperty,
     pyqtSignal,
@@ -1099,8 +1100,24 @@ class _OdometerWidget(QWidget):
 # Composant 3 — Card cagnotte
 # ---------------------------------------------------------------------------
 
+def _fmt_euros_compact(n: float) -> str:
+    """Euros sans décimale, espace insécable en séparateur.
+
+    Insécable pour que « 12 400 € » ne se coupe jamais en fin de ligne : la
+    carte est étroite, et un montant scindé se lit comme deux nombres.
+    """
+    return f"{int(n):,} €".replace(",", " ")
+
+
 class _CagnotteCard(QFrame):
-    """Overlay bas-gauche : cagnotte totale + barre + viewers."""
+    """Overlay bas-gauche : heure, cagnotte totale, vitesse de collecte, viewers.
+
+    L'heure tient dans la place laissée libre à droite du titre. Sur un écran
+    occupé de bout en bout par ZLink — grand écran, plein écran — la barre des
+    tâches est rétractée et il n'y a plus une seule horloge à portée de regard,
+    alors qu'un soir de ZEvent on regarde l'heure sans arrêt : les paliers, le
+    programme, la relève.
+    """
 
     _W = 380
 
@@ -1116,14 +1133,33 @@ class _CagnotteCard(QFrame):
         vl.setContentsMargins(24, 20, 24, 20)
         vl.setSpacing(8)
 
+        ligne_titre = QHBoxLayout()
+        ligne_titre.setContentsMargins(0, 0, 0, 0)
+        ligne_titre.setSpacing(8)
         section = QLabel("CAGNOTTE TOTALE")
         section.setFont(QFont("Consolas", 10))
         section.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
-        vl.addWidget(section)
+        ligne_titre.addWidget(section)
+        ligne_titre.addStretch()
+        self._heure_lbl = QLabel("")
+        self._heure_lbl.setFont(QFont("Consolas", 10))
+        self._heure_lbl.setStyleSheet(
+            "color: #777777; background: transparent; border: none;")
+        ligne_titre.addWidget(self._heure_lbl)
+        vl.addLayout(ligne_titre)
 
         _odo_font = QFont("Consolas", 44, QFont.Weight.Bold)
         self._amount_odo = _OdometerWidget(_odo_font, self)
         vl.addWidget(self._amount_odo)
+
+        # Ce que la cagnotte gagne par heure. Le total dit où on en est, pas
+        # si ça monte : c'est pourtant la question, un soir d'événement.
+        self._rythme_lbl = QLabel("")
+        self._rythme_lbl.setFont(QFont("Consolas", 11))
+        self._rythme_lbl.setStyleSheet(
+            "color: #00ff87; background: transparent; border: none;")
+        self._rythme_lbl.hide()
+        vl.addWidget(self._rythme_lbl)
 
         # Barre de progression
         self._progress_bar = _ProgressBar(self)
@@ -1145,7 +1181,35 @@ class _CagnotteCard(QFrame):
         self._viewers_lbl.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
         vl.addWidget(self._viewers_lbl)
 
+        # Une seconde, pas une minute : au tour de minute, une horloge qui se
+        # rafraîchit à la minute a jusqu'à soixante secondes de retard, et on
+        # la croit arrêtée. Le libellé n'est réécrit que s'il change.
+        self._horloge = QTimer(self)
+        self._horloge.setInterval(1000)
+        self._horloge.timeout.connect(self.rafraichir_heure)
+        self._horloge.start()
+        self.rafraichir_heure()
+
         self.adjustSize()
+
+    def rafraichir_heure(self, maintenant: "QTime | None" = None) -> None:
+        """Met l'horloge à l'heure locale."""
+        texte = (maintenant or QTime.currentTime()).toString("HH:mm")
+        if texte != self._heure_lbl.text():
+            self._heure_lbl.setText(texte)
+
+    def update_rate(self, euros_par_heure: float | None) -> None:
+        """Vitesse de collecte, ou rien tant qu'on ne peut pas la mesurer.
+
+        Masquée plutôt que mise à zéro : « 0 €/h » affirme que rien ne rentre,
+        alors qu'avant l'événement il n'y a simplement pas encore de série à
+        comparer.
+        """
+        if not euros_par_heure or euros_par_heure <= 0:
+            self._rythme_lbl.hide()
+            return
+        self._rythme_lbl.setText(f"+ {_fmt_euros_compact(euros_par_heure)} / h")
+        self._rythme_lbl.show()
 
     def update_stats(self, stats: "GlobalStats") -> None:
         amount = stats.donation_formatted
@@ -1405,6 +1469,18 @@ class BigScreenWidget(QWidget):
     def update_stats(self, stats: "GlobalStats") -> None:
         """Met à jour la cagnotte."""
         self._cagnotte_card.update_stats(stats)
+
+    def update_history(self, history) -> None:
+        """Vitesse de collecte, lue sur la série de l'édition en cours.
+
+        `donation_rate` rend des euros par MINUTE, et None tant que deux
+        relevés ne sont pas assez espacés — ou hors de la fenêtre de
+        l'événement, où il n'y a pas encore de série. La carte masque alors
+        la ligne, plutôt que d'annoncer zéro.
+        """
+        par_minute = history.donation_rate() if history is not None else None
+        self._cagnotte_card.update_rate(
+            par_minute * 60.0 if par_minute else None)
 
     def update_goals(self, goals: "list[GoalWithStreamer]") -> None:
         """Met à jour les objectifs proches."""

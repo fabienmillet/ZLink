@@ -6687,9 +6687,10 @@ class PanelWindow(QMainWindow):
         self._accueil_tab.update_events(events)
 
     def update_history(self, history: HistoryStore) -> None:
-        """Mise à jour des graphes d'historique (Accueil + Stats)."""
+        """Mise à jour des graphes d'historique (Accueil + Stats + grand écran)."""
         self._accueil_tab.update_history(history)
         self._stats_tab.update_history(history)
+        self._bigscreen.update_history(history)
 
     def update_goals(self, goals: list[GoalWithStreamer]) -> None:
         """Propagé depuis DataManager.goals_updated."""

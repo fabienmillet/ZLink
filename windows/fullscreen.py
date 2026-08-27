@@ -24,6 +24,7 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QRect,
     Qt,
+    QTime,
     QTimer,
     QUrl,
     pyqtSignal,
@@ -2243,6 +2244,25 @@ class FullscreenWindow(QMainWindow):
         self._clip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._clip_btn.clicked.connect(self._save_clip)
         rl.addWidget(self._clip_btn)
+
+        # L'heure, dans le coin. Le plein écran rétracte la barre des tâches :
+        # sur cet écran il ne reste aucune horloge, et un soir de ZEvent on
+        # regarde l'heure sans arrêt — paliers, programme, relève.
+        self._ov_heure = QLabel()
+        self._ov_heure.setFont(QFont("Consolas", 13))
+        self._ov_heure.setStyleSheet(
+            "color: #777777; background: transparent; border: none;")
+        self._ov_heure.setContentsMargins(14, 0, 0, 0)
+        rl.addWidget(self._ov_heure)
+
+        # Une seconde, pas une minute : sinon l'affichage a jusqu'à soixante
+        # secondes de retard au tour de minute, et l'horloge paraît arrêtée.
+        self._horloge = QTimer(self)
+        self._horloge.setInterval(1000)
+        self._horloge.timeout.connect(self.rafraichir_heure)
+        self._horloge.start()
+        self.rafraichir_heure()
+
         ol.addWidget(_right, stretch=1)
 
         self._remote_menu = RemoteMenu(central)
@@ -2462,6 +2482,16 @@ class FullscreenWindow(QMainWindow):
             parts.append(f"<span style='color:#888888;'> · {depuis}</span>")
         self._ov_info.setText("".join(parts))
         self._info_courante = (login, game)
+
+    def rafraichir_heure(self, maintenant=None) -> None:
+        """Met l'horloge du coin à l'heure locale.
+
+        Le libellé n'est réécrit que s'il change : la minute ne bouge qu'une
+        fois sur soixante réveils.
+        """
+        texte = (maintenant or QTime.currentTime()).toString("HH:mm")
+        if texte != self._ov_heure.text():
+            self._ov_heure.setText(texte)
 
     def rafraichir_duree(self) -> None:
         """Redessine la barre quand une durée de direct vient d'être relevée."""

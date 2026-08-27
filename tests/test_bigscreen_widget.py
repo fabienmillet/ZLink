@@ -1451,3 +1451,78 @@ def test_une_ligne_d_objectif_detruite_ne_fait_pas_lever(cache, qtbot):
     qtbot.wait(10)
     cache._cache["zerator@32"] = QPixmap(32, 32)
     rappel()                            # ne doit pas lever
+
+
+# ── carte cagnotte : horloge et vitesse de collecte ──────────────────────────
+
+@pytest.fixture
+def carte(qtbot):
+    c = bs._CagnotteCard()
+    qtbot.addWidget(c)
+    return c
+
+
+def test_l_heure_s_affiche_au_format_vingt_quatre_heures(carte):
+    """Le plein écran rétracte la barre des tâches : plus aucune horloge."""
+    from PyQt6.QtCore import QTime
+
+    carte.rafraichir_heure(QTime(21, 47))
+    assert carte._heure_lbl.text() == "21:47"
+
+
+def test_l_horloge_bat_a_la_seconde(carte):
+    """À la minute, l'affichage aurait jusqu'à soixante secondes de retard
+    au tour de minute, et l'horloge paraîtrait arrêtée."""
+    assert carte._horloge.interval() == 1000
+    assert carte._horloge.isActive()
+
+
+def test_l_heure_n_est_reecrite_que_si_elle_change(carte):
+    """Un setText par seconde sur un libellé inchangé repeint pour rien."""
+    from PyQt6.QtCore import QTime
+
+    carte.rafraichir_heure(QTime(9, 5))
+    ecritures = []
+    carte._heure_lbl.setText = ecritures.append
+    carte.rafraichir_heure(QTime(9, 5))
+    assert ecritures == []
+    carte.rafraichir_heure(QTime(9, 6))
+    assert ecritures == ["09:06"]
+
+
+def test_la_vitesse_de_collecte_s_affiche_par_heure(carte):
+    carte.update_rate(12_420.0)
+    assert carte._rythme_lbl.text() == "+ 12\u00a0420 € / h"
+    assert carte._rythme_lbl.isHidden() is False
+
+
+@pytest.mark.parametrize("valeur", [None, 0.0, -50.0])
+def test_sans_vitesse_mesurable_la_ligne_disparait(carte, valeur):
+    """« 0 €/h » affirmerait que rien ne rentre, alors qu'avant l'événement
+    il n'y a simplement pas encore de série à comparer."""
+    carte.update_rate(12_420.0)
+    carte.update_rate(valeur)
+    assert carte._rythme_lbl.isHidden() is True
+
+
+def test_le_grand_ecran_convertit_les_euros_par_minute_en_euros_par_heure(qtbot):
+    """`donation_rate` rend des euros par MINUTE : les afficher tels quels
+    diviserait la vitesse annoncée par soixante."""
+    ecran = bs.BigScreenWidget()
+    qtbot.addWidget(ecran)
+
+    class _Hist:
+        @staticmethod
+        def donation_rate():
+            return 100.0
+
+    ecran.update_history(_Hist())
+    assert ecran._cagnotte_card._rythme_lbl.text() == "+ 6\u00a0000 € / h"
+
+
+def test_un_historique_absent_ne_fait_rien_tomber(qtbot):
+    """Le grand écran s'ouvre avant le premier sondage."""
+    ecran = bs.BigScreenWidget()
+    qtbot.addWidget(ecran)
+    ecran.update_history(None)
+    assert ecran._cagnotte_card._rythme_lbl.isHidden() is True
