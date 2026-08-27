@@ -59,8 +59,15 @@ def _python_avec_qt() -> str | None:
     """
     candidats = [ICI.parent / ".venv" / "Scripts" / "python.exe", sys.executable]
     for candidat in candidats:
-        essai = subprocess.run([str(candidat), "-c", "import PyQt6.QtSvg"],
-                               capture_output=True)
+        try:
+            essai = subprocess.run([str(candidat), "-c", "import PyQt6.QtSvg"],
+                                   capture_output=True)
+        except OSError:
+            # Un candidat qui n'existe pas n'est pas une panne : c'est le cas
+            # normal sur un poste sans .venv, et sur les machines de la CI. La
+            # boucle passe au suivant, et le repli sur les icônes du dépôt
+            # reste possible — il était déjà prévu plus bas.
+            continue
         if essai.returncode == 0:
             return str(candidat)
     return None

@@ -203,3 +203,52 @@ def test_la_pastille_se_cache_par_image_pas_par_molette(source_plugin):
     corps = source_plugin[debut:source_plugin.index("def ", debut + 10)]
     assert 'f"pastille|{url}|{muet}"' in corps, (
         "le cache de la pastille doit être indexé sur l'URL de l'avatar")
+
+
+# ── recette de construction ──────────────────────────────────────────────────
+
+def _charger_construire():
+    """Importe `streamdeck/construire.py` sous un nom à lui.
+
+    Le dossier n'est pas un paquet, et le fichier porte un nom assez commun
+    pour qu'un import direct prête à confusion.
+    """
+    import importlib.util
+
+    chemin = RACINE / "streamdeck" / "construire.py"
+    spec = importlib.util.spec_from_file_location("zlink_construire", chemin)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_un_interprete_absent_ne_fait_pas_tomber_la_construction(monkeypatch):
+    """La CI n'a pas de `.venv` : le premier candidat n'existe pas.
+
+    `subprocess.run` lève alors FileNotFoundError au lieu de rendre un code
+    non nul, et toute la construction s'arrêtait là — alors que le repli sur
+    les icônes du dépôt était déjà prévu juste en dessous.
+    """
+    construire = _charger_construire()
+    essayes = []
+
+    def _run(args, **_kw):
+        essayes.append(args[0])
+        if ".venv" in args[0]:
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        raise FileNotFoundError(2, "pas de PyQt6 non plus")
+
+    monkeypatch.setattr(construire.subprocess, "run", _run)
+    assert construire._python_avec_qt() is None
+    assert len(essayes) == 2, "le candidat manquant ne doit pas arrêter la boucle"
+
+
+def test_le_premier_interprete_qui_sait_dessiner_est_retenu(monkeypatch):
+    construire = _charger_construire()
+
+    class _Ok:
+        returncode = 0
+
+    monkeypatch.setattr(construire.subprocess, "run", lambda *a, **k: _Ok())
+    retenu = construire._python_avec_qt()
+    assert retenu is not None and ".venv" in retenu
