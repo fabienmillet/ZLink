@@ -1737,3 +1737,110 @@ def test_chaque_infobulle_vise_une_colonne_existante(stats):
     """Une clé restée sur un ancien numéro poserait la bulle à côté."""
     total = stats._ranking_table.columnCount()
     assert all(0 <= c < total for c in panel._StatsTab._INFOBULLES)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Stats — agir depuis le classement
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _remplir(stats, *streamers):
+    stats.update_streamers(list(streamers))
+    return stats._ranking_table
+
+
+def test_chaque_ligne_porte_son_login(stats):
+    """Le libellé affiche le nom, parfois précédé d'une étoile : jamais le
+    login. Sans cette donnée, une ligne ne peut désigner personne."""
+    _remplir(stats, _S("morrigh4n", display="Morrigh4n"))
+    assert stats.login_de_la_ligne(0) == "morrigh4n"
+
+
+def test_une_ligne_qui_n_existe_pas_ne_designe_personne(stats):
+    """Le tableau se retrie et se refiltre : un indice ne vaut qu'un instant."""
+    assert stats.login_de_la_ligne(0) == ""
+    assert stats.login_de_la_ligne(-1) == ""
+
+
+def test_le_double_clic_demande_la_fiche(stats):
+    _remplir(stats, _S("morrigh4n"))
+    recu: list[str] = []
+    stats.sheet_requested.connect(recu.append)
+    stats._sur_double_clic(0, panel._C_NOM)
+    assert recu == ["morrigh4n"]
+
+
+def test_un_double_clic_dans_le_vide_ne_demande_rien(stats):
+    recu: list[str] = []
+    stats.sheet_requested.connect(recu.append)
+    stats._sur_double_clic(7, panel._C_NOM)
+    assert recu == []
+
+
+def test_le_menu_contextuel_propose_les_memes_leviers_que_les_cartes(stats):
+    _remplir(stats, _S("morrigh4n"))
+    menu = stats.menu_de_la_ligne(0)
+    libelles = " | ".join(a.text() for a in menu.actions() if not a.isSeparator())
+    for attendu in ("plein écran", "grille", "favoris", "Objectifs", "fiche"):
+        assert attendu in libelles, f"« {attendu} » absent de : {libelles}"
+
+
+def test_pas_de_menu_sur_une_ligne_absente(stats):
+    assert stats.menu_de_la_ligne(3) is None
+
+
+@pytest.mark.parametrize("signal,fragment", [
+    ("stream_requested", "plein écran"),
+    ("grid_requested", "grille"),
+    ("sheet_requested", "fiche"),
+])
+def test_chaque_entree_du_menu_emet_ce_qu_elle_annonce(stats, signal, fragment):
+    _remplir(stats, _S("morrigh4n"))
+    menu = stats.menu_de_la_ligne(0)
+    recu: list[str] = []
+    getattr(stats, signal).connect(recu.append)
+    action = next(a for a in menu.actions() if fragment in a.text())
+    action.trigger()
+    assert recu == ["morrigh4n"]
+
+
+def test_le_menu_bascule_le_favori_et_le_dit(stats, monkeypatch, tmp_path):
+    monkeypatch.setattr(panel.favorites, "CONFIG_PATH", tmp_path / "c.json",
+                        raising=False)
+    etats: dict[str, bool] = {}
+    monkeypatch.setattr(panel.favorites, "is_favorite",
+                        lambda lg: etats.get(lg, False))
+    monkeypatch.setattr(panel.favorites, "toggle",
+                        lambda lg: etats.__setitem__(lg, not etats.get(lg, False))
+                        or etats[lg])
+    _remplir(stats, _S("morrigh4n"))
+    recu: list[tuple] = []
+    stats.favori_change.connect(lambda lg, on: recu.append((lg, on)))
+
+    ajouter = next(a for a in stats.menu_de_la_ligne(0).actions()
+                   if "Ajouter aux favoris" in a.text())
+    ajouter.trigger()
+    assert recu == [("morrigh4n", True)]
+    # L'étoile est peinte dans la cellule du nom : sans redessin, elle
+    # n'apparaîtrait qu'au prochain sondage.
+    assert "\u2605" in stats._ranking_table.item(0, panel._C_NOM).text()
+    assert any("Retirer des favoris" in a.text()
+               for a in stats.menu_de_la_ligne(0).actions())
+
+
+def test_sans_objectifs_charges_l_entree_dit_pourquoi(stats):
+    """Il n'existe aucun appel à la demande : ouvrir la fiche sur une section
+    vide ne dirait pas ce qui manque."""
+    _remplir(stats, _S("morrigh4n"))
+    action = next(a for a in stats.menu_de_la_ligne(0).actions()
+                  if "Objectifs" in a.text())
+    assert action.isEnabled() is False
+    assert "favoris" in action.text()
+
+
+def test_avec_des_objectifs_l_entree_porte_le_compte(stats):
+    _remplir(stats, _S("morrigh4n"))
+    stats.seed_goals({"morrigh4n": [_G("a", accompli=True), _G("b"), _G("c")]})
+    action = next(a for a in stats.menu_de_la_ligne(0).actions()
+                  if "Objectifs" in a.text())
+    assert action.isEnabled() is True
+    assert "(1/3)" in action.text()

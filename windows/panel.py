@@ -5455,6 +5455,27 @@ def _texte_tendance(delta: int | None) -> str:
     return f"{'+' if delta > 0 else '-'}{_fmt_viewers(abs(delta))}"
 
 
+def _texte_tendance_euros(delta: float | None) -> str:
+    """« +1 240 € », « = » quand rien n'a bougé, « — » quand on ignore encore.
+
+    Jamais négatif : `tendances.cagnotte` borne déjà à zéro, une cagnotte ne
+    redescendant pas. Un « = » dit donc « rien reçu sur la fenêtre », ce qui
+    est une information, pas une absence.
+    """
+    if delta is None:
+        return "—"
+    if delta < 1.0:
+        return "="
+    return f"+{_fmt_euros(delta)}"
+
+
+def _tendance_dons_de(s: StreamerInfo) -> float:
+    """Euros récoltés dans l'heure, 0 si on ne sait pas encore — pour trier."""
+    from core import tendances
+
+    return float(tendances.cagnotte(s.twitch_login) or 0.0)
+
+
 def _objectif_atteint(but: object) -> bool:
     """Un objectif de dons est-il tombé.
 
@@ -5502,7 +5523,7 @@ def _part_objectifs(cache: dict, s: StreamerInfo) -> float:
 #: remplissage puis dans la configuration, c'est une colonne insérée au
 #: milieu et trois décalages silencieux.
 (_C_RANG, _C_NOM, _C_LIEU, _C_JEU, _C_DUREE,
- _C_OBJ, _C_VUE, _C_TEND, _C_DON) = range(9)
+ _C_OBJ, _C_VUE, _C_TEND, _C_DON, _C_TEND_DON) = range(10)
 
 
 class _StatsTab(QWidget):
@@ -5512,7 +5533,16 @@ class _StatsTab(QWidget):
     viewers, un tableau des cagnottes et deux barres LAN/Online. On garde un
     seul tableau, trié comme on veut, où chaque colonne porte sa propre échelle
     de comparaison.
+
+    Le classement est aussi le meilleur endroit d'où AGIR : c'est là qu'on voit
+    qui monte. Double-clic pour la fiche, clic droit pour le reste — les mêmes
+    gestes que sur les cartes de l'onglet Streamers, sans quitter le tableau.
     """
+
+    sheet_requested  = pyqtSignal(str)   # twitch_login
+    stream_requested = pyqtSignal(str)
+    grid_requested   = pyqtSignal(str)
+    favori_change    = pyqtSignal(str, bool)
 
     #: Colonnes du classement : (titre, clé de tri, alignement à droite).
     _COLS = [
@@ -5525,6 +5555,9 @@ class _StatsTab(QWidget):
         ("Viewers", "viewers", True),
         ("+/h", "tendance", True),
         ("Cagnotte", "cagnotte", True),
+        # « + €/h » et non « +/h » : deux colonnes du même nom, l'une après
+        # Viewers et l'autre après Cagnotte, se lisent comme un doublon.
+        ("+ €/h", "tendance_dons", True),
     ]
 
     #: Ce que dit une colonne dont on ne devine pas le contenu, et surtout
@@ -5733,8 +5766,91 @@ class _StatsTab(QWidget):
         table.setItemDelegateForColumn(_C_VUE, _BarreDeCellule("#38bdf8", table))
         table.setItemDelegateForColumn(_C_DON, _BarreDeCellule("#00ff87", table))
         table.setStyleSheet(_STYLE_CLASSEMENT)
+        table.cellDoubleClicked.connect(self._sur_double_clic)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(self._sur_clic_droit)
 
     # -- interactions ---------------------------------------------------------
+
+    def login_de_la_ligne(self, ligne: int) -> str:
+        """Le login porté par une ligne, ou une chaîne vide si elle n'existe pas.
+
+        Le tableau se retrie et se refiltre sans arrêt : un indice de ligne ne
+        vaut que pour l'instant où on le lit.
+        """
+        item = self._ranking_table.item(ligne, _C_NOM)
+        return "" if item is None else str(
+            item.data(Qt.ItemDataRole.UserRole) or "")
+
+    def _sur_double_clic(self, ligne: int, _colonne: int) -> None:
+        login = self.login_de_la_ligne(ligne)
+        if login:
+            self.sheet_requested.emit(login)
+
+    def _sur_clic_droit(self, position) -> None:
+        menu = self.menu_de_la_ligne(
+            self._ranking_table.rowAt(position.y()))
+        if menu is not None:
+            menu.exec(self._ranking_table.viewport().mapToGlobal(position))
+
+    def menu_de_la_ligne(self, ligne: int) -> "QMenu | None":
+        """Ce qu'on peut faire d'une chaîne, depuis le classement.
+
+        Rendu plutôt qu'exécuté : un menu qui s'ouvre tout seul ne se teste
+        qu'en le cliquant.
+        """
+        login = self.login_de_la_ligne(ligne)
+        if not login:
+            return None
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_QSS)
+
+        # Mêmes glyphes que les autres menus de l'application : on reconnaît
+        # une action à sa marque avant d'avoir lu son libellé.
+        menu.addAction("▶  Regarder en plein écran").triggered.connect(
+            lambda: self.stream_requested.emit(login))
+        menu.addAction("⊞  Ajouter à la grille").triggered.connect(
+            lambda: self.grid_requested.emit(login))
+        menu.addSeparator()
+
+        etoile = "★" if favorites.is_favorite(login) else "☆"
+        menu.addAction(
+            f"{etoile}  " + ("Retirer des favoris"
+                             if favorites.is_favorite(login)
+                             else "Ajouter aux favoris")
+        ).triggered.connect(lambda: self._basculer_favori(login))
+        menu.addSeparator()
+        menu.addAction(self._action_objectifs(menu, login))
+        menu.addAction("ℹ  Ouvrir la fiche").triggered.connect(
+            lambda: self.sheet_requested.emit(login))
+        return menu
+
+    def _action_objectifs(self, menu: QMenu, login: str):
+        """L'entrée « Objectifs de dons », et ce qu'elle dit quand il n'y en a pas.
+
+        Les objectifs ne sont chargés que pour le haut du classement et les
+        favoris : il n'existe aucun appel à la demande. Ouvrir la fiche sur
+        une section vide ne dirait pas pourquoi — l'entrée porte donc la
+        raison, et le moyen d'y remédier.
+        """
+        buts = self._goals.get(login) or []
+        if not buts:
+            action = QAction(
+                "◎  Objectifs de dons — chargés pour les favoris", menu)
+            action.setEnabled(False)
+            return action
+        faits = sum(1 for b in buts if _objectif_atteint(b))
+        action = QAction(
+            f"◎  Objectifs de dons ({faits}/{len(buts)})", menu)
+        action.triggered.connect(lambda: self.sheet_requested.emit(login))
+        return action
+
+    def _basculer_favori(self, login: str) -> None:
+        etat = favorites.toggle(login)
+        self.favori_change.emit(login, etat)
+        # L'étoile est peinte dans la cellule du nom : sans redessin, elle
+        # n'apparaîtrait qu'au prochain sondage.
+        self._remplir()
 
     def _appliquer_filtre(self, cle: str) -> None:
         self._filtre = cle
@@ -5824,6 +5940,7 @@ class _StatsTab(QWidget):
             "duree": lambda s: (_duree_de(s), s.viewers),
             "objectifs": lambda s: (_part_objectifs(self._goals, s), s.viewers),
             "tendance": lambda s: (_tendance_de(s), s.viewers),
+            "tendance_dons": lambda s: (_tendance_dons_de(s), s.donation),
         }
         return sorted(retenus, key=cles.get(self._tri, cles["cagnotte"]),
                       reverse=self._decroissant)
@@ -5882,6 +5999,26 @@ class _StatsTab(QWidget):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(i, _C_DON, don)
 
+        table.setItem(i, _C_TEND_DON, self._cellule_tendance_dons(s))
+
+    def _cellule_tendance_dons(self, s: StreamerInfo) -> QTableWidgetItem:
+        """Euros récoltés dans la dernière heure.
+
+        Le total dit où en est une chaîne, pas si elle reçoit EN CE MOMENT.
+        C'est pourtant ce qui distingue une grosse cagnotte constituée hier
+        d'un palier en train de tomber.
+        """
+        from core import tendances
+
+        delta = tendances.cagnotte(s.twitch_login)
+        sens = "inconnu" if delta is None else (
+            "hausse" if delta >= 1.0 else "stable")
+        cellule = _CelluleNombre(_texte_tendance_euros(delta), float(delta or 0.0))
+        cellule.setForeground(QBrush(QColor(_COULEURS_TENDANCE[sens])))
+        cellule.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return cellule
+
     def _cellule_duree(self, s: StreamerInfo) -> QTableWidgetItem:
         """Depuis combien de temps la chaîne est en direct.
 
@@ -5939,6 +6076,9 @@ class _StatsTab(QWidget):
     def _cellule_nom(self, s: StreamerInfo) -> QTableWidgetItem:
         nom = QTableWidgetItem(s.display)
         nom.setIcon(QIcon(self._photo(s)))
+        # La ligne doit pouvoir dire de QUI elle parle : le libellé porte le
+        # nom affiché, parfois précédé d'une étoile, jamais le login.
+        nom.setData(Qt.ItemDataRole.UserRole, s.twitch_login)
         if favorites.is_favorite(s.twitch_login):
             # Coloré : on doit repérer ses favoris d'un coup d'œil dans une
             # liste de trois cents lignes.
@@ -6574,6 +6714,14 @@ class PanelWindow(QMainWindow):
         self._streamers_tab = _StreamersTab()
         self._streamers_tab.grid_selection_changed.connect(self.grid_selection_changed)
         self._streamers_tab.sheet_requested.connect(self.open_streamer_sheet)
+        # Le classement agit sur les mêmes leviers que les cartes : c'est là
+        # qu'on voit qui monte, autant pouvoir y faire quelque chose.
+        self._stats_tab.sheet_requested.connect(self.open_streamer_sheet)
+        self._stats_tab.stream_requested.connect(self.stream_selected)
+        self._stats_tab.grid_requested.connect(self._on_add_to_grid)
+        self._stats_tab.favori_change.connect(self.favori_change)
+        self._stats_tab.favori_change.connect(
+            lambda login, _etat: self._streamers_tab.rafraichir_favori(login))
         self._streamers_tab.favori_change.connect(self.favori_change)
         self._stack.addWidget(self._streamers_tab)
 
