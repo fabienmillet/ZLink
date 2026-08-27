@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="assets/ZLINK-Banner.png" alt="ZLink — Multiscreen app for ZEvent" width="100%">
-</p>
+![Banner](./assets/ZLINK-Banner2.png)
 
 <p align="center">
   <a href="LICENSE"><img alt="Licence" src="https://img.shields.io/badge/licence-GPL--3.0--or--later-00ff87?style=flat-square"></a>
