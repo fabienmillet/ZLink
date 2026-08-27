@@ -896,20 +896,14 @@ def _toasts(grille):
     return grille.findChildren(G._GoalAchievedToast)
 
 
-def test_une_chaine_affichee_pulse_sans_toast(grille):
-    """Le toast recouvrait une cellule — donc un flux — dans la seule fenêtre
-    entièrement faite de vidéo, pour dire ce que le liseré disait déjà, et
-    mieux : lui désigne QUI."""
+@pytest.mark.parametrize("cible", ["a", "absente"])
+def test_un_objectif_accompli_ne_pose_aucun_toast_sur_la_grille(grille, cible):
+    """La grille est la seule fenêtre entièrement faite de vidéo : tout ce
+    qu'on y pose recouvre un flux. L'objectif s'annonce sur le direct et dans
+    le fil de l'Accueil — le liseré suffit ici, et il désigne QUI."""
     _peupler(grille, ("a", 10))
-    grille.goal_achieved_flash("a", "Manger un piment")
+    grille.goal_achieved_flash(cible, "Manger un piment")
     assert _toasts(grille) == []
-
-
-def test_une_chaine_absente_de_la_grille_garde_son_toast(grille):
-    """Aucune cellule ne peut la signaler : sans toast, rien ne le dirait."""
-    _peupler(grille, ("a", 10))
-    grille.goal_achieved_flash("inconnu", "Objectif")
-    assert len(_toasts(grille)) == 1
 
 
 def test_un_objectif_sur_une_grille_vide_ne_leve_pas(grille):

@@ -486,6 +486,19 @@ from core.version import (
 )
 
 
+def _sep_vertical() -> QFrame:
+    """Un filet vertical d'un pixel, de la teinte des autres séparateurs.
+
+    Deux colonnes de même fond posées côte à côte se lisent comme un seul
+    bloc : l'espace seul ne dit pas où l'une finit.
+    """
+    trait = QFrame()
+    trait.setFrameShape(QFrame.Shape.VLine)
+    trait.setFixedWidth(1)
+    trait.setStyleSheet("border: none; background: #222222;")
+    return trait
+
+
 def cle_evenement(ev) -> str:
     """Identifiant d'un show pour les rappels.
 
@@ -1846,7 +1859,7 @@ class _AccueilTab(QWidget):
     #: Largeur maximale de la colonne « EN LIVE ». Un avatar de 28 px, un nom,
     #: un jeu et une audience : au-delà, la place ne sert qu'à écarter les noms
     #: des chiffres qui leur correspondent, et l'œil perd la ligne.
-    _LARGEUR_LIVE = 460
+    _LARGEUR_LIVE = 580
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1930,8 +1943,15 @@ class _AccueilTab(QWidget):
         right = QWidget()
         right_l = QHBoxLayout(right)
         right_l.setContentsMargins(0, 0, 0, 0)
-        right_l.setSpacing(16)
+        right_l.setSpacing(0)
         right_l.addWidget(self._goals_widget, stretch=1)
+        # Un simple espace ne suffisait pas à séparer deux colonnes de même
+        # fond : les objectifs et le fil se lisaient comme un seul bloc. Un
+        # trait vertical dit où l'un finit et où l'autre commence.
+        self._sep_droite = _sep_vertical()
+        right_l.addSpacing(20)
+        right_l.addWidget(self._sep_droite)
+        right_l.addSpacing(20)
         self._feed = _EventFeed()
         self._feed.stream_requested.connect(self.stream_selected.emit)
         right_l.addWidget(self._feed, stretch=1)

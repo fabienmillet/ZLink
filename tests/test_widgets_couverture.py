@@ -539,12 +539,12 @@ def test_le_toast_d_objectif_s_efface_de_lui_meme(grille):
     """Sans effacement, les toasts s'empilent : un palier de cagnotte en
     déclenche des dizaines en quelques minutes.
 
-    La chaîne est volontairement ABSENTE de la grille : une chaîne affichée
-    n'a plus de toast, son liseré suffit et dit mieux de qui il s'agit.
+    La grille ne pose plus ce toast — il recouvrait un flux — mais la classe
+    reste employée ailleurs, et son effacement doit continuer de marcher. On
+    la construit donc directement.
     """
     _peupler(grille, ("a", 10))
-    grille.goal_achieved_flash("absente", "Manger un piment")
-    toast = grille.findChildren(G._GoalAchievedToast)[-1]
+    toast = G._GoalAchievedToast("absente", "Manger un piment", grille)
     toast._start_fade()
     assert toast.graphicsEffect() is not None
 
@@ -1292,11 +1292,15 @@ def test_une_pilule_sans_handle_natif_se_construit_quand_meme(qtbot, qapp,
 
     Sans le garde-fou, le mode un écran ne démarrerait pas du tout sur une
     plateforme Qt sans fenêtrage.
+
+    L'épingle est passée explicitement : la laisser lire config.json faisait
+    dépendre la position de départ d'un fichier que d'autres tests écrivent.
     """
     monkeypatch.setattr(single._NavPill, "windowHandle", lambda self: None)
     p = single._NavPill(qapp.primaryScreen(),
                         on_switch=lambda _i: None,
-                        on_close=lambda: None)
+                        on_close=lambda: None,
+                        pinned=False)
     qtbot.addWidget(p)
     assert p.y() == p._hidden_y
 
