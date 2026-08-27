@@ -327,6 +327,8 @@ class RemoteItemLarge(QWidget):
         # _build ne reçoit pas le login : il est porté par l'instance. Sans
         # cela, un streamer sans nom d'affichage levait un NameError.
         name_lbl = QLabel(display if display else self._login)
+        # Nom d'affichage servi par une API tierce : Qt DEVINE le format.
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         name_lbl.setFont(QFont(_POLICE_UI, 14, QFont.Weight.Bold))
         name_lbl.setStyleSheet(f"color: {name_color}; background: transparent;")
         col.addWidget(name_lbl)
@@ -484,6 +486,8 @@ class RemoteItemSmall(QWidget):
         row1.setContentsMargins(0, 0, 0, 0)
         row1.setSpacing(6)
         name_lbl = QLabel(display if display else self._login)
+        # Nom d'affichage servi par une API tierce : Qt DEVINE le format.
+        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
         name_lbl.setFont(QFont(_POLICE_UI, 12))
         name_lbl.setStyleSheet("color: #aaaaaa; background: transparent;")
         row1.addWidget(name_lbl)

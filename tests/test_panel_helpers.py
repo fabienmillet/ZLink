@@ -870,3 +870,33 @@ def test_se_reabonner_redeclenche_le_rappel(qtbot, config_vierge):
     onglet.basculer_rappel_par_cle("ev-1")     # désabonnement
     onglet.basculer_rappel_par_cle("ev-1")     # réabonnement
     assert "ev-1" not in onglet._reminded_ids
+
+
+# ── texte d'API : jamais interprété comme du texte enrichi ───────────────────
+
+_HOSTILE = "<img src='http://exemple.invalid/pixel.png'>Nom"
+
+
+def test_une_pastille_de_participant_ne_rend_pas_le_texte_enrichi(qtbot):
+    """Qt DEVINE le format d'un QLabel : un nom contenant une balise serait
+    rendu comme telle, et une « image » distante déclencherait une requête
+    réseau depuis le poste. Les noms viennent d'une API tierce."""
+    from PyQt6.QtCore import Qt
+
+    lbl = panel._make_chip(_HOSTILE)
+    qtbot.addWidget(lbl)
+    assert lbl.textFormat() == Qt.TextFormat.PlainText
+    assert lbl.text() == _HOSTILE
+
+
+def test_le_rappel_d_un_show_ne_rend_pas_le_texte_enrichi(qtbot):
+    """Le message porte le nom du show, servi par la même API."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QLabel, QWidget
+
+    hote = QWidget()
+    qtbot.addWidget(hote)
+    toast = panel._ReminderToast(f"« {_HOSTILE} » commence dans 5 min", hote)
+    corps = [w for w in toast.findChildren(QLabel) if _HOSTILE in w.text()]
+    assert corps, "le message doit bien être affiché"
+    assert all(w.textFormat() == Qt.TextFormat.PlainText for w in corps)

@@ -2618,6 +2618,9 @@ def _make_person_avatar(
 def _make_chip(name: str) -> QLabel:
     """Petit badge arrondi avec le nom du participant."""
     lbl = QLabel(name)
+    # Nom de participant servi par une API tierce : Qt DEVINE le format, et
+    # une balise y serait rendue comme telle.
+    lbl.setTextFormat(Qt.TextFormat.PlainText)
     lbl.setFont(QFont(_FONT_SEGOE, 10))
     lbl.setStyleSheet(
         "color: #cccccc; background: #1e1e1e; border: 1px solid #2a2a2a; "
@@ -2668,6 +2671,7 @@ def _make_person_chip(display: str, login: str = "", profile_url: str = "",
     h.addWidget(_make_person_avatar(display, login, size=20,
                                     profile_url=profile_url))
     nom = QLabel(display)
+    nom.setTextFormat(Qt.TextFormat.PlainText)
     nom.setFont(QFont(_FONT_SEGOE, 10))
     nom.setStyleSheet(f"color: {texte}; background: transparent; border: none;")
     h.addWidget(nom)
@@ -2694,6 +2698,7 @@ class _ParticipantsDialog(QDialog):
         lay.setSpacing(12)
 
         title = QLabel(event_name)
+        title.setTextFormat(Qt.TextFormat.PlainText)
         title.setFont(_bold_font(_FONT_SEGOE, 14))
         title.setWordWrap(True)
         lay.addWidget(title)
@@ -2803,6 +2808,12 @@ class _ReminderToast(QWidget):
         lay.addWidget(bell)
 
         txt = QLabel(message)
+        # Le message porte le nom d'un show, écrit par l'organisation et servi
+        # par une API tierce. Qt DEVINE le texte enrichi : un nom contenant une
+        # balise serait rendu comme telle, et une « image » distante y
+        # déclencherait une requête réseau depuis le poste. On impose donc le
+        # texte brut, comme partout ailleurs où de la donnée d'API s'affiche.
+        txt.setTextFormat(Qt.TextFormat.PlainText)
         txt.setFont(QFont(_FONT_SEGOE, 12))
         txt.setStyleSheet("color: #ffffff; background: transparent; border: none;")
         txt.setWordWrap(True)
@@ -3528,6 +3539,7 @@ class _LigneObjectif(QFrame):
         if reste > 0:
             texte += f"  ·  plus que {_fmt_euros(reste)}"
         lbl = QLabel(texte)
+        lbl.setTextFormat(Qt.TextFormat.PlainText)
         lbl.setFont(QFont(_FONT_MONO, 10))
         lbl.setStyleSheet(
             f"color: {'#f5c518' if part >= 0.9 else '#777777'};"
