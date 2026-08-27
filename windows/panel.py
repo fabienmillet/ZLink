@@ -1945,13 +1945,13 @@ class _AccueilTab(QWidget):
         right_l.setContentsMargins(0, 0, 0, 0)
         right_l.setSpacing(0)
         right_l.addWidget(self._goals_widget, stretch=1)
-        # Un simple espace ne suffisait pas à séparer deux colonnes de même
-        # fond : les objectifs et le fil se lisaient comme un seul bloc. Un
-        # trait vertical dit où l'un finit et où l'autre commence.
+        # Le trait SEUL, sans marge de part et d'autre. Les deux blocs portent
+        # déjà leurs marges internes — douze pixels à droite des objectifs,
+        # huit à gauche du fil : y ajouter vingt de chaque côté portait la
+        # coupure visible à soixante et un pixels, un couloir vide au milieu
+        # de l'onglet. Le filet suffit à dire où l'un finit.
         self._sep_droite = _sep_vertical()
-        right_l.addSpacing(20)
         right_l.addWidget(self._sep_droite)
-        right_l.addSpacing(20)
         self._feed = _EventFeed()
         self._feed.stream_requested.connect(self.stream_selected.emit)
         right_l.addWidget(self._feed, stretch=1)
