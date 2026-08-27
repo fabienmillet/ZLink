@@ -273,15 +273,15 @@ class DataManager(QObject):
     def _history_worker(self) -> None:
         """Charge l'historique en arrière-plan puis émet le signal.
 
-        L'édition précédente est chargée depuis le cache par édition, plus fin
-        que le dépôt historique — 332 relevés de cagnotte contre 110 — et c'est
-        elle qu'on superpose aux graphes. En cas d'échec, on retombe sur le
-        dépôt, qui publie la même courbe en plus grossier : mieux vaut une
-        comparaison approximative que pas de comparaison.
+        Les éditions passées viennent du cache PAR ÉDITION, plus fin que le
+        dépôt historique — 332 relevés de cagnotte contre 110 — et surtout
+        adressable année par année : c'est ce qui permet d'en superposer
+        plusieurs. En cas d'échec complet, on retombe sur le dépôt, qui publie
+        la dernière en plus grossier : mieux vaut une comparaison approximative
+        que pas de comparaison.
         """
-        from core.history_store import EDITION_PRECEDENTE
         try:
-            if not _run(self._history.charger_edition(EDITION_PRECEDENTE)):
+            if not _run(self._history.charger_editions()):
                 _run(self._history.load_historical_2026())
         except Exception:
             logger.exception("_history_worker")

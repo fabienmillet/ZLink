@@ -858,3 +858,120 @@ def test_sans_reference_chargee_la_serie_alignee_est_vide(horloge):
     ts, _vals = store.get_donation_series()
     assert store.serie_precedente_alignee(ts) == [None]
     assert store.serie_viewers_precedente_alignee(ts) == [None]
+
+
+# ── plusieurs éditions superposées ───────────────────────────────────────────
+
+def _reponses_par_edition(table, statut=200):
+    """Un client qui rend une charge différente selon l'identifiant demandé."""
+    import httpx
+
+    def repondre(requete):
+        for eid, charge in table.items():
+            if eid in str(requete.url):
+                if charge is None:
+                    return httpx.Response(404, json={})
+                return httpx.Response(statut, json=charge)
+        return httpx.Response(404, json={})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(repondre))
+
+
+def _charger_toutes(store, table, editions):
+    import asyncio
+
+    async def essai():
+        async with _reponses_par_edition(table) as client:
+            return await store.charger_editions(editions, client=client)
+
+    return asyncio.run(essai())
+
+
+def _edition_complete(total, dons):
+    charge = _edition(dons)
+    charge["donation_amount"] = int(total * 100)
+    return charge
+
+
+def test_plusieurs_editions_se_chargent_et_se_classent():
+    """Une seule référence ne dit pas si l'an dernier était un bon cru."""
+    store = HistoryStore()
+    table = {
+        "id-2025": _edition_complete(3000, [(_J, 0), (_J + _H, 3000)]),
+        "id-2024": _edition_complete(2000, [(_J, 0), (_J + _H, 2000)]),
+    }
+    retenues = _charger_toutes(store, table,
+                               (("2025", "id-2025"), ("2024", "id-2024")))
+    assert retenues == ["2025", "2024"]
+    assert store.editions_chargees() == ["2025", "2024"]
+
+
+def test_la_plus_recente_devient_la_reference_de_la_phrase():
+    """`compare_to_previous` n'en compare qu'une : ce doit être la dernière."""
+    store = HistoryStore()
+    table = {
+        "id-2025": _edition_complete(3000, [(_J, 0), (_J + _H, 3000)]),
+        "id-2024": _edition_complete(2000, [(_J, 0), (_J + _H, 2000)]),
+    }
+    _charger_toutes(store, table, (("2025", "id-2025"), ("2024", "id-2024")))
+    assert store._previous[-1][1] == 3000.0
+
+
+def test_une_edition_dont_la_courbe_contredit_son_total_est_ecartee():
+    """Tracer une année sans dons se lirait comme vrai faute de savoir que
+    c'est faux — mieux vaut une comparaison de moins."""
+    store = HistoryStore()
+    table = {
+        "id-ok": _edition_complete(3000, [(_J, 0), (_J + _H, 3000)]),
+        # Total déclaré à 10 M€, courbe qui s'arrête à 16 k€.
+        "id-ko": _edition_complete(10_000_000, [(_J, 0), (_J + _H, 16_000)]),
+    }
+    retenues = _charger_toutes(store, table,
+                               (("bonne", "id-ok"), ("cassee", "id-ko")))
+    assert retenues == ["bonne"]
+
+
+def test_une_edition_sans_total_declare_est_crue_sur_parole():
+    """Rien à confronter : refuser la courbe perdrait une comparaison valable."""
+    store = HistoryStore()
+    table = {"id-x": _edition([(_J, 0), (_J + _H, 3000)])}
+    assert _charger_toutes(store, table, (("x", "id-x"),)) == ["x"]
+
+
+def test_une_edition_indisponible_n_empeche_pas_les_autres():
+    store = HistoryStore()
+    table = {
+        "id-ok": _edition_complete(3000, [(_J, 0), (_J + _H, 3000)]),
+        "id-absente": None,
+    }
+    retenues = _charger_toutes(store, table,
+                               (("absente", "id-absente"), ("ok", "id-ok")))
+    assert retenues == ["ok"]
+
+
+def test_des_releves_tous_au_meme_instant_sont_ecartes():
+    """Une série sans durée n'a pas de temps de course : l'aligner n'a
+    aucun sens, et le tri ne peut pas la réparer."""
+    store = HistoryStore()
+    table = {"id-fige": _edition([(_J, 0), (_J, 3000)])}
+    assert _charger_toutes(store, table, (("figee", "id-fige"),)) == []
+
+
+def test_les_series_de_toutes_les_editions_s_alignent(horloge):
+    store = HistoryStore()
+    table = {
+        "id-a": _edition_complete(2000, [(_J, 0), (_J + 2 * _H, 2000)]),
+        "id-b": _edition_complete(1000, [(_J, 0), (_J + 2 * _H, 1000)]),
+    }
+    _charger_toutes(store, table, (("a", "id-a"), ("b", "id-b")))
+
+    depart = _EVENT_START + 3600.0
+    for i in range(3):
+        horloge["t"] = depart + i * 3600.0
+        store.add_point(i * 900.0, 10)
+    ts, _vals = store.get_donation_series()
+
+    alignees = store.series_editions_alignees(ts)
+    assert set(alignees) == {"a", "b"}
+    assert alignees["a"] == [0.0, 1000.0, 2000.0]
+    assert alignees["b"] == [0.0, 500.0, 1000.0]

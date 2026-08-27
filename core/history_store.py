@@ -30,6 +30,31 @@ _URL_EDITION_BASE = (
 #: ZEvent 2025, l'édition de référence pour comparer 2026.
 EDITION_PRECEDENTE = "019d3f95-bd24-7e5d-861b-1de6243e3169"
 
+#: Éditions superposables, de la plus récente à la plus ancienne. Relevées
+#: sur `api.ppr.evenmorestats.fr/events`, qui les publie toutes.
+#:
+#: 2021 publie ses relevés À L'ENVERS — du 1er novembre au 29 octobre. Lue
+#: brute, sa courbe s'arrête à 16 135 € pour un total déclaré de 10 064 480 ;
+#: triée, elle retombe sur 10 062 185, à deux millièmes près. C'est le tri de
+#: `_lire_serie` qui la rend exploitable, pas une exception écrite à la main.
+#:
+#: Les deux contrôles ci-dessous ne visent donc personne en particulier : ils
+#: sont là pour que l'édition qui se casserait un jour s'écarte d'elle-même,
+#: au lieu de tracer une année sans dons qu'on lirait comme vraie.
+#:
+#: 2020 et 2019 n'ont pas de métriques du tout, et 2023 n'existe pas.
+EDITIONS: tuple[tuple[str, str], ...] = (
+    ("2025", "019d3f95-bd24-7e5d-861b-1de6243e3169"),
+    ("2024", "019ebc62-7050-751b-aee8-eb7dc7ab6ceb"),
+    ("2022", "019ebc61-62e7-7fdc-aa5c-a0047c921878"),
+    ("2021", "019ebc50-efd9-7070-9663-404f8d79a410"),
+)
+
+#: Écart toléré entre le total déclaré d'une édition et la fin de sa courbe.
+#: Deux pour cent : les relevés sont échantillonnés, la dernière mesure peut
+#: précéder de peu la clôture.
+_TOLERANCE_TOTAL = 0.02
+
 # Plage de timestamps acceptée pour les données tierces (2020 → 2035)
 _TS_MIN: float = 1_577_836_800.0
 _TS_MAX: float = 2_051_222_400.0
@@ -74,6 +99,10 @@ class HistoryStore:
         #: la série entière des deux côtés.
         self._previous_viewers: list[tuple[float, float]] = []
         self._previous_peak_viewers: int = 0
+        #: Éditions passées retenues : libellé → {dons, vues}. Plusieurs, parce
+        #: qu'une seule référence ne dit pas si l'année dernière était un bon
+        #: cru — trois courbes situent l'édition en cours dans une tendance.
+        self._editions: dict[str, dict] = {}
         #: Instant du premier relevé pris EN DIRECT depuis le dernier
         #: préchargement. Sépare ce que ZLink a observé lui-même de la courbe
         #: chargée depuis GitHub, les deux vivant dans le même deque.
@@ -319,7 +348,84 @@ class HistoryStore:
         ts, vals = zip(*pairs)
         return list(ts), list(vals)
 
-    async def charger_edition(self, event_id: str, client=None) -> bool:
+    async def charger_editions(self, editions=EDITIONS, client=None) -> list[str]:
+        """Charge toutes les éditions superposables. Rend celles qui tiennent.
+
+        Une édition dont la courbe contredit son propre total déclaré est
+        écartée : mieux vaut une comparaison de moins qu'une comparaison
+        fausse, qu'on ne saurait pas lire comme telle.
+
+        La plus récente qui survit devient aussi la référence de la phrase
+        « à la même heure en … », qui n'en compare qu'une.
+        """
+        retenues: list[str] = []
+        for libelle, event_id in editions:
+            if await self.charger_edition(event_id, client=client,
+                                          libelle=libelle):
+                retenues.append(libelle)
+        if retenues:
+            recente = self._editions[retenues[0]]
+            self._previous = recente["dons"]
+            self._previous_viewers = recente["vues"]
+            if recente["vues"]:
+                self._previous_peak_viewers = int(
+                    max(v for _t, v in recente["vues"]))
+        logger.info("Éditions superposables : %s",
+                    ", ".join(retenues) or "aucune")
+        return retenues
+
+    def editions_chargees(self) -> list[str]:
+        """Libellés des éditions retenues, de la plus récente à la plus vieille."""
+        return list(self._editions)
+
+    def series_editions_alignees(
+            self, ts_courants: list[float]) -> dict[str, list]:
+        """Cagnotte de chaque édition retenue, au même temps de course."""
+        return {libelle: self._alignee(donnees["dons"], ts_courants)
+                for libelle, donnees in self._editions.items()}
+
+    def series_viewers_editions_alignees(
+            self, ts_courants: list[float]) -> dict[str, list]:
+        """Audience de chaque édition retenue, au même temps de course."""
+        return {libelle: self._alignee(donnees["vues"], ts_courants)
+                for libelle, donnees in self._editions.items()}
+
+    @staticmethod
+    def _coherente(data: dict, dons: list, libelle: str) -> bool:
+        """La courbe finit-elle bien sur le total que l'édition annonce.
+
+        `donation_amount` est en CENTIMES, la courbe en euros. Une édition dont
+        la courbe s'arrêterait loin de son total tracerait une année sans dons,
+        qu'on lirait comme vraie faute de savoir qu'elle est fausse.
+        """
+        declare = data.get("donation_amount")
+        if not isinstance(declare, (int, float)) or declare <= 0:
+            return True     # rien à confronter : on fait confiance à la courbe
+        declare = float(declare) / 100.0
+        fin = dons[-1][1]
+        if abs(declare - fin) <= declare * _TOLERANCE_TOTAL:
+            return True
+        logger.warning(
+            "Édition %s écartée : la courbe finit à %.0f € pour un total "
+            "déclaré de %.0f €", libelle, fin, declare)
+        return False
+
+    @staticmethod
+    def _chronologique(points: list, libelle: str) -> bool:
+        """Les relevés couvrent-ils bien une durée croissante.
+
+        `_lire_serie` trie déjà, ce qui suffit au cas connu — 2021, publiée à
+        l'envers. Ce contrôle attrape ce que le tri ne peut pas réparer : une
+        série dont tous les relevés portent le même instant n'a pas de temps
+        de course, et l'aligner n'aurait aucun sens.
+        """
+        if len(points) < 2 or points[-1][0] > points[0][0]:
+            return True
+        logger.warning("Édition %s écartée : relevés non chronologiques", libelle)
+        return False
+
+    async def charger_edition(self, event_id: str, client=None,
+                              libelle: str = "") -> bool:
         """Charge la courbe d'une édition passée, par son identifiant.
 
         Source `evenmorestats-cache`, adressée PAR ÉDITION — c'est ce qui
@@ -350,22 +456,32 @@ class HistoryStore:
             logger.warning("Édition %s : historique indisponible — %s", event_id, exc)
             return False
 
+        nom = libelle or str(event_id)
         graphe = (data or {}).get("graph") or {}
         dons = self._lire_serie(graphe.get("donations", {}).get("all"))
         vues = self._lire_serie(graphe.get("viewers"))
         if len(dons) < 2:
-            logger.warning("Édition %s : courbe de cagnotte inexploitable", event_id)
+            logger.warning("Édition %s : courbe de cagnotte inexploitable", nom)
+            return False
+        # Deux contrôles, parce que la source publie parfois des séries
+        # inexploitables sans le signaler. Voir `EDITIONS`.
+        if not self._chronologique(dons, nom) or not self._coherente(
+                data, dons, nom):
             return False
 
         # Tout-ou-rien, comme le chargeur historique : remplacer une série et
         # pas l'autre laisserait deux éditions différentes côte à côte.
-        self._previous = dons
-        self._previous_viewers = vues
-        if vues:
-            self._previous_peak_viewers = int(max(v for _t, v in vues))
+        self._editions[nom] = {"dons": dons, "vues": vues}
+        if not libelle:
+            # Appel direct, hors du chargement groupé : l'édition demandée
+            # devient la référence de la phrase de comparaison.
+            self._previous = dons
+            self._previous_viewers = vues
+            if vues:
+                self._previous_peak_viewers = int(max(v for _t, v in vues))
         logger.info(
             "Édition %s : %d points de cagnotte, %d de viewers, total %.0f €",
-            event_id, len(dons), len(vues), dons[-1][1])
+            nom, len(dons), len(vues), dons[-1][1])
         return True
 
     @staticmethod

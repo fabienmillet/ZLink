@@ -138,6 +138,12 @@ class _FauxHistorique:
     def serie_viewers_precedente_alignee(self, ts):
         return list(self._ref_viewers) if self._ref_viewers else [None] * len(ts)
 
+    def series_editions_alignees(self, ts):
+        return {"2025": self.serie_precedente_alignee(ts)}
+
+    def series_viewers_editions_alignees(self, ts):
+        return {"2025": self.serie_viewers_precedente_alignee(ts)}
+
     def get_donation_series(self):
         return ([t for t, _ in self._dons], [v for _, v in self._dons])
 
@@ -2050,9 +2056,9 @@ def test_les_graphes_transportent_la_courbe_de_reference(stats):
         viewers=[(1_000.0, 10), (2_000.0, 20)],
         ref_dons=[400.0, 1_100.0], ref_viewers=[8, 25]))
     charge = _charge(stats)
-    assert charge["pd"] == [400, 1100]
-    assert charge["pv"] == [8, 25]
-    assert len(charge["pd"]) == len(charge["vd"]), (
+    assert charge["rd"]["2025"] == [400, 1100]
+    assert charge["rv"]["2025"] == [8, 25]
+    assert len(charge["rd"]["2025"]) == len(charge["vd"]), (
         "Chart.js aligne par indice : deux longueurs différentes décaleraient")
 
 
@@ -2062,8 +2068,8 @@ def test_sans_reference_la_courbe_est_absente_plutot_que_plate(stats):
     stats.update_history(_FauxHistorique(
         dons=[(1_000.0, 500.0)], viewers=[(1_000.0, 10)]))
     charge = _charge(stats)
-    assert charge["pd"] == []
-    assert charge["pv"] == []
+    assert charge["rd"] == {}
+    assert charge["rv"] == {}
 
 
 def test_un_trou_dans_la_reference_reste_un_trou(stats):
@@ -2074,8 +2080,8 @@ def test_un_trou_dans_la_reference_reste_un_trou(stats):
         viewers=[(1_000.0, 10), (2_000.0, 20)],
         ref_dons=[400.0, None], ref_viewers=[None, None]))
     charge = _charge(stats)
-    assert charge["pd"] == [400, None]
-    assert charge["pv"] == [], "entièrement vide : la courbe se masque"
+    assert charge["rd"]["2025"] == [400, None]
+    assert "2025" not in charge["rv"], "entièrement vide : la courbe se masque"
 
 
 @pytest.mark.parametrize("serie,attendu", [

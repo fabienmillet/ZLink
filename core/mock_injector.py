@@ -298,11 +298,15 @@ class MockInjector(QObject):
         self._alimenter_historique()
         self._emit_goals()
 
-    #: Passé simulé au démarrage : une heure, un relevé toutes les deux
-    #: minutes. Assez pour que la vitesse de collecte ait de quoi se mesurer
-    #: — elle exige un écart de six minutes — sans attendre devant l'écran.
-    _PASSE_S = 3600.0
-    _PAS_S = 120.0
+    #: Passé simulé au démarrage : trente heures, un relevé au quart d'heure.
+    #:
+    #: Une heure suffisait à la vitesse de collecte, mais pas aux graphes : sur
+    #: une fenêtre si courte, toutes les abscisses portaient la même heure et
+    #: les courbes des éditions passées, échantillonnées sur leur première
+    #: heure, s'aplatissaient en une ligne droite. Trente heures donnent une
+    #: soirée, une nuit et un lendemain — de quoi voir des formes.
+    _PASSE_S = 30 * 3600.0
+    _PAS_S = 900.0
 
     def _amorcer_historique(self) -> None:
         """Donne au mock une heure de passé, en montant jusqu'au total actuel.

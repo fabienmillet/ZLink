@@ -514,6 +514,21 @@ def _arrondi_ou_rien(serie: list) -> list:
     return [None if v is None else round(v) for v in serie]
 
 
+def _references(series: dict) -> dict:
+    """Arrondit les courbes de comparaison, en écartant celles qui sont vides.
+
+    Une édition dont l'alignement ne rend que des trous n'a rien à montrer sur
+    la fenêtre affichée : la garder ajouterait une entrée de légende pour une
+    courbe absente du graphe.
+    """
+    gardees = {}
+    for libelle, valeurs in (series or {}).items():
+        arrondi = _arrondi_ou_rien(valeurs)
+        if arrondi:
+            gardees[libelle] = arrondi
+    return gardees
+
+
 def cle_evenement(ev) -> str:
     """Identifiant d'un show pour les rappels.
 
@@ -6413,11 +6428,6 @@ const chartDon = new Chart(document.getElementById('cagnotteChart'), {{
       data: {data_don},
       borderColor: '#00ff87', backgroundColor: 'rgba(0,255,135,0.08)',
       borderWidth: 2, pointRadius: 0, fill: true, tension: 0.1,
-    }}, {{
-      label: '2025',
-      data: [],
-      borderColor: '#6a6a6a', borderDash: [5, 4], borderWidth: 1.5,
-      pointRadius: 0, fill: false, tension: 0.1, spanGaps: false,
     }}],
   }},
   options: {{
@@ -6439,11 +6449,6 @@ const chartView = new Chart(document.getElementById('viewersChart'), {{
       data: {data_view},
       borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.08)',
       borderWidth: 2, pointRadius: 0, fill: true, tension: 0.1,
-    }}, {{
-      label: '2025',
-      data: [],
-      borderColor: '#6a6a6a', borderDash: [5, 4], borderWidth: 1.5,
-      pointRadius: 0, fill: false, tension: 0.1, spanGaps: false,
     }}],
   }},
   options: {{
@@ -6459,18 +6464,39 @@ const chartView = new Chart(document.getElementById('viewersChart'), {{
 // Point d'entree unique cote Python : remplace les series en place, sans
 // reconstruire les graphes ni recharger la page. 'none' supprime l'animation,
 // qui n'a aucun sens pour un rafraichissement periodique.
+// Teintes des éditions passées, de la plus récente à la plus ancienne. Toutes
+// en pointillé et désaturées : l'édition EN COURS doit rester la seule courbe
+// pleine et vive, les autres sont un décor de comparaison.
+const REF_COULEURS = ['#9a9a9a', '#7a7a7a', '#5f5f5f', '#4a4a4a'];
+
+function majReferences(chart, refs) {{
+  // On reconstruit : le nombre d'éditions retenues peut changer d'un
+  // chargement à l'autre, une source pouvant se dérober.
+  chart.data.datasets.length = 1;
+  var i = 0;
+  for (var nom in refs) {{
+    var serie = refs[nom];
+    // Une série vide n'ajoute rien : ni courbe, ni entrée de légende qu'on
+    // chercherait ensuite sur le graphe.
+    if (!serie || !serie.length) {{ continue; }}
+    chart.data.datasets.push({{
+      label: nom, data: serie,
+      borderColor: REF_COULEURS[i % REF_COULEURS.length],
+      borderDash: [5, 4], borderWidth: 1.5,
+      pointRadius: 0, fill: false, tension: 0.1, spanGaps: false,
+    }});
+    i++;
+  }}
+}}
+
 window.zlUpdate = function (payload) {{
   var d = JSON.parse(payload);
   chartDon.data.labels = d.ld;
   chartDon.data.datasets[0].data = d.vd;
-  chartDon.data.datasets[1].data = d.pd || [];
+  majReferences(chartDon, d.rd || {{}});
   chartView.data.labels = d.lv;
   chartView.data.datasets[0].data = d.vv;
-  chartView.data.datasets[1].data = d.pv || [];
-  // Une référence absente retire sa courbe ET son entrée de légende, plutôt
-  // que d'afficher une ligne vide qu'on chercherait sur le graphe.
-  chartDon.data.datasets[1].hidden = !(d.pd && d.pd.length);
-  chartView.data.datasets[1].hidden = !(d.pv && d.pv.length);
+  majReferences(chartView, d.rv || {{}});
   chartDon.update('none');
   chartView.update('none');
 }};
@@ -6494,18 +6520,17 @@ window.zlUpdate = function (payload) {{
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
                 return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
 
-            # L'édition précédente, replacée sur le même temps de course :
+            # Chaque édition passée, replacée sur le même temps de course :
             # c'est la seule façon de voir QUAND on la dépasse. Chart.js
             # aligne ses séries par indice, d'où une valeur par abscisse.
-            ref_d = history.serie_precedente_alignee(ts_d)
-            ref_v = history.serie_viewers_precedente_alignee(ts_v)
             self._charts_payload = json.dumps({
                 "ld": [_fmt(t) for t in ts_d],
                 "vd": [round(v) for v in vals_d],
                 "lv": [_fmt(t) for t in ts_v],
                 "vv": [round(v) for v in vals_v],
-                "pd": _arrondi_ou_rien(ref_d),
-                "pv": _arrondi_ou_rien(ref_v),
+                "rd": _references(history.series_editions_alignees(ts_d)),
+                "rv": _references(
+                    history.series_viewers_editions_alignees(ts_v)),
             })
             self._push_charts()
 
