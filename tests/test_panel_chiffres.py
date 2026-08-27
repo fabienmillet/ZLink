@@ -2092,3 +2092,33 @@ def test_un_trou_dans_la_reference_reste_un_trou(stats):
 ])
 def test_l_arrondi_de_la_reference_garde_les_trous(serie, attendu):
     assert panel._arrondi_ou_rien(serie) == attendu
+
+
+def test_les_abscisses_suivent_le_calendrier_de_l_evenement(stats):
+    """Elles suivaient l'horloge du jour.
+
+    À sept jours de l'événement — ou en mode mock — le graphe annonçait
+    « jeudi 16 h » en regard d'une valeur de 2025 qui appartenait, elle, au
+    vendredi soir. Les courbes étaient bien alignées entre elles ; l'axe seul
+    racontait autre chose.
+    """
+    from datetime import datetime, timezone
+
+    from core.history_store import OUVERTURE_CAGNOTTE
+
+    stats._charts_ready = True
+    # Trois relevés pris un jour quelconque, espacés de six heures.
+    quelconque = 1_700_000_000.0
+    stats.update_history(_FauxHistorique(
+        dons=[(quelconque + i * 21_600.0, 100.0 * i) for i in range(3)],
+        viewers=[(quelconque, 10)]))
+    charge = _charge(stats)
+
+    attendu = []
+    for i in range(3):
+        dt = (datetime.fromtimestamp(OUVERTURE_CAGNOTTE + i * 21_600.0,
+                                     tz=timezone.utc) + panel.PARIS)
+        attendu.append(f"{panel.JOURS_FR[dt.weekday()]} {dt.hour:02d}h")
+    assert charge["ld"] == attendu
+    assert charge["ld"][0].startswith("Ven"), (
+        "la cagnotte ouvre un vendredi, toutes éditions confondues")

@@ -21,6 +21,22 @@ DEBUG: bool = True
 _EVENT_START: float = datetime(2026, 9, 3, 0, 0, 0, tzinfo=timezone.utc).timestamp()
 _EVENT_END: float = datetime(2026, 9, 7, 2, 0, 0, tzinfo=timezone.utc).timestamp()
 
+#: Ouverture de la CAGNOTTE, qui n'est pas l'ouverture de l'événement : les
+#: directs commencent le jeudi soir, la collecte le vendredi.
+#:
+#: C'est l'origine des courbes, et le repère qui les rend comparables. Relevé
+#: sur les quatre éditions chargées, il tombe le VENDREDI à 15-16 h UTC sans
+#: exception : 2025 le 5 septembre à 16 h, 2024 le 6 à 16 h, 2022 le 9 à 16 h,
+#: 2021 le 29 octobre à 15 h.
+#:
+#: Il sert aussi d'origine aux ABSCISSES. Les étiquettes se calculaient sur
+#: l'horloge du moment : à sept jours de l'événement, le graphe annonçait
+#: « jeudi 16 h » en regard d'une valeur qui, elle, appartenait au vendredi
+#: soir de 2025. L'axe suit désormais le calendrier de l'édition, quel que
+#: soit le jour où l'on regarde.
+OUVERTURE_CAGNOTTE: float = datetime(
+    2026, 9, 4, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+
 #: Cache par édition d'evenmorestats. L'identifiant de l'édition complète
 #: l'adresse : c'est ce qui rend plusieurs années superposables, là où le
 #: dépôt historique ne publie que la dernière.

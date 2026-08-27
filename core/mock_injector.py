@@ -147,6 +147,9 @@ class MockInjector(QObject):
         self._stats.donation_formatted = self._fmt(self._stats.donation_total)
         self._goal_index = 0
         self._imminent_index = 0
+        #: Origine de l'horloge simulée, posée par l'amorce de l'historique.
+        self._depart_simule: float | None = None
+        self._depart_reel: float = _time.monotonic()
         # Figé une fois pour toutes : voir _MOCK_GOAL_PALIERS.
         self._goals_cache = self._build_goals_cache()
 
@@ -308,6 +311,21 @@ class MockInjector(QObject):
     _PASSE_S = 30 * 3600.0
     _PAS_S = 900.0
 
+    def _instant_simule(self) -> float:
+        """L'heure de l'ÉVÉNEMENT simulé, pas celle de l'horloge.
+
+        Les relevés amorcés sont datés dans le calendrier de septembre ; ceux
+        pris en direct l'étaient à la date du jour. Le deque se retrouvait dans
+        le désordre, et `donation_rate` comparait deux points séparés d'un
+        écart NÉGATIF — d'où plus de vitesse ni de projection du tout.
+
+        L'heure simulée avance au même rythme que la vraie, depuis le point où
+        l'amorce s'arrête.
+        """
+        if self._depart_simule is None:
+            return _time.time()
+        return self._depart_simule + (_time.monotonic() - self._depart_reel)
+
     def _amorcer_historique(self) -> None:
         """Donne au mock une heure de passé, en montant jusqu'au total actuel.
 
@@ -322,10 +340,19 @@ class MockInjector(QObject):
         histoire = getattr(self._dm, "_history", None)
         if histoire is None:
             return
-        import time as _time
-        from core.history_store import _EVENT_END, _EVENT_START
+        from core.history_store import (
+            _EVENT_END, _EVENT_START, OUVERTURE_CAGNOTTE)
 
-        maintenant = _time.time()
+        # Le calendrier de l'ÉVÉNEMENT, pas celui d'aujourd'hui. Amorcer à
+        # « maintenant moins trente heures » datait la courbe du jour où l'on
+        # lance ZLink : à sept jours de l'événement, le graphe portait des
+        # abscisses de fin août en regard des courbes de 2025, qui commencent
+        # un vendredi soir de septembre.
+        maintenant = OUVERTURE_CAGNOTTE + self._PASSE_S
+        # Les relevés suivants prendront la suite de celui-ci, dans le même
+        # calendrier : voir `_instant_simule`.
+        self._depart_simule = maintenant
+        self._depart_reel = _time.monotonic()
         total = float(self._stats.donation_total or 0.0)
         vues = int(self._stats.viewers_total or 0)
 
@@ -366,7 +393,8 @@ class MockInjector(QObject):
         if histoire is None:
             return
         histoire.add_point(self._stats.donation_total,
-                           self._stats.viewers_total)
+                           self._stats.viewers_total,
+                           instant=self._instant_simule())
         self._dm.history_updated.emit(histoire)
 
     def _emit_goals(self) -> None:

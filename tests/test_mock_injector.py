@@ -680,3 +680,38 @@ def test_l_audience_amorcee_ne_part_pas_de_zero(injecteur):
         assert min(vues) == max(vues) > 0
     finally:
         injecteur.stop()
+
+
+def test_le_mock_date_ses_releves_dans_le_calendrier_de_l_evenement(injecteur):
+    """Le graphe portait des abscisses du jour où l'on lance ZLink.
+
+    À sept jours de l'événement, il annonçait fin août en regard des courbes
+    de 2025, qui commencent un vendredi soir de septembre.
+    """
+    from core.history_store import OUVERTURE_CAGNOTTE, _EVENT_END
+
+    injecteur.start()
+    try:
+        ts, _vals = injecteur._dm._history.get_donation_series()
+        assert ts[0] >= OUVERTURE_CAGNOTTE
+        assert ts[-1] <= _EVENT_END
+    finally:
+        injecteur.stop()
+
+
+def test_les_releves_du_mock_restent_chronologiques(injecteur):
+    """Les relevés amorcés étaient datés en septembre, ceux pris en direct
+    à la date du jour : le deque partait dans le désordre, et la vitesse
+    comparait deux points séparés d'un écart NÉGATIF."""
+    injecteur.start()
+    try:
+        injecteur._alimenter_historique()      # un relevé « en direct » de plus
+        histoire = injecteur._dm._history
+        ts, _vals = histoire.get_donation_series()
+        assert ts == sorted(ts), "le deque doit rester chronologique"
+        # Sur l'heure écoulée, l'amorce et le direct se suivent : la pente est
+        # mesurable. Sur les quinze dernières minutes, deux relevés pris coup
+        # sur coup n'ont rien à comparer — et c'est très bien ainsi.
+        assert histoire.donation_rate(3600.0) is not None
+    finally:
+        injecteur.stop()

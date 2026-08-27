@@ -120,7 +120,7 @@ from core.api_client import (
     StreamerInfo,
     fetch_donation_goals,
 )
-from core.history_store import HistoryStore
+from core.history_store import OUVERTURE_CAGNOTTE, HistoryStore
 from typing import TYPE_CHECKING
 from widgets.bigscreen_widget import BigScreenWidget
 
@@ -6520,13 +6520,31 @@ window.zlUpdate = function (payload) {{
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
                 return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
 
+            def _abscisses(instants: list[float]) -> list[str]:
+                """Étiquettes calées sur le CALENDRIER de l'édition.
+
+                Elles suivaient l'horloge du moment. À sept jours de
+                l'événement — ou en mode mock — le graphe annonçait « jeudi
+                16 h » en regard d'une valeur de 2025 qui appartenait, elle, au
+                vendredi soir : les courbes étaient bien alignées entre elles,
+                l'axe seul racontait autre chose.
+
+                On repart donc de l'ouverture de la cagnotte, la même origine
+                que celle qui aligne les éditions.
+                """
+                if not instants:
+                    return []
+                depart = instants[0]
+                return [_fmt(OUVERTURE_CAGNOTTE + (t - depart))
+                        for t in instants]
+
             # Chaque édition passée, replacée sur le même temps de course :
             # c'est la seule façon de voir QUAND on la dépasse. Chart.js
             # aligne ses séries par indice, d'où une valeur par abscisse.
             self._charts_payload = json.dumps({
-                "ld": [_fmt(t) for t in ts_d],
+                "ld": _abscisses(ts_d),
                 "vd": [round(v) for v in vals_d],
-                "lv": [_fmt(t) for t in ts_v],
+                "lv": _abscisses(ts_v),
                 "vv": [round(v) for v in vals_v],
                 "rd": _references(history.series_editions_alignees(ts_d)),
                 "rv": _references(
