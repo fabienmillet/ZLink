@@ -1038,3 +1038,36 @@ def test_un_objectif_illisible_ne_fait_pas_tomber_les_autres(
     ]
     _run(dm._prefetch_top_goals(n=20))
     assert list(dm._goals_cache) == ["sain"]
+
+
+def test_hors_evenement_l_audience_departage_les_cagnottes_nulles(
+        dm, objectifs_captes, sans_favoris):
+    """Avant le 3 septembre, TOUTES les cagnottes valent zéro.
+
+    Le tri ne triait alors rien et rendait l'ordre de l'API : les vingt
+    premières lignes partaient au chargement, sans rapport avec qui est en
+    direct. Les rares chaînes qui publient déjà leurs objectifs n'étaient
+    donc presque jamais du lot, et la colonne Objectifs restait vide pour
+    tout le monde.
+    """
+    dm._streamers = [
+        _streamer(twitch_login=f"c{i}", donation=0.0, viewers=viewers,
+                  participation_id=f"pid{i}")
+        for i, viewers in enumerate((3, 900, 12, 450))
+    ]
+    _run(dm._prefetch_top_goals(n=2))
+    assert sorted(objectifs_captes) == ["pid1", "pid3"]
+
+
+def test_pendant_l_evenement_la_cagnotte_garde_la_main(
+        dm, objectifs_captes, sans_favoris):
+    """L'audience ne départage QUE les ex æquo : une petite chaîne très suivie
+    ne doit pas passer devant une grosse cagnotte."""
+    dm._streamers = [
+        _streamer(twitch_login="riche", donation=50_000.0, viewers=10,
+                  participation_id="pid_riche"),
+        _streamer(twitch_login="suivi", donation=100.0, viewers=90_000,
+                  participation_id="pid_suivi"),
+    ]
+    _run(dm._prefetch_top_goals(n=1))
+    assert objectifs_captes == ["pid_riche"]

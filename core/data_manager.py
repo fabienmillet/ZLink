@@ -900,7 +900,14 @@ class DataManager(QObject):
         """
         import asyncio as _asyncio
         from core import favorites
-        ranked = sorted(self._streamers, key=lambda s: -s.donation)
+        # L'audience départage les cagnottes égales. Hors événement elles le
+        # sont TOUTES — à zéro : le tri ne triait alors rien, et les vingt
+        # premières lignes rendues par l'API partaient au chargement, sans
+        # rapport avec qui est en direct. Les rares chaînes qui publient déjà
+        # leurs objectifs n'étaient donc presque jamais du lot, et la colonne
+        # Objectifs restait vide pour tout le monde. Pendant l'événement la
+        # cagnotte reprend la main, comme avant.
+        ranked = sorted(self._streamers, key=lambda s: (-s.donation, -s.viewers))
         top = ranked[:n]
         favs = favorites.get()
         if favs:

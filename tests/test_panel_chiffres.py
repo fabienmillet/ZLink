@@ -1717,3 +1717,23 @@ def test_reconstruire_les_onglets_chiffres_ne_laisse_rien_flotter(
                for w in QApplication.topLevelWidgets()
                if w.isVisible() and id(w) not in connues]
     assert surgies == [], "widgets devenus des fenêtres : " + ", ".join(surgies)
+
+
+def test_les_colonnes_qui_peuvent_rester_vides_s_expliquent(stats):
+    """Un tiret sans explication passe pour une panne.
+
+    « Objectifs » et « +/h » n'ont légitimement rien à montrer une bonne part
+    du temps : la question se pose devant le tableau, la réponse doit y être.
+    """
+    entete = stats._ranking_table
+    for colonne in (panel._C_OBJ, panel._C_TEND):
+        bulle = entete.horizontalHeaderItem(colonne).toolTip()
+        assert bulle, f"colonne {colonne} sans infobulle"
+    assert "cinq minutes" in entete.horizontalHeaderItem(panel._C_TEND).toolTip()
+    assert "favoris" in entete.horizontalHeaderItem(panel._C_OBJ).toolTip()
+
+
+def test_chaque_infobulle_vise_une_colonne_existante(stats):
+    """Une clé restée sur un ancien numéro poserait la bulle à côté."""
+    total = stats._ranking_table.columnCount()
+    assert all(0 <= c < total for c in panel._StatsTab._INFOBULLES)

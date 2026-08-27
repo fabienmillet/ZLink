@@ -5527,6 +5527,28 @@ class _StatsTab(QWidget):
         ("Cagnotte", "cagnotte", True),
     ]
 
+    #: Ce que dit une colonne dont on ne devine pas le contenu, et surtout
+    #: pourquoi elle peut être vide. Un tiret sans explication passe pour une
+    #: panne : ces deux-là n'ont légitimement rien à montrer une bonne partie
+    #: du temps, et il faut le dire là où la question se pose.
+    _INFOBULLES = {
+        _C_DUREE: "Depuis quand la chaîne est en direct.",
+        _C_OBJ: "Objectifs de dons atteints sur ceux annoncés.\n"
+                "Chargés pour les chaînes en tête du classement et pour vos "
+                "favoris.\n"
+                "Beaucoup de streamers ne les publient qu'à l'approche de "
+                "l'événement.",
+        _C_VUE: "Spectateurs en ce moment.",
+        _C_TEND: "Spectateurs gagnés ou perdus depuis le début de la "
+                 "session.\n"
+                 "Il faut cinq minutes d'observation avant que la colonne se "
+                 "remplisse,\n"
+                 "et elle repart de zéro à chaque lancement de ZLink : aucune "
+                 "API ne donne\n"
+                 "l'historique d'une chaîne, ZLink le constitue en regardant.",
+        _C_DON: "Ce que la chaîne a récolté depuis le début de l'événement.",
+    }
+
     #: Largeur maximale du contenu. Au-delà, l'œil perd la ligne entre le nom
     #: et le chiffre qui lui correspond — le défaut de l'ancienne version, où
     #: mille deux cents pixels de vide séparaient les deux.
@@ -5685,6 +5707,10 @@ class _StatsTab(QWidget):
             if item is not None:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        for col, texte in self._INFOBULLES.items():
+            item = table.horizontalHeaderItem(col)
+            if item is not None:
+                item.setToolTip(texte)
         table.verticalHeader().setVisible(False)
         table.verticalHeader().setDefaultSectionSize(30)
         # Sans ça un libellé trop long pour sa colonne passe à la ligne et
