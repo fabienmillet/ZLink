@@ -271,9 +271,18 @@ class DataManager(QObject):
         self._timer_goals.stop()
 
     def _history_worker(self) -> None:
-        """Charge l'historique 2026 en arrière-plan puis émet le signal."""
+        """Charge l'historique en arrière-plan puis émet le signal.
+
+        L'édition précédente est chargée depuis le cache par édition, plus fin
+        que le dépôt historique — 332 relevés de cagnotte contre 110 — et c'est
+        elle qu'on superpose aux graphes. En cas d'échec, on retombe sur le
+        dépôt, qui publie la même courbe en plus grossier : mieux vaut une
+        comparaison approximative que pas de comparaison.
+        """
+        from core.history_store import EDITION_PRECEDENTE
         try:
-            _run(self._history.load_historical_2026())
+            if not _run(self._history.charger_edition(EDITION_PRECEDENTE)):
+                _run(self._history.load_historical_2026())
         except Exception:
             logger.exception("_history_worker")
         self.history_updated.emit(self._history)

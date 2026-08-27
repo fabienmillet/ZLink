@@ -25,6 +25,7 @@ survit pas à la plateforme `offscreen`.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -118,7 +119,7 @@ class _FauxHistorique:
 
     def __init__(self, dons=(), viewers=(), rate=None, projection=None,
                  comparaison=None, debut: float = 0.0,
-                 fin: float = 4e9) -> None:
+                 fin: float = 4e9, ref_dons=None, ref_viewers=None) -> None:
         self._dons = list(dons)
         self._viewers = list(viewers)
         self._rate = rate
@@ -126,6 +127,16 @@ class _FauxHistorique:
         self._comparaison = comparaison
         self.event_start_ts = debut
         self.event_end_ts = fin
+        # Courbes de l'édition précédente, superposées aux graphes. None =
+        # aucune référence chargée, le cas le plus courant hors event.
+        self._ref_dons = ref_dons
+        self._ref_viewers = ref_viewers
+
+    def serie_precedente_alignee(self, ts):
+        return list(self._ref_dons) if self._ref_dons else [None] * len(ts)
+
+    def serie_viewers_precedente_alignee(self, ts):
+        return list(self._ref_viewers) if self._ref_viewers else [None] * len(ts)
 
     def get_donation_series(self):
         return ([t for t, _ in self._dons], [v for _, v in self._dons])
@@ -2021,3 +2032,57 @@ def test_sans_identifiant_la_cle_reste_stable():
     cle = panel.cle_evenement(show)
     assert cle == "2026-09-04_18:00_Blind Test Musical"
     assert panel.cle_evenement(_Show(ident="")) == cle
+
+
+# ── superposition de l'édition précédente sur les graphes ────────────────────
+
+def _charge(stats):
+    return json.loads(stats._charts_payload)
+
+
+def test_les_graphes_transportent_la_courbe_de_reference(stats):
+    """Sans elle, on voit sa propre courbe monter sans savoir si c'est mieux
+    ou moins bien que l'an dernier — la question de tout le monde pendant
+    l'événement."""
+    stats._charts_ready = True
+    stats.update_history(_FauxHistorique(
+        dons=[(1_000.0, 500.0), (2_000.0, 900.0)],
+        viewers=[(1_000.0, 10), (2_000.0, 20)],
+        ref_dons=[400.0, 1_100.0], ref_viewers=[8, 25]))
+    charge = _charge(stats)
+    assert charge["pd"] == [400, 1100]
+    assert charge["pv"] == [8, 25]
+    assert len(charge["pd"]) == len(charge["vd"]), (
+        "Chart.js aligne par indice : deux longueurs différentes décaleraient")
+
+
+def test_sans_reference_la_courbe_est_absente_plutot_que_plate(stats):
+    """Une liste de zéros dessinerait une ligne au sol qu'on croirait vraie."""
+    stats._charts_ready = True
+    stats.update_history(_FauxHistorique(
+        dons=[(1_000.0, 500.0)], viewers=[(1_000.0, 10)]))
+    charge = _charge(stats)
+    assert charge["pd"] == []
+    assert charge["pv"] == []
+
+
+def test_un_trou_dans_la_reference_reste_un_trou(stats):
+    """`null` interrompt la courbe ; zéro dessinerait une falaise."""
+    stats._charts_ready = True
+    stats.update_history(_FauxHistorique(
+        dons=[(1_000.0, 500.0), (2_000.0, 900.0)],
+        viewers=[(1_000.0, 10), (2_000.0, 20)],
+        ref_dons=[400.0, None], ref_viewers=[None, None]))
+    charge = _charge(stats)
+    assert charge["pd"] == [400, None]
+    assert charge["pv"] == [], "entièrement vide : la courbe se masque"
+
+
+@pytest.mark.parametrize("serie,attendu", [
+    (None, []),
+    ([], []),
+    ([None, None], []),
+    ([1.4, None, 2.6], [1, None, 3]),
+])
+def test_l_arrondi_de_la_reference_garde_les_trous(serie, attendu):
+    assert panel._arrondi_ou_rien(serie) == attendu

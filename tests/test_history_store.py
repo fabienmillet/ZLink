@@ -743,3 +743,118 @@ def test_les_bornes_de_l_event_sont_exposees():
     assert store.event_start_ts == _EVENT_START
     assert store.event_end_ts == _EVENT_END
     assert store.event_start_ts < store.event_end_ts
+
+
+# ── superposition d'une édition passée ───────────────────────────────────────
+
+def _reponse_edition(charge, statut=200):
+    """Un client httpx dont chaque GET rend `charge`."""
+    import httpx
+
+    def repondre(_requete):
+        if isinstance(charge, str):
+            return httpx.Response(statut, text=charge)
+        return httpx.Response(statut, json=charge)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(repondre))
+
+
+def _edition(dons, vues=()):
+    return {"graph": {"donations": {"all": {
+                          "labels": [t for t, _v in dons],
+                          "values": [v for _t, v in dons]}},
+                      "viewers": {"labels": [t for t, _v in vues],
+                                  "values": [v for _t, v in vues]}}}
+
+
+def _charger_edition(store, charge, statut=200):
+    import asyncio
+
+    async def essai():
+        async with _reponse_edition(charge, statut) as client:
+            return await store.charger_edition("ev-2025", client=client)
+
+    return asyncio.run(essai())
+
+
+_J = 1_757_088_000_000    # 5 septembre 2025, en millisecondes
+_H = 3_600_000
+
+
+def test_une_edition_passee_se_charge_avec_ses_deux_courbes():
+    store = HistoryStore()
+    assert _charger_edition(store, _edition(
+        [(_J, 0), (_J + _H, 1000), (_J + 2 * _H, 3000)],
+        [(_J, 100), (_J + 2 * _H, 500)])) is True
+    assert len(store._previous) == 3
+    assert len(store._previous_viewers) == 2
+    assert store.previous_peak_viewers == 500
+
+
+@pytest.mark.parametrize("charge,statut", [
+    ({}, 200),                                  # pas de section graph
+    ({"graph": {}}, 200),                       # pas de donations
+    (_edition([(_J, 0)]), 200),                 # un seul point : rien à tracer
+    ("pas du json", 200),
+    ({}, 503),
+])
+def test_une_source_qui_se_derobe_ne_casse_rien(charge, statut):
+    """Une comparaison manquante retire une courbe, elle n'empêche pas de
+    suivre l'événement."""
+    store = HistoryStore()
+    assert _charger_edition(store, charge, statut) is False
+    assert store._previous == []
+
+
+def test_un_point_aberrant_est_ecarte_sans_perdre_les_autres():
+    """Un timestamp absurde remonterait jusqu'à datetime.fromtimestamp dans un
+    slot Qt sans try/except, et ferait tomber le panel."""
+    store = HistoryStore()
+    _charger_edition(store, _edition([(_J, 0), (1, 500), (_J + _H, 1000)]))
+    assert [t for t, _v in store._previous] == [_J / 1000, (_J + _H) / 1000]
+
+
+def test_les_points_sont_remis_dans_l_ordre():
+    """`pools.large` du dépôt historique arrive à l'envers : ne pas trier
+    traçait la courbe en sens inverse et donnait une vitesse négative."""
+    store = HistoryStore()
+    _charger_edition(store, _edition([(_J + 2 * _H, 3000), (_J, 0), (_J + _H, 1000)]))
+    assert [v for _t, v in store._previous] == [0.0, 1000.0, 3000.0]
+
+
+def test_la_courbe_passee_est_alignee_sur_le_temps_de_course(horloge):
+    """Les deux éditions ne tombent pas les mêmes jours : c'est le temps écoulé
+    depuis le premier relevé qui les rend comparables, pas la date."""
+    store = HistoryStore()
+    _charger_edition(store, _edition([(_J, 0), (_J + _H, 1200), (_J + 2 * _H, 2000)]))
+
+    depart = _EVENT_START + 3600.0
+    for i in range(3):
+        horloge["t"] = depart + i * 1800.0        # relevés toutes les 30 min
+        store.add_point(i * 1000.0, 10)
+
+    ts, _vals = store.get_donation_series()
+    aligne = store.serie_precedente_alignee(ts)
+    # 0 min → 0 €, 30 min → moitié du premier palier, 60 min → 1 200 €.
+    assert aligne == [0.0, 600.0, 1200.0]
+
+
+def test_hors_de_la_plage_couverte_la_courbe_s_interrompt(horloge):
+    """None, et non zéro : une falaise se lirait comme un effondrement."""
+    store = HistoryStore()
+    _charger_edition(store, _edition([(_J, 0), (_J + _H, 1000)]))
+    depart = _EVENT_START + 3600.0
+    for i in (0, 2):
+        horloge["t"] = depart + i * 3600.0
+        store.add_point(i * 500.0, 10)
+    ts, _vals = store.get_donation_series()
+    assert store.serie_precedente_alignee(ts) == [0.0, None]
+
+
+def test_sans_reference_chargee_la_serie_alignee_est_vide(horloge):
+    store = HistoryStore()
+    horloge["t"] = _EVENT_START + 60.0
+    store.add_point(10.0, 1)
+    ts, _vals = store.get_donation_series()
+    assert store.serie_precedente_alignee(ts) == [None]
+    assert store.serie_viewers_precedente_alignee(ts) == [None]

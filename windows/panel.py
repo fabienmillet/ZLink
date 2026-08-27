@@ -499,6 +499,21 @@ def _sep_vertical() -> QFrame:
     return trait
 
 
+def _arrondi_ou_rien(serie: list) -> list:
+    """Arrondit une série de comparaison, en gardant ses trous.
+
+    `None` traverse jusqu'au JSON en `null`, que Chart.js comprend comme une
+    interruption : la courbe de référence s'arrête là où l'édition passée ne
+    couvre plus, au lieu de retomber à zéro et de dessiner une falaise.
+
+    Une série entièrement vide rend une liste vide, ce qui masque la courbe et
+    son entrée de légende — plutôt qu'une ligne invisible qu'on chercherait.
+    """
+    if not serie or all(v is None for v in serie):
+        return []
+    return [None if v is None else round(v) for v in serie]
+
+
 def cle_evenement(ev) -> str:
     """Identifiant d'un show pour les rappels.
 
@@ -6360,7 +6375,16 @@ const BASE = {{
   maintainAspectRatio: false,
   interaction: {{ mode: 'index', intersect: false }},
   plugins: {{
-    legend: {{ display: false }},
+    // Deux courbes sur un même graphe ne se distinguent plus sans légende.
+    // Elle reste discrète : le trait plein est l'édition en cours, le
+    // pointillé gris celle d'avant, alignée sur le même temps de course.
+    legend: {{
+      display: true, position: 'top', align: 'end',
+      labels: {{
+        color: '#777', boxWidth: 18, boxHeight: 2, padding: 10,
+        font: {{ family: 'Cascadia Code', size: 9 }},
+      }},
+    }},
     tooltip: {{
       backgroundColor: '#1a1a1a', borderColor: '#333', borderWidth: 1,
       titleColor: '#888', bodyColor: '#fff',
@@ -6385,9 +6409,15 @@ const chartDon = new Chart(document.getElementById('cagnotteChart'), {{
   data: {{
     labels: {labels_don},
     datasets: [{{
+      label: '2026',
       data: {data_don},
       borderColor: '#00ff87', backgroundColor: 'rgba(0,255,135,0.08)',
       borderWidth: 2, pointRadius: 0, fill: true, tension: 0.1,
+    }}, {{
+      label: '2025',
+      data: [],
+      borderColor: '#6a6a6a', borderDash: [5, 4], borderWidth: 1.5,
+      pointRadius: 0, fill: false, tension: 0.1, spanGaps: false,
     }}],
   }},
   options: {{
@@ -6405,9 +6435,15 @@ const chartView = new Chart(document.getElementById('viewersChart'), {{
   data: {{
     labels: {labels_view},
     datasets: [{{
+      label: '2026',
       data: {data_view},
       borderColor: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.08)',
       borderWidth: 2, pointRadius: 0, fill: true, tension: 0.1,
+    }}, {{
+      label: '2025',
+      data: [],
+      borderColor: '#6a6a6a', borderDash: [5, 4], borderWidth: 1.5,
+      pointRadius: 0, fill: false, tension: 0.1, spanGaps: false,
     }}],
   }},
   options: {{
@@ -6427,8 +6463,14 @@ window.zlUpdate = function (payload) {{
   var d = JSON.parse(payload);
   chartDon.data.labels = d.ld;
   chartDon.data.datasets[0].data = d.vd;
+  chartDon.data.datasets[1].data = d.pd || [];
   chartView.data.labels = d.lv;
   chartView.data.datasets[0].data = d.vv;
+  chartView.data.datasets[1].data = d.pv || [];
+  // Une référence absente retire sa courbe ET son entrée de légende, plutôt
+  // que d'afficher une ligne vide qu'on chercherait sur le graphe.
+  chartDon.data.datasets[1].hidden = !(d.pd && d.pd.length);
+  chartView.data.datasets[1].hidden = !(d.pv && d.pv.length);
   chartDon.update('none');
   chartView.update('none');
 }};
@@ -6452,11 +6494,18 @@ window.zlUpdate = function (payload) {{
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
                 return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
 
+            # L'édition précédente, replacée sur le même temps de course :
+            # c'est la seule façon de voir QUAND on la dépasse. Chart.js
+            # aligne ses séries par indice, d'où une valeur par abscisse.
+            ref_d = history.serie_precedente_alignee(ts_d)
+            ref_v = history.serie_viewers_precedente_alignee(ts_v)
             self._charts_payload = json.dumps({
                 "ld": [_fmt(t) for t in ts_d],
                 "vd": [round(v) for v in vals_d],
                 "lv": [_fmt(t) for t in ts_v],
                 "vv": [round(v) for v in vals_v],
+                "pd": _arrondi_ou_rien(ref_d),
+                "pv": _arrondi_ou_rien(ref_v),
             })
             self._push_charts()
 

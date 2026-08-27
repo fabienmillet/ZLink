@@ -21,6 +21,15 @@ DEBUG: bool = True
 _EVENT_START: float = datetime(2026, 9, 3, 0, 0, 0, tzinfo=timezone.utc).timestamp()
 _EVENT_END: float = datetime(2026, 9, 7, 2, 0, 0, tzinfo=timezone.utc).timestamp()
 
+#: Cache par édition d'evenmorestats. L'identifiant de l'édition complète
+#: l'adresse : c'est ce qui rend plusieurs années superposables, là où le
+#: dépôt historique ne publie que la dernière.
+_URL_EDITION_BASE = (
+    "https://evenmorestats-cache.s3.gra.io.cloud.ovh.net/metrics/")
+
+#: ZEvent 2025, l'édition de référence pour comparer 2026.
+EDITION_PRECEDENTE = "019d3f95-bd24-7e5d-861b-1de6243e3169"
+
 # Plage de timestamps acceptée pour les données tierces (2020 → 2035)
 _TS_MIN: float = 1_577_836_800.0
 _TS_MAX: float = 2_051_222_400.0
@@ -60,6 +69,10 @@ class HistoryStore:
         # pas se mélanger aux points de l'édition en cours, que get_*_series
         # filtre par fenêtre.
         self._previous: list[tuple[float, float]] = []
+        #: Audience de l'édition précédente. Seule la cagnotte était conservée
+        #: en série ; il n'y avait qu'un pic. Superposer deux courbes demande
+        #: la série entière des deux côtés.
+        self._previous_viewers: list[tuple[float, float]] = []
         self._previous_peak_viewers: int = 0
         #: Instant du premier relevé pris EN DIRECT depuis le dernier
         #: préchargement. Sépare ce que ZLink a observé lui-même de la courbe
@@ -198,6 +211,55 @@ class HistoryStore:
 
     # -- comparaison avec l'édition précédente ---------------------------------
 
+    @staticmethod
+    def _interpoler(points: list, elapsed_s: float) -> float | None:
+        """Valeur d'une série après `elapsed_s`, entre les deux points encadrants.
+
+        L'origine est le PREMIER point relevé, pas une date : deux éditions ne
+        tombent pas les mêmes jours, et c'est le temps de course qui les rend
+        comparables. Hors de la plage couverte, rien — extrapoler une édition
+        terminée n'aurait pas de sens.
+        """
+        if len(points) < 2 or elapsed_s < 0:
+            return None
+        cible = points[0][0] + elapsed_s
+        if cible > points[-1][0]:
+            return None
+        # Les points sont peu nombreux (quelques centaines) : la recherche
+        # linéaire coûte moins qu'un index à maintenir.
+        for (ta, va), (tb, vb) in zip(points, points[1:]):
+            if ta <= cible <= tb:
+                if tb == ta:
+                    return vb
+                return va + (vb - va) * (cible - ta) / (tb - ta)
+        return None
+
+    def _alignee(self, points: list,
+                 ts_courants: list[float]) -> list[float | None]:
+        """La série `points` replacée sur l'horloge de l'édition en cours.
+
+        Une valeur par instant courant, pour que les deux courbes partagent
+        exactement le même axe : Chart.js aligne ses séries par INDICE, pas par
+        abscisse — deux tableaux de longueurs différentes se décaleraient.
+
+        None là où l'édition de référence ne couvre pas encore, ou plus : la
+        courbe s'y interrompt au lieu de retomber à zéro.
+        """
+        if not points or not ts_courants:
+            return [None] * len(ts_courants)
+        origine = ts_courants[0]
+        return [self._interpoler(points, t - origine) for t in ts_courants]
+
+    def serie_precedente_alignee(
+            self, ts_courants: list[float]) -> list[float | None]:
+        """Cagnotte de l'édition précédente, au même temps de course."""
+        return self._alignee(self._previous, ts_courants)
+
+    def serie_viewers_precedente_alignee(
+            self, ts_courants: list[float]) -> list[float | None]:
+        """Audience de l'édition précédente, au même temps de course."""
+        return self._alignee(self._previous_viewers, ts_courants)
+
     def previous_total_at(self, elapsed_s: float) -> float | None:
         """Cagnotte de l'édition précédente après `elapsed_s` de course.
 
@@ -209,22 +271,7 @@ class HistoryStore:
         Interpolation linéaire entre les deux points encadrants ; None si l'on
         sort de la plage couverte.
         """
-        pts = self._previous
-        if len(pts) < 2 or elapsed_s < 0:
-            return None
-        t0 = pts[0][0]
-        cible = t0 + elapsed_s
-        if cible < t0 or cible > pts[-1][0]:
-            return None
-        # Les points sont peu nombreux (une centaine) : la recherche linéaire
-        # coûte moins qu'un index à maintenir.
-        for (ta, va), (tb, vb) in zip(pts, pts[1:]):
-            if ta <= cible <= tb:
-                if tb == ta:
-                    return vb
-                k = (cible - ta) / (tb - ta)
-                return va + (vb - va) * k
-        return None
+        return self._interpoler(self._previous, elapsed_s)
 
     def compare_to_previous(self, current_total: float,
                             now_ts: float | None = None) -> tuple[float, float] | None:
@@ -271,6 +318,74 @@ class HistoryStore:
             return [], []
         ts, vals = zip(*pairs)
         return list(ts), list(vals)
+
+    async def charger_edition(self, event_id: str, client=None) -> bool:
+        """Charge la courbe d'une édition passée, par son identifiant.
+
+        Source `evenmorestats-cache`, adressée PAR ÉDITION — c'est ce qui
+        permettra d'en superposer plusieurs le jour où on le voudra, là où le
+        dépôt historique ne publie que la dernière. Elle est aussi trois fois
+        plus fine : 332 relevés de cagnotte contre 110.
+
+        Les valeurs y sont déjà en euros, contrairement au reste des APIs
+        communautaires qui comptent en centimes — vérifié sur l'édition 2025,
+        dont le total ressort à 16 178 394 et non à cent fois plus.
+
+        Rend False sans rien casser si la source se dérobe : une comparaison
+        manquante retire une courbe, elle n'empêche pas de suivre l'événement.
+        """
+        url = (_URL_EDITION_BASE + str(event_id).strip("/ ") + "/global.json")
+        try:
+            import httpx
+            if client is None:
+                async with httpx.AsyncClient(timeout=15) as propre:
+                    reponse = await propre.get(url)
+                    reponse.raise_for_status()
+                    data = reponse.json()
+            else:
+                reponse = await client.get(url)
+                reponse.raise_for_status()
+                data = reponse.json()
+        except Exception as exc:  # noqa: BLE001 — toute panne réseau vaut « pas de courbe »
+            logger.warning("Édition %s : historique indisponible — %s", event_id, exc)
+            return False
+
+        graphe = (data or {}).get("graph") or {}
+        dons = self._lire_serie(graphe.get("donations", {}).get("all"))
+        vues = self._lire_serie(graphe.get("viewers"))
+        if len(dons) < 2:
+            logger.warning("Édition %s : courbe de cagnotte inexploitable", event_id)
+            return False
+
+        # Tout-ou-rien, comme le chargeur historique : remplacer une série et
+        # pas l'autre laisserait deux éditions différentes côte à côte.
+        self._previous = dons
+        self._previous_viewers = vues
+        if vues:
+            self._previous_peak_viewers = int(max(v for _t, v in vues))
+        logger.info(
+            "Édition %s : %d points de cagnotte, %d de viewers, total %.0f €",
+            event_id, len(dons), len(vues), dons[-1][1])
+        return True
+
+    @staticmethod
+    def _lire_serie(section: object) -> list[tuple[float, float]]:
+        """(labels, values) d'une section du graphe → points chronologiques.
+
+        Les points aberrants sont écartés un par un : un timestamp absurde
+        remonterait jusqu'à `datetime.fromtimestamp` dans un slot Qt sans
+        try/except, et ferait tomber le panel.
+        """
+        if not isinstance(section, dict):
+            return []
+        labels = section.get("labels")
+        valeurs = section.get("values")
+        if not isinstance(labels, list) or not isinstance(valeurs, list):
+            return []
+        points = [p for p in (_sane_point(t, v)
+                              for t, v in zip(labels, valeurs)) if p]
+        points.sort(key=lambda p: p[0])
+        return points
 
     async def load_historical_2026(self):
         """Charge l'historique depuis un dépôt GitHub Pages tiers.
