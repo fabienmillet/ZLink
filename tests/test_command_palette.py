@@ -91,6 +91,77 @@ def test_la_liste_est_plafonnee(qtbot):
     assert len(p._results) <= p._MAX_RESULTS
 
 
+# ── le chevron : ne montrer que les commandes ────────────────────────────────
+
+def test_le_chevron_ecarte_les_streamers(palette):
+    """Trois actions noyées dans 300 chaînes ne se trouvent jamais."""
+    palette._refilter(">")
+    kinds = {k for k, _c, _l in palette._results}
+    assert "streamer" not in kinds
+    assert kinds == {"tab", "action"}
+
+
+def test_le_chevron_seul_montre_toutes_les_commandes(palette):
+    """Le chevron sert à VOIR les commandes, pas à en filtrer une connue :
+    sans mot derrière, il doit toutes les lister."""
+    palette._refilter(">")
+    cles = _cles(palette)
+    assert {"Accueil", "Stats"} <= set(cles)
+    assert {"clip", "replay", "recap"} <= set(cles)
+
+
+def test_le_chevron_filtre_ce_qui_le_suit(palette):
+    palette._refilter("> moment")
+    assert _cles(palette) == ["clip"]
+
+
+def test_le_chevron_tolere_l_absence_d_espace(palette):
+    """`>moment` est ce qu'on tape quand on va vite."""
+    palette._refilter(">moment")
+    assert _cles(palette) == ["clip"]
+
+
+def test_le_chevron_respecte_les_actions_de_l_hote(qtbot):
+    """Le plein écran ne sait pas montrer le récapitulatif de session.
+
+    Le chevron ne doit pas rouvrir la porte que le filtre de l'hôte ferme :
+    listée sans être exécutable, la commande retombait dans un `logger.debug`.
+    """
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    p = CommandPalette(parent, [], actions=["clip"])
+    p._parent_du_test = parent
+    p._refilter(">")
+    assert _cles(p) == ["clip"]
+
+
+def test_le_champ_annonce_le_chevron(palette):
+    """Une commande qu'on ne sait pas invoquer n'existe pas.
+
+    L'annonce vit dans le texte de substitution, lu précisément quand le champ
+    est vide ; la ligne d'aide du bas porte déjà quatre raccourcis.
+    """
+    assert ">" in palette._input.placeholderText()
+
+
+# ── les favoris passent devant ───────────────────────────────────────────────
+
+def test_les_favoris_passent_devant_les_plus_suivis(palette, monkeypatch):
+    """À vide la liste est triée par audience : un favori peu suivi, ou hors
+    ligne, se retrouverait derrière trois cents chaînes."""
+    monkeypatch.setattr("widgets.command_palette.favorites.get",
+                        lambda: {"horty"})
+    palette._refilter("")
+    assert _cles(palette)[0] == "horty", "le favori hors ligne passe devant"
+
+
+def test_un_favori_se_reconnait_a_son_etoile(palette, monkeypatch):
+    monkeypatch.setattr("widgets.command_palette.favorites.get",
+                        lambda: {"domingo"})
+    palette._refilter("domingo")
+    assert palette._results[0][2].startswith("★ ")
+
+
 # ── activation ───────────────────────────────────────────────────────────────
 
 def test_entree_ouvre_le_flux(palette):
@@ -289,3 +360,17 @@ def test_une_palette_ouverte_sans_streamers_s_agrandit_ensuite(palette_peuplee):
     assert p.height() > minuscule
     boite, aide = _boite_et_aide(p)
     assert boite.y() + aide.y() + aide.height() <= p.height()
+
+
+def test_le_chevron_ne_deborde_ni_ne_laisse_de_vide(palette_peuplee):
+    """Le chevron change le nombre de lignes d'un coup — treize chaînes, puis
+    cinq commandes, puis une seule. C'est le geste qui faisait déborder la
+    liste par-dessus l'aide, ou flotter la boîte au milieu du vide."""
+    p = palette_peuplee
+    p.open()
+    for texte in ("", ">", "> moment", ">zzz", "", "> "):
+        p._input.setText(texte)
+        boite, aide = _boite_et_aide(p)
+        assert boite.y() == 0, f"{boite.y()} px de vide sur {texte!r}"
+        bas = boite.y() + aide.y() + aide.height()
+        assert bas <= p.height(), f"débordement de {bas - p.height()} px sur {texte!r}"

@@ -58,6 +58,14 @@ class CommandPalette(QWidget):
         ("recap",  "Récapitulatif de session"),
     ]
 
+    #: Préfixe qui écarte les streamers pour ne garder que commandes et
+    #: onglets — le chevron des palettes de VS Code, Sublime ou Slack.
+    #:
+    #: Sans lui, les trois actions n'étaient atteignables qu'en devinant un mot
+    #: de leur libellé : à vide la liste ne montre que des chaînes, et « moment »
+    #: ou « récapitulatif » ne s'inventent pas.
+    _PREFIXE_COMMANDES = ">"
+
     _MAX_RESULTS = 9
 
     #: Hauteur d'une ligne de résultat, avatar compris.
@@ -119,7 +127,12 @@ class CommandPalette(QWidget):
 
         self._input = QLineEdit()
         self._input.setFont(QFont(_FONT_SEGOE, 14))
-        self._input.setPlaceholderText("Rechercher un streamer, un onglet…")
+        # Le chevron s'annonce ICI, et pas dans la ligne d'aide du bas : il ne
+        # sert qu'au départ d'une recherche, donc quand le champ est vide —
+        # exactement le moment où le texte de substitution est lu. L'aide, elle,
+        # est déjà chargée de quatre raccourcis.
+        self._input.setPlaceholderText(
+            "Rechercher un streamer, un onglet…    >  pour les actions")
         self._input.setStyleSheet(
             "QLineEdit { background: #0d0d0d; color: #ffffff; border: none; "
             "border-radius: 5px; padding: 8px 10px; }"
@@ -221,13 +234,20 @@ class CommandPalette(QWidget):
     # -- filtrage --------------------------------------------------------------
 
     def _refilter(self, text: str) -> None:
-        q = text.strip().lower()
+        brut = text.strip()
+        commandes_seules = brut.startswith(self._PREFIXE_COMMANDES)
+        if commandes_seules:
+            brut = brut[len(self._PREFIXE_COMMANDES):]
+        q = brut.strip().lower()
         self._results = []
         # Les onglets ne remontent que sur une recherche explicite : à vide, la
         # liste doit proposer ce qu'on cherche neuf fois sur dix, des streamers.
-        if q:
+        # Le chevron est justement cette demande explicite, même sans un mot
+        # derrière : il sert à VOIR les commandes, pas à en filtrer une connue.
+        if q or commandes_seules:
             self._ajouter_commandes(q)
-        self._ajouter_streamers(q)
+        if not commandes_seules:
+            self._ajouter_streamers(q)
         self._results = self._results[:self._MAX_RESULTS]
         self._afficher_resultats()
 
