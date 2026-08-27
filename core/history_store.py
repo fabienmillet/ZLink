@@ -61,21 +61,47 @@ class HistoryStore:
         # filtre par fenêtre.
         self._previous: list[tuple[float, float]] = []
         self._previous_peak_viewers: int = 0
+        #: Instant du premier relevé pris EN DIRECT depuis le dernier
+        #: préchargement. Sépare ce que ZLink a observé lui-même de la courbe
+        #: chargée depuis GitHub, les deux vivant dans le même deque.
+        self._live_depuis: float | None = None
 
     def add_point(self, donation: float, viewers: int) -> None:
         ts = time.time()
+        if self._live_depuis is None:
+            self._live_depuis = ts
         self._donation.append((ts, donation))
         self._viewers.append((ts, viewers))
 
     def _in_event_window(self) -> bool:
         return _EVENT_START <= time.time() <= _EVENT_END
 
+    def _garder(self, ts: float) -> bool:
+        """Ce point appartient-il à l'édition EN COURS.
+
+        Un point de la fenêtre de l'édition en est toujours.
+
+        En dehors, DEBUG tranche — et seulement pour les relevés pris EN
+        DIRECT. C'est ce que le module annonce depuis toujours (« en test,
+        renvoie les données même hors fenêtre event ») sans jamais le faire :
+        le premier garde respectait DEBUG, ce filtre-ci l'ignorait, et la
+        série revenait vide quand même. Le mode mock restait donc sans
+        courbe, sans vitesse et sans projection.
+
+        L'historique préchargé, lui, reste borné à sa fenêtre quoi qu'il
+        arrive : le deque porte aussi la courbe de l'édition précédente, et
+        la publier donnerait la vitesse de fin du ZEvent 2025.
+        """
+        if _EVENT_START <= ts <= _EVENT_END:
+            return True
+        return DEBUG and self._live_depuis is not None and ts >= self._live_depuis
+
     def get_donation_series(self) -> tuple[list[float], list[float]]:
         if not DEBUG and not self._in_event_window():
             return [], []
         if not self._donation:
             return [], []
-        pairs = [(ts, v) for ts, v in self._donation if _EVENT_START <= ts <= _EVENT_END]
+        pairs = [(ts, v) for ts, v in self._donation if self._garder(ts)]
         if not pairs:
             return [], []
         ts, vals = zip(*pairs)
@@ -208,7 +234,7 @@ class HistoryStore:
             return [], []
         if not self._viewers:
             return [], []
-        pairs = [(ts, v) for ts, v in self._viewers if _EVENT_START <= ts <= _EVENT_END]
+        pairs = [(ts, v) for ts, v in self._viewers if self._garder(ts)]
         if not pairs:
             return [], []
         ts, vals = zip(*pairs)
@@ -257,6 +283,9 @@ class HistoryStore:
             # Copie de la courbe précédente AVANT que les points en direct ne
             # s'y ajoutent : c'est elle qui servira de référence.
             self._previous = [(t, v) for t, v in self._donation]
+            # Le préchargement remplace tout : les relevés en direct
+            # recommencent après lui.
+            self._live_depuis = None
             if self._viewers:
                 # int() : _sane_point convertit tout en float, et la propriété
                 # annonce un entier — un nombre de spectateurs n'est pas décimal.

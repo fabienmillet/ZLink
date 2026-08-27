@@ -200,12 +200,14 @@ def test_les_points_ressortent_dans_l_ordre_chronologique(horloge):
     assert v_vals == [10, 20, 15]
 
 
-def test_les_points_hors_fenetre_event_sont_filtres(horloge):
+def test_les_points_hors_fenetre_event_sont_filtres(horloge, monkeypatch):
     """La fenêtre isole l'édition en cours de l'historique préchargé.
 
-    Sans ce filtre, la courbe de l'édition précédente s'afficherait comme si
-    elle appartenait à celle-ci.
+    Hors test, elle tranche seule : un relevé pris avant ou après l'édition
+    n'en fait pas partie. En test, c'est la PROVENANCE qui départage — voir
+    `test_debug_rend_les_points_pris_en_direct_hors_fenetre`.
     """
+    monkeypatch.setattr(history_store, "DEBUG", False)
     store = HistoryStore()
     horloge["t"] = _EVENT_START - 1.0
     store.add_point(500.0, 5)
@@ -251,22 +253,46 @@ def test_hors_debug_et_hors_event_les_series_sont_muettes(horloge, monkeypatch):
     assert store.get_viewers_series() == ([], [])
 
 
-@pytest.mark.xfail(reason="DEBUG=True ne rend rien hors fenêtre : le filtre "
-                          "par timestamp de get_*_series annule le contournement",
-                   strict=False)
-def test_debug_rend_les_points_meme_hors_fenetre(horloge, monkeypatch):
-    """Intention documentée en tête de module : « En test → renvoie les données
+def test_debug_rend_les_points_pris_en_direct_hors_fenetre(horloge, monkeypatch):
+    """Intention annoncée en tête de module : « en test, renvoie les données
     même hors fenêtre event ».
 
-    En pratique DEBUG ne court-circuite que le test sur l'heure courante ; les
-    points restent filtrés un par un sur la fenêtre, donc un relevé pris
-    aujourd'hui (hors édition) disparaît quand même.
+    Elle n'était pas tenue : le premier garde respectait DEBUG, le filtre
+    point par point l'ignorait, et la série revenait vide quand même. Le mode
+    mock restait donc sans courbe, sans vitesse et sans projection.
     """
     monkeypatch.setattr(history_store, "DEBUG", True)
     store = HistoryStore()
     horloge["t"] = _EVENT_START - 86400.0
     store.add_point(1000.0, 10)
     assert store.get_donation_series()[1] == [1000.0]
+    assert store.get_viewers_series()[1] == [10]
+
+
+def test_l_historique_precharge_reste_borne_a_sa_fenetre(horloge, monkeypatch):
+    """Même en test, la courbe de l'édition PRÉCÉDENTE ne doit pas ressortir.
+
+    C'est elle qui vit dans le même deque : la publier donnerait la vitesse
+    de fin du ZEvent 2025 présentée comme celle en cours.
+    """
+    monkeypatch.setattr(history_store, "DEBUG", True)
+    store = HistoryStore()
+    store._donation.append((_EVENT_START - 365 * 86400.0, 9_000_000.0))
+    store._viewers.append((_EVENT_START - 365 * 86400.0, 500_000))
+    assert store.get_donation_series() == ([], [])
+    assert store.get_viewers_series() == ([], [])
+
+
+def test_un_prechargement_repart_a_zero_pour_le_direct(horloge, monkeypatch):
+    """Le préchargement remplace tout : ce qui précède n'est plus du direct."""
+    monkeypatch.setattr(history_store, "DEBUG", True)
+    store = HistoryStore()
+    horloge["t"] = _EVENT_START - 86400.0
+    store.add_point(1000.0, 10)
+    store._live_depuis = None          # ce que fait un rechargement
+    store._donation.clear()
+    store._donation.append((_EVENT_START - 86400.0, 1000.0))
+    assert store.get_donation_series() == ([], [])
 
 
 # ── vitesse de collecte ──────────────────────────────────────────────────────
