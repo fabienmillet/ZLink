@@ -192,6 +192,7 @@ class MockInjector(QObject):
         # Événements centrés sur maintenant pour la timeline
         mock_events = self._build_mock_events()
         self._dm.events_updated.emit(mock_events)
+        self._amorcer_historique()
         # Émission initiale — remplace ce que DataManager aurait émis
         self._emit_all()
         self._t_donation.start()
@@ -294,7 +295,75 @@ class MockInjector(QObject):
     def _emit_all(self) -> None:
         self._dm.streamers_updated.emit(list(self._streamers))
         self._dm.global_stats_updated.emit(self._stats)
+        self._alimenter_historique()
         self._emit_goals()
+
+    #: Passé simulé au démarrage : une heure, un relevé toutes les deux
+    #: minutes. Assez pour que la vitesse de collecte ait de quoi se mesurer
+    #: — elle exige un écart de six minutes — sans attendre devant l'écran.
+    _PASSE_S = 3600.0
+    _PAS_S = 120.0
+
+    def _amorcer_historique(self) -> None:
+        """Donne au mock une heure de passé, en montant jusqu'au total actuel.
+
+        Le mode mock simule un événement DÉJÀ en cours : sans passé, ni les
+        courbes ni la vitesse ni la projection n'ont rien à montrer avant
+        plusieurs minutes de fonctionnement, et l'onglet Accueil donne
+        l'impression d'être cassé.
+
+        La montée est linéaire, ce qu'aucune vraie collecte n'est — mais on
+        cherche ici à éprouver l'affichage, pas à imiter une soirée.
+        """
+        histoire = getattr(self._dm, "_history", None)
+        if histoire is None:
+            return
+        import time as _time
+        from core.history_store import _EVENT_END, _EVENT_START
+
+        maintenant = _time.time()
+        total = float(self._stats.donation_total or 0.0)
+        vues = int(self._stats.viewers_total or 0)
+
+        # La pente moyenne d'une édition, pas la pente qui mènerait de zéro au
+        # total en une heure. Amorcer une montée de zéro à 4,7 M€ sur soixante
+        # minutes donnait 77 000 €/min, et une projection à 453 MILLIONS —
+        # exactement l'absurdité que le garde-fou d'origine évitait.
+        duree_min = max(1.0, (_EVENT_END - _EVENT_START) / 60.0)
+        par_minute = total / duree_min
+        montee = par_minute * (self._PASSE_S / 60.0)
+
+        pas = max(2, int(self._PASSE_S / self._PAS_S))
+        for i in range(pas):
+            recul = self._PASSE_S - i * self._PAS_S
+            histoire.add_point(
+                max(0.0, total - par_minute * (recul / 60.0)),
+                vues,       # l'audience oscille, elle ne monte pas depuis zéro
+                instant=maintenant - recul,
+            )
+        logger.info(
+            "MOCK : %d relevés amorcés sur %.0f min (+%.0f €, soit %.0f €/min)",
+            pas, self._PASSE_S / 60.0, montee, par_minute)
+
+    def _alimenter_historique(self) -> None:
+        """Range le relevé simulé dans l'historique, comme le ferait l'API.
+
+        Le mode mock rejoue les signaux un par un, sans passer par
+        `DataManager._on_data_updated` — c'est justement ce qui lui permet de
+        n'avoir aucun réseau. Mais cette méthode-là faisait DEUX choses de
+        plus que d'émettre : elle rangeait le point dans l'historique et
+        annonçait `history_updated`.
+
+        Sans elles, l'historique restait vide en mock : pas de courbes, pas de
+        vitesse de collecte, et l'Accueil affichait « disponible au début de
+        l'event » pendant que des dons tombaient à chaque seconde.
+        """
+        histoire = getattr(self._dm, "_history", None)
+        if histoire is None:
+            return
+        histoire.add_point(self._stats.donation_total,
+                           self._stats.viewers_total)
+        self._dm.history_updated.emit(histoire)
 
     def _emit_goals(self) -> None:
         """Rejoue les deux signaux d'objectifs de DataManager.

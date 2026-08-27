@@ -66,9 +66,17 @@ class HistoryStore:
         #: chargée depuis GitHub, les deux vivant dans le même deque.
         self._live_depuis: float | None = None
 
-    def add_point(self, donation: float, viewers: int) -> None:
-        ts = time.time()
-        if self._live_depuis is None:
+    def add_point(self, donation: float, viewers: int,
+                  instant: float | None = None) -> None:
+        """Range un relevé. `instant` permet d'en antidater un.
+
+        Antidater sert au mode mock, qui simule un événement DÉJÀ en cours :
+        sans un peu de passé, la vitesse de collecte n'a rien à comparer et
+        reste muette six minutes durant — le temps qu'exige son plus petit
+        écart mesurable.
+        """
+        ts = time.time() if instant is None else float(instant)
+        if self._live_depuis is None or ts < self._live_depuis:
             self._live_depuis = ts
         self._donation.append((ts, donation))
         self._viewers.append((ts, viewers))

@@ -53,6 +53,14 @@ class _DataManagerFactice(QObject):
     goals_raw_updated = pyqtSignal(dict)
     goal_accomplished = pyqtSignal(str, str)
     goal_imminent = pyqtSignal(str, str, str, float, str)
+    history_updated = pyqtSignal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Un VRAI HistoryStore : c'est lui que l'injecteur doit alimenter, et
+        # une doublure ne dirait rien de la vitesse ni de la projection.
+        from core.history_store import HistoryStore
+        self._history = HistoryStore()
 
 
 @pytest.fixture(scope="module")
@@ -613,3 +621,62 @@ def test_les_hotes_des_evenements_sont_des_streamers_du_mock():
     logins_connus = {seed[0] for seed in _MOCK_STREAMERS_SEED}
     for e in MockInjector._build_mock_events():
         assert set(e.host_uuids) <= logins_connus
+
+
+# ── historique ───────────────────────────────────────────────────────────────
+
+def test_le_mock_alimente_l_historique(injecteur):
+    """Le mock rejoue les signaux un par un, sans passer par
+    `_on_data_updated` — c'est ce qui lui évite tout réseau. Mais cette
+    méthode faisait DEUX choses de plus qu'émettre : ranger le point dans
+    l'historique, et annoncer `history_updated`.
+
+    Sans elles, l'historique restait vide : pas de courbes, pas de vitesse, et
+    l'Accueil affichait « disponible au début de l'event » pendant que des
+    dons tombaient à chaque seconde.
+    """
+    injecteur.start()
+    try:
+        ts, vals = injecteur._dm._history.get_donation_series()
+        assert len(ts) > 2, "l'historique doit être amorcé"
+        assert vals[-1] > 0
+    finally:
+        injecteur.stop()
+
+
+def test_le_mock_amorce_assez_de_passe_pour_une_vitesse(injecteur):
+    """`donation_rate` exige deux relevés espacés de six minutes : sans passé,
+    la vitesse restait muette tout ce temps devant l'écran."""
+    injecteur.start()
+    try:
+        assert injecteur._dm._history.donation_rate() is not None
+    finally:
+        injecteur.stop()
+
+
+def test_la_projection_du_mock_reste_un_ordre_de_grandeur(injecteur):
+    """Une rampe de zéro au total en une heure donnait 77 000 €/min et une
+    projection à 453 MILLIONS — l'absurdité même que le garde-fou évitait.
+
+    L'amorce suit donc la pente MOYENNE d'une édition.
+    """
+    injecteur.start()
+    try:
+        histoire = injecteur._dm._history
+        projete = histoire.projected_total(histoire.event_end_ts)
+        assert projete is not None
+        acquis = histoire.get_donation_series()[1][-1]
+        assert acquis < projete < acquis * 5, (
+            f"projection invraisemblable : {projete:.0f} pour {acquis:.0f} acquis")
+    finally:
+        injecteur.stop()
+
+
+def test_l_audience_amorcee_ne_part_pas_de_zero(injecteur):
+    """Elle oscille autour de son niveau, elle ne monte pas depuis rien."""
+    injecteur.start()
+    try:
+        _ts, vues = injecteur._dm._history.get_viewers_series()
+        assert min(vues) == max(vues) > 0
+    finally:
+        injecteur.stop()
