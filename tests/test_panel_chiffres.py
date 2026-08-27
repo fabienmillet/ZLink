@@ -1844,3 +1844,16 @@ def test_avec_des_objectifs_l_entree_porte_le_compte(stats):
                   if "Objectifs" in a.text())
     assert action.isEnabled() is True
     assert "(1/3)" in action.text()
+
+
+@pytest.mark.parametrize("delta,attendu", [
+    (None, "inconnu"),
+    (0.0, "stable"),
+    (0.4, "stable"),      # bruit d'arrondi de la cagnotte, pas une montée
+    (1.0, "hausse"),
+    (12_400.0, "hausse"),
+])
+def test_le_sens_d_une_tendance_en_euros(delta, attendu):
+    """Jamais « baisse » : une cagnotte ne redescend pas, et `tendances.cagnotte`
+    borne déjà l'écart à zéro."""
+    assert panel._sens_tendance_euros(delta) == attendu

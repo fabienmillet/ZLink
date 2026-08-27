@@ -1602,16 +1602,22 @@ class _AccueilGoalItem(QWidget):
         # Ligne 1 : streamer + nom goal + pct
         row1 = QHBoxLayout()
         row1.setSpacing(6)
-        streamer_lbl = QLabel(g.streamer_display[:16])
+        # Le compte de caractères tombe où il tombe, souvent en plein mot :
+        # l'item fait 52 px et ne peut pas grandir, mais l'infobulle rend le
+        # texte entier — sans elle, la coupe n'apprend rien.
+        streamer_lbl = QLabel(_couper_avec_points(g.streamer_display, 16))
         streamer_lbl.setTextFormat(Qt.TextFormat.PlainText)
         streamer_lbl.setFont(_bold_font(_FONT_SEGOE, 11))
         streamer_lbl.setStyleSheet("color: #ffffff; background: transparent;")
+        if streamer_lbl.text() != g.streamer_display:
+            streamer_lbl.setToolTip(_infobulle(g.streamer_display))
         row1.addWidget(streamer_lbl)
-        goal_name = g.goal_name[:30] + ("…" if len(g.goal_name) > 30 else "")
-        goal_lbl = QLabel(goal_name)
+        goal_lbl = QLabel(_couper_avec_points(g.goal_name, 30))
         goal_lbl.setTextFormat(Qt.TextFormat.PlainText)
         goal_lbl.setFont(QFont(_FONT_SEGOE, 11))
         goal_lbl.setStyleSheet("color: #888888; background: transparent;")
+        if goal_lbl.text() != g.goal_name:
+            goal_lbl.setToolTip(_infobulle(g.goal_name))
         row1.addWidget(goal_lbl, stretch=1)
         pct_lbl = QLabel(f"{g.pct:.0f}%")
         pct_lbl.setFont(QFont(_FONT_SEGOE, 11))
@@ -5476,6 +5482,18 @@ def _tendance_dons_de(s: StreamerInfo) -> float:
     return float(tendances.cagnotte(s.twitch_login) or 0.0)
 
 
+def _sens_tendance_euros(delta: float | None) -> str:
+    """Dans quel sens va la cagnotte : inconnu, stable ou hausse.
+
+    Jamais « baisse » : `tendances.cagnotte` borne déjà à zéro, une cagnotte
+    ne redescendant pas. Et jamais « hausse » sous l'euro : un centime d'écart
+    entre deux relevés est du bruit d'arrondi, pas une montée.
+    """
+    if delta is None:
+        return "inconnu"
+    return "hausse" if delta >= 1.0 else "stable"
+
+
 def _objectif_atteint(but: object) -> bool:
     """Un objectif de dons est-il tombé.
 
@@ -6011,8 +6029,7 @@ class _StatsTab(QWidget):
         from core import tendances
 
         delta = tendances.cagnotte(s.twitch_login)
-        sens = "inconnu" if delta is None else (
-            "hausse" if delta >= 1.0 else "stable")
+        sens = _sens_tendance_euros(delta)
         cellule = _CelluleNombre(_texte_tendance_euros(delta), float(delta or 0.0))
         cellule.setForeground(QBrush(QColor(_COULEURS_TENDANCE[sens])))
         cellule.setTextAlignment(
