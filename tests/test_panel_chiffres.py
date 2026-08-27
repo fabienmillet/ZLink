@@ -1857,3 +1857,42 @@ def test_le_sens_d_une_tendance_en_euros(delta, attendu):
     """Jamais « baisse » : une cagnotte ne redescend pas, et `tendances.cagnotte`
     borne déjà l'écart à zéro."""
     assert panel._sens_tendance_euros(delta) == attendu
+
+
+# ── coupe signalée ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("texte,limite,attendu", [
+    ("court", 16, "court"),
+    ("pile seize lettr", 16, "pile seize lettr"),      # à la limite, rien à dire
+    ("Je repeins le décor en rose", 16, "Je repeins le…"),
+    ("Supercalifragilisticexpialidocious", 16, "Supercalifragili…"),
+])
+def test_une_coupe_se_signale_par_des_points(texte, limite, attendu):
+    """« Je repein » se lit comme un nom complet. « Je repeins le… » non."""
+    assert panel._couper_avec_points(texte, limite) == attendu
+
+
+def test_la_coupe_prefere_lacher_un_mot_entier():
+    """Un mot entier de moins vaut mieux qu'un mot tronqué — tant que la coupe
+    ne remonte pas trop haut : au-delà d'un tiers perdu, on coupe au caractère.
+    """
+    assert panel._couper_avec_points("alpha bravo charlie", 12) == "alpha bravo…"
+    # L'espace est trop tôt dans la chaîne : le couper perdrait l'essentiel.
+    assert panel._couper_avec_points("a bravissimoooo", 12) == "a bravissimo…"
+
+
+def test_un_objectif_coupe_porte_son_texte_entier_en_infobulle(qtbot):
+    """Sans l'infobulle, la coupe n'apprend rien de plus que rien du tout."""
+    class _G:
+        streamer_display = "Un streamer au nom interminable"
+        goal_name = "Je repeins tout le décor du studio en rose fluo"
+        pct = 42.0
+        streamer_login = "x"
+        amount = 100.0
+        accomplished = False
+
+    item = panel._AccueilGoalItem(_G())
+    qtbot.addWidget(item)
+    bulles = [w.toolTip() for w in item.findChildren(QLabel) if w.toolTip()]
+    assert any("interminable" in b for b in bulles)
+    assert any("rose fluo" in b for b in bulles)

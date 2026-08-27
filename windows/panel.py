@@ -1602,9 +1602,9 @@ class _AccueilGoalItem(QWidget):
         # Ligne 1 : streamer + nom goal + pct
         row1 = QHBoxLayout()
         row1.setSpacing(6)
-        # Le compte de caractères tombe où il tombe, souvent en plein mot :
-        # l'item fait 52 px et ne peut pas grandir, mais l'infobulle rend le
-        # texte entier — sans elle, la coupe n'apprend rien.
+        # L'item fait 52 px et ne peut pas grandir : la coupe est inévitable.
+        # Ce qui ne l'est pas, c'est de la subir sans le savoir — les points de
+        # suspension la signalent, l'infobulle rend le texte entier.
         streamer_lbl = QLabel(_couper_avec_points(g.streamer_display, 16))
         streamer_lbl.setTextFormat(Qt.TextFormat.PlainText)
         streamer_lbl.setFont(_bold_font(_FONT_SEGOE, 11))
@@ -2426,6 +2426,28 @@ def _avatar_cache_key(login: str, profile_url: str) -> str:
         return ""
     return "guest_" + hashlib.sha256(
         profile_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _couper_avec_points(texte: str, limite: int) -> str:
+    """Raccourcit à `limite` caractères, en terminant par « … ».
+
+    Le découpage brut `texte[:limite]` tombait où il tombait, souvent en plein
+    mot, et rien ne signalait qu'il manquait quelque chose : « Je repein » se
+    lit comme un nom complet. Les points de suspension le disent, et l'appelant
+    pose le texte entier en infobulle.
+
+    On coupe au dernier espace disponible plutôt qu'au caractère quand il en
+    reste un dans le dernier tiers : un mot entier de moins vaut mieux qu'un
+    mot tronqué.
+    """
+    texte = str(texte)
+    if len(texte) <= limite:
+        return texte
+    garde = texte[:limite]
+    espace = garde.rfind(" ")
+    if espace >= limite * 2 // 3:
+        garde = garde[:espace]
+    return garde.rstrip() + "…"
 
 
 def _infobulle(texte: str) -> str:
