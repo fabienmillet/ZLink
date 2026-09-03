@@ -1092,20 +1092,43 @@ class _AccueilTimeline(QWidget):
         if ev is not None:
             self.event_clicked.emit(ev)
 
+    #: Demi-largeur de la bande affichée, en secondes. La frise couvre huit
+    #: heures, quatre de part et d'autre du repère.
+    _DEMI_BANDE = 4 * 3600
+
+    @classmethod
+    def _heures_pleines(cls, now: float) -> list[int]:
+        """Horodatages des heures pleines visibles dans la bande.
+
+        De VRAIES heures pleines, et non des multiples d'une heure comptés
+        depuis maintenant. C'est toute la différence : comptées depuis
+        maintenant, l'étiquette sous le repère affichait éternellement l'heure
+        courante sans jamais bouger, et « 20h » se tenait une heure pleine à sa
+        droite alors que 20h00 n'était plus qu'à vingt minutes. Les cartes,
+        elles, sont posées à leur heure vraie — les deux se contredisaient à
+        l'écran, la carte « 20h00 » commençant loin à gauche du trait « 20h ».
+
+        L'arrondi porte sur l'horodatage Unix : l'affichage est en UTC+2, un
+        nombre ENTIER d'heures, donc une heure pleine ici en est une là aussi.
+        """
+        premiere = int((now - cls._DEMI_BANDE) // 3600 + 1) * 3600
+        return list(range(premiere, int(now + cls._DEMI_BANDE) + 1, 3600))
+
     def _draw_tick_marks(
         self, p: QPainter, cx: int, w: int, now: float, px_per_sec: float
     ) -> None:
-        for delta_h in range(-4, 5):
-            x = cx + int(delta_h * 3600 * px_per_sec)
-            if 0 <= x <= w:
-                # petit tick
-                p.setPen(QPen(QColor("#2a2a2a"), 1))
-                p.drawLine(x, self._BASELINE_Y - 4, x, self._BASELINE_Y + 4)
-                dt = datetime.fromtimestamp(now + delta_h * 3600, tz=timezone.utc) + timedelta(hours=2)
-                p.setPen(QPen(QColor("#444444")))
-                p.setFont(QFont(_FONT_SEGOE, 9))
-                p.drawText(x - 14, self._BASELINE_Y + 6, 28, self._LABEL_H,
-                           Qt.AlignmentFlag.AlignCenter, dt.strftime("%Hh"))
+        for instant in self._heures_pleines(now):
+            x = cx + int((instant - now) * px_per_sec)
+            if not 0 <= x <= w:
+                continue
+            # petit tick
+            p.setPen(QPen(QColor("#2a2a2a"), 1))
+            p.drawLine(x, self._BASELINE_Y - 4, x, self._BASELINE_Y + 4)
+            dt = datetime.fromtimestamp(instant, tz=timezone.utc) + timedelta(hours=2)
+            p.setPen(QPen(QColor("#444444")))
+            p.setFont(QFont(_FONT_SEGOE, 9))
+            p.drawText(x - 14, self._BASELINE_Y + 6, 28, self._LABEL_H,
+                       Qt.AlignmentFlag.AlignCenter, dt.strftime("%Hh"))
 
     _EVENT_COLORS: dict[str, str] = {
         "concert":  "#7c3aed",

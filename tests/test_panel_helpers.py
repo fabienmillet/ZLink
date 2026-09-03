@@ -900,3 +900,75 @@ def test_le_rappel_d_un_show_ne_rend_pas_le_texte_enrichi(qtbot):
     corps = [w for w in toast.findChildren(QLabel) if _HOSTILE in w.text()]
     assert corps, "le message doit bien être affiché"
     assert all(w.textFormat() == Qt.TextFormat.PlainText for w in corps)
+
+
+# ── frise des événements : les graduations horaires ─────────────────────────
+
+def _horodatage(heure: int, minute: int = 0) -> float:
+    """Un instant du 3 septembre, à l'heure locale de l'affichage (UTC+2)."""
+    from datetime import datetime, timezone
+
+    return datetime(2026, 9, 3, heure - 2, minute,
+                    tzinfo=timezone.utc).timestamp()
+
+
+def _abscisses(now: float, largeur: int = 1200):
+    """Où tombent les heures pleines, et selon quelle échelle."""
+    centre = largeur // 2
+    px_par_sec = largeur / (8 * 3600)
+    frise = panel._AccueilTimeline
+    return centre, px_par_sec, frise._heures_pleines(now)
+
+
+def test_les_graduations_tombent_sur_des_heures_pleines():
+    """Elles étaient comptées depuis maintenant : jamais rondes, sauf par hasard."""
+    from datetime import datetime, timezone
+
+    for t in _abscisses(_horodatage(19, 37))[2]:
+        pose = datetime.fromtimestamp(t, tz=timezone.utc)
+        assert (pose.minute, pose.second) == (0, 0), pose
+
+
+def test_une_graduation_tombe_exactement_sur_l_evenement_de_la_meme_heure():
+    """Le symptôme visible : la carte « 20h00 » commençait loin du trait « 20h ».
+
+    Les cartes sont placées à leur horodatage vrai, les graduations l'étaient
+    à un multiple d'une heure compté depuis maintenant. À 19h37, « 20h » se
+    tenait une heure pleine à droite du repère quand l'événement, lui, n'était
+    qu'à vingt-trois minutes — quatre-vingt-treize pixels d'écart.
+    """
+    now = _horodatage(19, 37)
+    concert = _horodatage(20)
+    centre, px_par_sec, heures = _abscisses(now)
+
+    x_carte = centre + int((concert - now) * px_par_sec)
+    x_trait = next(centre + int((t - now) * px_par_sec)
+                   for t in heures if t == concert)
+    assert x_trait == x_carte
+
+
+def test_les_graduations_defilent_avec_le_temps():
+    """Le repère est fixe au centre : ce sont les heures qui doivent glisser.
+
+    Comptées depuis maintenant, elles restaient collées au repère — l'étiquette
+    sous lui affichait éternellement l'heure courante, immobile.
+    """
+    centre, px_par_sec, _ = _abscisses(_horodatage(19, 0))
+    midi = _horodatage(20)
+
+    def abscisse_de_20h(now):
+        heures = panel._AccueilTimeline._heures_pleines(now)
+        return centre + int((midi - now) * px_par_sec)
+
+    avant = abscisse_de_20h(_horodatage(19, 0))
+    apres = abscisse_de_20h(_horodatage(19, 30))
+    assert apres < avant, "en trente minutes, « 20h » doit s'être rapproché"
+    assert avant - apres == int(1800 * px_par_sec)
+
+
+def test_la_bande_couvre_bien_huit_heures():
+    """Quatre heures de part et d'autre : neuf heures pleines au plus."""
+    heures = _abscisses(_horodatage(19, 37))[2]
+    assert 8 <= len(heures) <= 9
+    etendue = heures[-1] - heures[0]
+    assert etendue <= 8 * 3600
