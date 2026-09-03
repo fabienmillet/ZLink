@@ -581,6 +581,7 @@ class PiloteStreamDeck(QObject):
                 self._expliquer_refus(deck, exc)
                 continue
             boitier = Boitier(deck)
+            self._verifier_glyphes()
             deck.set_key_callback(self._sur_touche)
             if boitier.molettes:
                 deck.set_dial_callback(self._sur_molette)
@@ -626,6 +627,27 @@ class PiloteStreamDeck(QObject):
             # Probe transport introuvable : hidapi n'est pas installé.
             logger.debug("Stream Deck : énumération impossible — %s", exc)
             return []
+
+    _glyphes_verifies = False
+
+    @classmethod
+    def _verifier_glyphes(cls) -> None:
+        """Prévient UNE fois si les dessins de touche manquent au paquet.
+
+        `glyphe()` se contente d'une ligne de debug par fichier absent : dix-sept
+        par redessin, invisibles en marche normale. Or leur absence se voit tout
+        de suite sur le boîtier — les touches d'action sortent noires — et la
+        cause n'est devinable par personne.
+        """
+        if cls._glyphes_verifies:
+            return
+        cls._glyphes_verifies = True
+        dossier = dossier_glyphes()
+        if not dossier.is_dir():
+            logger.warning(
+                "Stream Deck : dessins de touche introuvables (%s). Les touches "
+                "d'action resteront noires — le paquet a été construit sans "
+                "streamdeck/com.zlink.deck.sdPlugin/touches.", dossier)
 
     @staticmethod
     def _expliquer_refus(deck, exc: Exception) -> None:

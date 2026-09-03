@@ -52,6 +52,15 @@ _EXTENSION = os.path.join("streamdeck", "com.zlink.deck.sdPlugin")
 if sys.platform.startswith("win") and os.path.isdir(_EXTENSION):
     donnees.append((_EXTENSION, _EXTENSION))
 
+# Sous Linux, l'extension entière ne servirait à rien — pas de logiciel Elgato
+# pour la lancer, donc ni exécutable, ni panneau de réglages, ni profils. Mais
+# core/streamdeck_direct.py, lui, DESSINE les touches avec les mêmes glyphes :
+# ils sont livrés seuls. Sans eux, les touches d'action sortaient noires, et le
+# journal ne le disait qu'en debug.
+_GLYPHES = os.path.join(_EXTENSION, "touches")
+if sys.platform.startswith("linux") and os.path.isdir(_GLYPHES):
+    donnees.append((_GLYPHES, _GLYPHES))
+
 # Icône : un seul SVG fait autorité (assets/zevent.svg), scripts/gen_icons.py
 # en dérive les conteneurs. Windows veut un .ico, macOS un .icns ; Linux n'en
 # lit aucun ici, l'icône de fenêtre y est posée par l'application elle-même.

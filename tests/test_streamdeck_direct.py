@@ -430,3 +430,62 @@ def test_une_molette_inerte_se_voit(pilote):
     assert objet._piste(0)["titre"] == "Plein écran"
     assert objet._piste(1) == {"titre": "—", "volume": 0, "muet": False,
                                "avatar": "", "inerte": True}
+
+
+# ── Les dessins livrés ───────────────────────────────────────────────────────
+
+def _glyphes_attendus() -> set[str]:
+    """Tous les noms de fichier que le pilote peut demander.
+
+    Un nom qui ne correspond à rien ne lève pas : `glyphe()` rend un carré noir.
+    La touche sort donc muette sur le boîtier, sans une ligne pour le dire.
+    """
+    noms = set()
+    for famille, cle in sd.GESTES_REGIE:
+        noms.add(f"{famille}-{cle}")
+        if cle in sd.ETATS_ACTION:
+            noms.add(f"{famille}-{cle}-actif")
+    for touche in sd.disposition(15, 0):
+        if touche["famille"] == "navigation":
+            noms.add(f"navigation-{touche['cle']}")
+    return noms
+
+
+def test_chaque_dessin_demande_existe():
+    """Sinon la touche sort noire, et rien n'explique pourquoi."""
+    dossier = sd.dossier_glyphes()
+    manquants = sorted(n for n in _glyphes_attendus()
+                       if not (dossier / f"{n}.png").is_file())
+    assert not manquants, f"dessins de touche absents : {manquants}"
+
+
+def test_le_paquet_linux_embarque_les_dessins():
+    """Le .spec ne livrait l'extension que sous Windows.
+
+    Sous Linux il n'y a pas de logiciel Elgato, donc pas d'extension à
+    installer — mais `core/streamdeck_direct.py` DESSINE les touches avec ces
+    mêmes fichiers. Sans eux dans le paquet, les touches d'action du binaire
+    publié sortaient noires alors qu'elles marchaient depuis les sources.
+    """
+    import pathlib
+
+    spec = (pathlib.Path(__file__).resolve().parent.parent
+            / "ZLink.spec").read_text(encoding="utf-8")
+    assert '_GLYPHES = os.path.join(_EXTENSION, "touches")' in spec
+    assert 'sys.platform.startswith("linux") and os.path.isdir(_GLYPHES)' in spec
+    assert "donnees.append((_GLYPHES, _GLYPHES))" in spec
+
+
+def test_l_absence_des_dessins_se_dit_une_fois(monkeypatch, caplog):
+    """Dix-sept lignes de debug par redessin ne préviennent personne."""
+    import pathlib
+
+    monkeypatch.setattr(sd, "dossier_glyphes",
+                        lambda: pathlib.Path("/introuvable/touches"))
+    sd.PiloteStreamDeck._glyphes_verifies = False
+    with caplog.at_level("WARNING"):
+        sd.PiloteStreamDeck._verifier_glyphes()
+        sd.PiloteStreamDeck._verifier_glyphes()
+    assert sum("dessins de touche introuvables" in m
+               for m in caplog.messages) == 1
+    sd.PiloteStreamDeck._glyphes_verifies = False
