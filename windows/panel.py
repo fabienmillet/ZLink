@@ -5552,6 +5552,44 @@ class _StreamersTab(QWidget):
 JOURS_FR = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
 PARIS = timedelta(hours=2)
 
+#: En deçà de cette étendue, l'axe des graphes passe aux minutes. Deux heures,
+#: comme `DateAxisItem` : au-delà, le jour et l'heure suffisent à situer un
+#: point ; en deçà, ils sont identiques d'un bout à l'autre de la série.
+_SEUIL_MINUTES_AXE = 2 * 3600
+
+
+def _etiquette_graphe(ts: float, avec_minutes: bool) -> str:
+    """Un instant, tel que l'axe des graphes HTML l'écrit."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
+    if avec_minutes:
+        return f"{dt.hour:02d}h{dt.minute:02d}"
+    return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
+
+
+def abscisses_graphe(instants: list[float]) -> list[str]:
+    """Étiquettes d'axe calées sur le CALENDRIER de l'édition.
+
+    Elles suivaient l'horloge du moment. À sept jours de l'événement — ou en
+    mode mock — le graphe annonçait « jeudi 16 h » en regard d'une valeur de
+    2025 qui appartenait, elle, au vendredi soir : les courbes étaient bien
+    alignées entre elles, l'axe seul racontait autre chose. On repart donc de
+    l'ouverture de la cagnotte, la même origine que celle qui aligne les
+    éditions.
+
+    Le format suit l'ÉTENDUE de la série, et non le titre du graphe. Avant
+    l'événement, la série ne couvre que les quelques minutes déjà relevées :
+    rebasées sur l'ouverture, elles tombaient toutes dans la même heure, et
+    l'axe affichait « Ven 18h » vingt-huit fois de suite. C'est la règle que
+    `DateAxisItem` applique déjà aux graphes pyqtgraph du même fichier, à deux
+    heures de bascule.
+    """
+    if not instants:
+        return []
+    depart = instants[0]
+    minutes = (instants[-1] - depart) <= _SEUIL_MINUTES_AXE
+    return [_etiquette_graphe(OUVERTURE_CAGNOTTE + (t - depart), minutes)
+            for t in instants]
+
 
 # ---------------------------------------------------------------------------
 # Tab: Stats — 5 graphes en layout 2 colonnes
@@ -6551,35 +6589,13 @@ window.zlUpdate = function (payload) {{
         if not has_data:
             return
         if self._charts_view is not None:
-            def _fmt(ts: float) -> str:
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc) + PARIS
-                return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
-
-            def _abscisses(instants: list[float]) -> list[str]:
-                """Étiquettes calées sur le CALENDRIER de l'édition.
-
-                Elles suivaient l'horloge du moment. À sept jours de
-                l'événement — ou en mode mock — le graphe annonçait « jeudi
-                16 h » en regard d'une valeur de 2025 qui appartenait, elle, au
-                vendredi soir : les courbes étaient bien alignées entre elles,
-                l'axe seul racontait autre chose.
-
-                On repart donc de l'ouverture de la cagnotte, la même origine
-                que celle qui aligne les éditions.
-                """
-                if not instants:
-                    return []
-                depart = instants[0]
-                return [_fmt(OUVERTURE_CAGNOTTE + (t - depart))
-                        for t in instants]
-
             # Chaque édition passée, replacée sur le même temps de course :
             # c'est la seule façon de voir QUAND on la dépasse. Chart.js
             # aligne ses séries par indice, d'où une valeur par abscisse.
             self._charts_payload = json.dumps({
-                "ld": _abscisses(ts_d),
+                "ld": abscisses_graphe(ts_d),
                 "vd": [round(v) for v in vals_d],
-                "lv": _abscisses(ts_v),
+                "lv": abscisses_graphe(ts_v),
                 "vv": [round(v) for v in vals_v],
                 "rd": _references(history.series_editions_alignees(ts_d)),
                 "rv": _references(

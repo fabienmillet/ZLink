@@ -972,3 +972,50 @@ def test_la_bande_couvre_bien_huit_heures():
     assert 8 <= len(heures) <= 9
     etendue = heures[-1] - heures[0]
     assert etendue <= 8 * 3600
+
+
+# ── graphes HTML : les étiquettes d'axe ─────────────────────────────────────
+
+def test_une_serie_courte_passe_aux_minutes():
+    """Avant l'événement, la série ne couvre que quelques minutes.
+
+    Rebasées sur l'ouverture de la cagnotte — vendredi 18h00 — elles tombaient
+    toutes dans la même heure : l'axe affichait « Ven 18h » vingt-huit fois de
+    suite, ce qui ne situait plus rien.
+    """
+    serie = [1000.0 + 30 * i for i in range(28)]      # 14 minutes
+    etiquettes = panel.abscisses_graphe(serie)
+    assert etiquettes[0] == "18h00"
+    assert len(set(etiquettes)) > 1
+    assert all("Ven" not in e for e in etiquettes)
+
+
+def test_une_serie_longue_garde_le_jour():
+    """Sur trois jours, l'heure seule ne dit plus de quel jour on parle."""
+    serie = [1000.0 + 3 * 3600 * i for i in range(28)]   # 81 heures
+    etiquettes = panel.abscisses_graphe(serie)
+    assert etiquettes[0] == "Ven 18h"
+    assert len(set(etiquettes)) == len(etiquettes)
+
+
+def test_la_bascule_se_fait_a_deux_heures():
+    """Le même seuil que `DateAxisItem`, pour les graphes pyqtgraph du fichier."""
+    juste_en_dessous = [0.0, float(panel._SEUIL_MINUTES_AXE)]
+    juste_au_dessus = [0.0, float(panel._SEUIL_MINUTES_AXE) + 1]
+    assert panel.abscisses_graphe(juste_en_dessous)[0] == "18h00"
+    assert panel.abscisses_graphe(juste_au_dessus)[0] == "Ven 18h"
+
+
+def test_une_serie_vide_ne_casse_rien():
+    assert panel.abscisses_graphe([]) == []
+
+
+def test_l_axe_repart_de_l_ouverture_et_non_de_l_horloge():
+    """Deux séries d'égale étendue donnent le même axe, quel que soit l'instant.
+
+    C'est ce qui aligne les éditions entre elles : les valeurs de 2025 sont
+    replacées sur le même temps de course, l'axe doit l'être aussi.
+    """
+    a = panel.abscisses_graphe([0.0, 3600.0 * 6])
+    b = panel.abscisses_graphe([1_700_000_000.0, 1_700_000_000.0 + 3600 * 6])
+    assert a == b
