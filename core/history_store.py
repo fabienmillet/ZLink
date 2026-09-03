@@ -21,21 +21,54 @@ DEBUG: bool = True
 _EVENT_START: float = datetime(2026, 9, 3, 0, 0, 0, tzinfo=timezone.utc).timestamp()
 _EVENT_END: float = datetime(2026, 9, 7, 2, 0, 0, tzinfo=timezone.utc).timestamp()
 
-#: Ouverture de la CAGNOTTE, qui n'est pas l'ouverture de l'événement : les
-#: directs commencent le jeudi soir, la collecte le vendredi.
+#: Deux dates, et il a fallu s'y reprendre pour les distinguer.
 #:
-#: C'est l'origine des courbes, et le repère qui les rend comparables. Relevé
-#: sur les quatre éditions chargées, il tombe le VENDREDI à 15-16 h UTC sans
-#: exception : 2025 le 5 septembre à 16 h, 2024 le 6 à 16 h, 2022 le 9 à 16 h,
-#: 2021 le 29 octobre à 15 h.
+#: DÉBUT DE LA COURSE — vendredi 18 h. C'est le ZEvent lui-même, et le repère
+#: sur lequel les éditions passées sont calées : elles sont publiées à partir
+#: de LEUR ouverture, et le site les fait toutes partir de là. Avant cet
+#: instant, elles n'ont rien à dire — les afficher les faisait courir sur un
+#: jeudi après-midi qui, pour elles, n'existe pas.
 #:
-#: Il sert aussi d'origine aux ABSCISSES. Les étiquettes se calculaient sur
-#: l'horloge du moment : à sept jours de l'événement, le graphe annonçait
-#: « jeudi 16 h » en regard d'une valeur qui, elle, appartenait au vendredi
-#: soir de 2025. L'axe suit désormais le calendrier de l'édition, quel que
-#: soit le jour où l'on regarde.
-OUVERTURE_CAGNOTTE: float = datetime(
+#: OUVERTURE DE LA CAGNOTTE 2026 — jeudi 18 h, vingt-quatre heures plus tôt.
+#: Les dons y sont déjà reçus, et c'est de là que part la courbe de l'année en
+#: cours. Les relevés antérieurs, tous à zéro, ne sont pas la cagnotte : ils
+#: précèdent son ouverture.
+DEBUT_COURSE: float = datetime(
     2026, 9, 4, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+
+OUVERTURE_CAGNOTTE: float = datetime(
+    2026, 9, 3, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+
+#: Fin de la course, telle que le site l'annonce : lundi 1 h du matin. C'est la
+#: borne droite du mode « toute la course », où les éditions passées sont
+#: tracées jusqu'au bout et la courbe en cours avance derrière.
+FIN_COURSE: float = datetime(
+    2026, 9, 6, 23, 0, 0, tzinfo=timezone.utc).timestamp()
+
+#: Pas de l'axe en mode « toute la course ». Trente minutes : cinquante-cinq
+#: heures en cent onze points, assez fin pour que les paliers se voient et
+#: assez court pour que Chart.js n'ait pas à en dessiner des milliers.
+_PAS_AXE_COURSE: float = 1800.0
+
+
+def course_commencee(maintenant: float | None = None) -> bool:
+    """La course a-t-elle démarré.
+
+    Elle commence le VENDREDI à 18 h, pas à la première donation : les directs
+    ouvrent la veille et la cagnotte reçoit déjà des dons d'avant-événement.
+    Les éditions passées sont publiées à partir de LEUR ouverture — les
+    superposer avant celle de l'édition en cours les fait démarrer un jeudi
+    après-midi où elles n'ont rien à dire.
+    """
+    return (maintenant if maintenant is not None
+            else time.time()) >= DEBUT_COURSE
+
+
+def axe_course(pas_s: float = _PAS_AXE_COURSE) -> list[float]:
+    """Les abscisses de la course entière, de son ouverture à sa fin."""
+    nombre = int((FIN_COURSE - OUVERTURE_CAGNOTTE) / pas_s) + 1
+    return [OUVERTURE_CAGNOTTE + i * pas_s for i in range(nombre)]
+
 
 #: Cache par édition d'evenmorestats. L'identifiant de l'édition complète
 #: l'adresse : c'est ce qui rend plusieurs années superposables, là où le
@@ -343,15 +376,17 @@ class HistoryStore:
         return [self._interpoler(points, t - depart, origine_ref)
                 for t in ts_courants]
 
-    def _origine_courante(self, ts_courants: list[float]) -> float:
-        """Ouverture des dons de l'édition en cours, dans l'axe fourni."""
-        origine = self.origine_course(
-            [(t, v) for t, v in self._donation if self._garder(t)])
-        if origine is None or not ts_courants:
-            return ts_courants[0] if ts_courants else 0.0
-        # Bornée à l'axe : une origine hors de la fenêtre affichée
-        # décalerait toutes les références d'un bloc.
-        return min(max(origine, ts_courants[0]), ts_courants[-1])
+    @staticmethod
+    def _origine_courante(ts_courants: list[float]) -> float:
+        """Départ de la course, sur lequel les éditions passées sont calées.
+
+        Une DATE, et non le premier don relevé. La cagnotte 2026 ouvre le jeudi
+        à 18 h et reçoit des dons d'avant-événement toute la nuit ; la course,
+        elle, part le vendredi. Prendre le premier don pour le départ avançait
+        les références de vingt-quatre heures, et les faisait courir sur un
+        jeudi soir qui, pour elles, n'existe pas.
+        """
+        return DEBUT_COURSE
 
     def serie_precedente_alignee(
             self, ts_courants: list[float]) -> list[float | None]:
@@ -476,6 +511,11 @@ class HistoryStore:
         # Tout-ou-rien, et les listes sont construites AVANT de toucher à
         # l'état : une section viewers manquante ne doit pas laisser la
         # cagnotte préchargée face à une audience vide.
+        # Ce qui précède l'ouverture de la cagnotte n'est pas la cagnotte : la
+        # source publie des relevés dès le jeudi midi, tous à zéro, et ils
+        # ajoutaient six heures de plat à gauche du graphe.
+        dons = [(t, v) for t, v in dons if t >= OUVERTURE_CAGNOTTE]
+        vues = [(t, v) for t, v in vues if t >= OUVERTURE_CAGNOTTE]
         self._donation.clear()
         self._donation.extend(dons)
         self._viewers.clear()
@@ -517,6 +557,38 @@ class HistoryStore:
     def editions_chargees(self) -> list[str]:
         """Libellés des éditions retenues, de la plus récente à la plus vieille."""
         return list(self._editions)
+
+    def serie_courante_sur_axe(self, ts_axe: list[float]) -> list[float | None]:
+        """La cagnotte en cours, replacée sur l'axe donné.
+
+        Sert au mode « toute la course », dont l'axe court jusqu'au lundi : la
+        courbe s'y arrête sur le dernier relevé au lieu de retomber à zéro, et
+        avance d'elle-même à mesure que l'événement se déroule.
+        """
+        return self._sur_axe([(t, v) for t, v in self._donation
+                              if self._garder(t)], ts_axe)
+
+    def serie_viewers_sur_axe(self, ts_axe: list[float]) -> list[float | None]:
+        """L'audience en cours, replacée sur l'axe donné."""
+        return self._sur_axe([(t, v) for t, v in self._viewers
+                              if self._garder(t)], ts_axe)
+
+    @staticmethod
+    def _sur_axe(points: list, ts_axe: list[float]) -> list[float | None]:
+        """Une série à sa VRAIE date, échantillonnée sur `ts_axe`.
+
+        Rien à réaligner ici : l'axe et les points partagent déjà le même
+        calendrier. None hors de la plage couverte — devant, l'événement n'a
+        pas encore eu lieu.
+        """
+        if len(points) < 2 or not ts_axe:
+            return [None] * len(ts_axe)
+        premier, dernier = points[0][0], points[-1][0]
+        return [
+            None if t < premier or t > dernier
+            else HistoryStore._interpoler(points, t - premier, premier)
+            for t in ts_axe
+        ]
 
     def series_editions_alignees(
             self, ts_courants: list[float]) -> dict[str, list]:

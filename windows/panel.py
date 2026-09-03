@@ -5985,6 +5985,7 @@ class _StatsTab(QWidget):
         self._charts_view: QWebEngineView | None = None
         self._charts_ready = False
         self._charts_payload: str | None = None   # dernière série non poussée
+        self._historique: HistoryStore | None = None  # pour rejouer au recadrage
         self._streamers: list[StreamerInfo] = []
         #: login → objectifs de dons, semés par la fenêtre. Vide tant que
         #: l'onglet Goals n'a rien reçu : la colonne affiche alors « — ».
@@ -6041,6 +6042,20 @@ class _StatsTab(QWidget):
         v = QVBoxLayout(boite)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
+
+        # Le switch de cadrage. Par défaut on suit les relevés — c'est ce qu'on
+        # regarde en direct. Coché, l'axe couvre la course entière jusqu'au
+        # lundi 1 h : les éditions passées s'y tracent jusqu'au bout, et la
+        # courbe de l'année avance derrière, à mesure.
+        self._toute_la_course = QCheckBox("Toute la course, jusqu'au lundi 1 h")
+        self._toute_la_course.setFont(QFont(_FONT_SEGOE, 10))
+        self._toute_la_course.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._toute_la_course.setStyleSheet(
+            "QCheckBox { color: #888888; background: transparent; "
+            "padding: 6px 2px; }"
+            "QCheckBox:hover { color: #ffffff; }")
+        self._toute_la_course.toggled.connect(self._recadrer_les_graphes)
+        v.addWidget(self._toute_la_course, 0, Qt.AlignmentFlag.AlignRight)
 
         self._charts_view = QWebEngineView()
         self._charts_view.setFixedHeight(420)
@@ -6661,37 +6676,62 @@ window.zlUpdate = function (payload) {{
 
     # -- chart builders -------------------------------------------------------
 
+    def _recadrer_les_graphes(self) -> None:
+        """Rejoue le dernier historique avec le cadrage qui vient d'être choisi."""
+        if self._historique is not None:
+            self.update_history(self._historique)
+
     def update_history(self, history: HistoryStore) -> None:
         """Met à jour les graphes Chart.js cagnotte et viewers."""
+        # Gardé : basculer le cadrage doit pouvoir tout redessiner sans
+        # attendre la prochaine relève, qui met dix minutes à venir.
+        self._historique = history
         ts_d, vals_d = history.get_donation_series()
         ts_v, vals_v = history.get_viewers_series()
-        from core.history_store import comparaison_possible
         has_data = bool(ts_d or ts_v)
         self._charts_empty.setVisible(not has_data)
         if self._charts_view is not None:
             self._charts_view.setVisible(has_data)
         if not has_data:
             return
-        if self._charts_view is not None:
-            # Chaque édition passée, replacée sur le même temps de course :
-            # c'est la seule façon de voir QUAND on la dépasse. Chart.js
-            # aligne ses séries par indice, d'où une valeur par abscisse.
-            self._charts_payload = json.dumps({
-                "ld": abscisses_graphe(ts_d),
-                "vd": [round(v) for v in vals_d],
-                "lv": abscisses_graphe(ts_v),
-                "vv": [round(v) for v in vals_v],
-                # Pas de comparaison sans temps de course : avant
-                # l'ouverture de la cagnotte, les éditions passées seraient
-                # écrasées sur les quelques minutes déjà relevées, et 2021
-                # gagnerait deux cent quarante mille euros en un quart d'heure.
-                "rd": _references(history.series_editions_alignees(ts_d))
-                if comparaison_possible(ts_d) else {},
-                "rv": _references(
-                    history.series_viewers_editions_alignees(ts_v))
-                if comparaison_possible(ts_v) else {},
-            })
-            self._push_charts()
+        if self._charts_view is None:
+            return
+
+        from core.history_store import axe_course, course_commencee
+
+        if self._toute_la_course.isChecked():
+            # Un axe fixe, du jeudi 18 h au lundi 1 h. Les deux courbes de
+            # l'année y sont rééchantillonnées telles quelles — même
+            # calendrier, rien à réaligner — et s'interrompent sur leur
+            # dernier relevé plutôt que de retomber à zéro.
+            axe = axe_course()
+            abscisses_d = abscisses_e = abscisses_graphe(axe)
+            valeurs_d = history.serie_courante_sur_axe(axe)
+            valeurs_v = history.serie_viewers_sur_axe(axe)
+            axe_d = axe_v = axe
+        else:
+            abscisses_d = abscisses_graphe(ts_d)
+            abscisses_e = abscisses_graphe(ts_v)
+            valeurs_d = [round(v) for v in vals_d]
+            valeurs_v = [round(v) for v in vals_v]
+            axe_d, axe_v = ts_d, ts_v
+
+        # Les éditions passées sont calées sur le DÉBUT DE LA COURSE, vendredi
+        # 18 h. Avant lui, elles n'ont rien à dire : la cagnotte 2026 ouvre
+        # vingt-quatre heures plus tôt, et les y superposer les ferait courir
+        # sur un jeudi soir qui, pour elles, n'existe pas.
+        refs = course_commencee() or self._toute_la_course.isChecked()
+        self._charts_payload = json.dumps({
+            "ld": abscisses_d,
+            "vd": [None if v is None else round(v) for v in valeurs_d],
+            "lv": abscisses_e,
+            "vv": [None if v is None else round(v) for v in valeurs_v],
+            "rd": _references(history.series_editions_alignees(axe_d))
+            if refs else {},
+            "rv": _references(history.series_viewers_editions_alignees(axe_v))
+            if refs else {},
+        })
+        self._push_charts()
 
     def _on_charts_loaded(self, ok: bool) -> None:
         """La page est prete : pousser la serie arrivee avant elle, s'il y en a."""

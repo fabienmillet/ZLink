@@ -28,6 +28,8 @@ import pytest
 
 from core import history_store
 from core.history_store import (
+    DEBUT_COURSE,
+    OUVERTURE_CAGNOTTE,
     _EVENT_END,
     _EVENT_START,
     _TS_MAX,
@@ -835,28 +837,27 @@ def test_la_courbe_passee_est_alignee_sur_le_temps_de_course(horloge):
     _charger_edition(store, _edition([(_J, 600), (_J + _H, 1200),
                                       (_J + 2 * _H, 2000)]))
 
-    depart = _EVENT_START + 3600.0
+    # Les relevés partent du DÉPART DE LA COURSE : c'est là que les éditions
+    # passées sont calées.
     for i in range(3):
-        horloge["t"] = depart + i * 1800.0        # relevés toutes les 30 min
-        store.add_point(i * 1000.0, 10)           # le premier est à zéro
+        horloge["t"] = DEBUT_COURSE + i * 1800.0   # toutes les 30 min
+        store.add_point(i * 1000.0, 10)
 
     ts, _vals = store.get_donation_series()
     aligne = store.serie_precedente_alignee(ts)
-    # La course commence au deuxième relevé, le premier don. Avant lui, la
-    # référence n'a rien à dire ; ensuite : 0 min → 600 €, 30 min → 900 €.
-    assert aligne == [None, 600.0, 900.0]
+    # 0 min → 600 €, 30 min → 900 €, 60 min → 1 200 €.
+    assert aligne == [600.0, 900.0, 1200.0]
 
 
 def test_hors_de_la_plage_couverte_la_courbe_s_interrompt(horloge):
     """None, et non zéro : une falaise se lirait comme un effondrement."""
     store = HistoryStore()
     _charger_edition(store, _edition([(_J, 500), (_J + _H, 1000)]))
-    depart = _EVENT_START + 3600.0
     for i, montant in ((0, 500.0), (2, 1500.0)):
-        horloge["t"] = depart + i * 3600.0
+        horloge["t"] = DEBUT_COURSE + i * 3600.0
         store.add_point(montant, 10)
     ts, _vals = store.get_donation_series()
-    # Deux heures après l'ouverture des dons, la référence n'en couvre qu'une.
+    # Deux heures après le départ, la référence n'en couvre qu'une.
     assert store.serie_precedente_alignee(ts) == [500.0, None]
 
 
@@ -976,32 +977,26 @@ def test_les_series_de_toutes_les_editions_s_alignent(horloge):
     }
     _charger_toutes(store, table, (("a", "id-a"), ("b", "id-b")))
 
-    depart = _EVENT_START + 3600.0
     for i in range(3):
-        horloge["t"] = depart + i * 3600.0
-        store.add_point(i * 900.0, 10)            # le premier est à zéro
+        horloge["t"] = DEBUT_COURSE + i * 3600.0
+        store.add_point(i * 900.0, 10)
     ts, _vals = store.get_donation_series()
 
     alignees = store.series_editions_alignees(ts)
     assert set(alignees) == {"a", "b"}
-    # La course des deux côtés démarre au premier don. Les références sont
-    # muettes avant celui de l'édition en cours.
-    assert alignees["a"] == [None, 500.0, 1250.0]
-    assert alignees["b"] == [None, 250.0, 625.0]
+    assert alignees["a"] == [500.0, 1250.0, 2000.0]
+    assert alignees["b"] == [250.0, 625.0, 1000.0]
 
 
 # ── l'édition en cours, préchargée depuis son début ─────────────────────────
 
+_MS = [int((OUVERTURE_CAGNOTTE + i * 3600) * 1000) for i in range(3)]
+
 _GRAPHE_EN_COURS = {
     "graph": {
-        "donations": {"all": {
-            "labels": [1_788_408_000_000, 1_788_411_600_000, 1_788_415_200_000],
-            "values": [0.0, 120_000.0, 532_730.49],
-        }},
-        "viewers": {
-            "labels": [1_788_408_000_000, 1_788_411_600_000, 1_788_415_200_000],
-            "values": [5290, 90_000, 143_633],
-        },
+        "donations": {"all": {"labels": _MS,
+                              "values": [0.0, 120_000.0, 532_730.49]}},
+        "viewers": {"labels": _MS, "values": [5290, 90_000, 143_633]},
     },
 }
 
@@ -1088,14 +1083,67 @@ def test_sans_courbe_il_n_y_a_pas_d_origine():
     assert HistoryStore.origine_course([]) is None
 
 
-def test_l_origine_courante_reste_dans_l_axe_affiche(horloge):
-    """Hors de la fenêtre, elle décalerait toutes les références d'un bloc."""
-    store = HistoryStore()
-    depart = _EVENT_START + 3600.0
-    for i, montant in enumerate((0.0, 0.0, 1000.0)):
-        horloge["t"] = depart + i * 1800.0
-        store.add_point(montant, 10)
-    ts, _vals = store.get_donation_series()
-    origine = store._origine_courante(ts)
-    assert ts[0] <= origine <= ts[-1]
-    assert origine == ts[2]      # le premier don
+def test_l_origine_des_references_est_le_depart_de_la_course():
+    """Une DATE, pas le premier don relevé.
+
+    La cagnotte 2026 ouvre le jeudi à 18 h et reçoit des dons d'avant-événement
+    toute la nuit ; la course, elle, part le vendredi. Prendre le premier don
+    pour le départ avançait les références de vingt-quatre heures et les
+    faisait courir sur un jeudi soir qui, pour elles, n'existe pas.
+    """
+    assert HistoryStore._origine_courante([1.0, 2.0]) == DEBUT_COURSE
+
+
+def test_les_releves_d_avant_l_ouverture_sont_ecartes(sans_reseau):
+    """La source publie dès le jeudi midi, tous à zéro : six heures de plat."""
+    avant = int((OUVERTURE_CAGNOTTE - 7200) * 1000)
+    sans_reseau({"graph": {
+        "donations": {"all": {"labels": [avant] + _MS,
+                              "values": [0.0, 0.0, 120_000.0, 532_730.49]}},
+        "viewers": {"labels": [avant] + _MS,
+                    "values": [0, 5290, 90_000, 143_633]},
+    }})
+    h = HistoryStore()
+    assert asyncio.run(h.charger_edition_en_cours("peu-importe"))
+    ts, _vals = h.get_donation_series()
+    assert min(ts) >= OUVERTURE_CAGNOTTE
+
+
+# ── le cadrage « toute la course » ──────────────────────────────────────────
+
+def test_l_axe_de_course_va_de_l_ouverture_au_lundi():
+    """Du jeudi 18 h — ouverture de la cagnotte 2026 — au lundi 1 h."""
+    from core.history_store import FIN_COURSE, axe_course
+
+    axe = axe_course()
+    assert axe[0] == OUVERTURE_CAGNOTTE
+    assert axe[-1] == FIN_COURSE
+    assert all(b - a == 1800.0 for a, b in zip(axe, axe[1:]))
+
+
+def test_la_course_ne_commence_pas_a_l_ouverture_de_la_cagnotte():
+    """Vingt-quatre heures les séparent, et c'est tout le sujet."""
+    from core.history_store import course_commencee
+
+    assert not course_commencee(OUVERTURE_CAGNOTTE + 3600)
+    assert course_commencee(DEBUT_COURSE)
+
+
+def test_la_courbe_en_cours_s_arrete_sur_son_dernier_releve(sans_reseau):
+    """Sur un axe qui court jusqu'au lundi, elle avance petit à petit.
+
+    None après le dernier point, et non zéro : une falaise se lirait comme un
+    effondrement de la cagnotte.
+    """
+    sans_reseau(_GRAPHE_EN_COURS)
+    h = HistoryStore()
+    asyncio.run(h.charger_edition_en_cours("peu-importe"))
+    axe = [OUVERTURE_CAGNOTTE + i * 1800.0 for i in range(10)]
+    serie = h.serie_courante_sur_axe(axe)
+    assert serie[0] == 0.0
+    assert serie[4] == pytest.approx(532_730.49)      # dernier relevé, +2 h
+    assert all(v is None for v in serie[5:])
+
+
+def test_une_serie_trop_courte_ne_trace_rien_sur_l_axe():
+    assert HistoryStore().serie_courante_sur_axe([1.0, 2.0]) == [None, None]

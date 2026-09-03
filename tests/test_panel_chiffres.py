@@ -135,6 +135,24 @@ class _FauxHistorique:
     def serie_precedente_alignee(self, ts):
         return list(self._ref_dons) if self._ref_dons else [None] * len(ts)
 
+    def _sur_axe(self, points, ts_axe):
+        """Rééchantillonnage du mode « toute la course ».
+
+        La vraie interpolation est éprouvée dans test_history_store : ici on
+        veut seulement qu'un axe long produise un axe long.
+        """
+        if len(points) < 2:
+            return [None] * len(ts_axe)
+        premier, dernier = points[0][0], points[-1][0]
+        return [None if t < premier or t > dernier else points[-1][1]
+                for t in ts_axe]
+
+    def serie_courante_sur_axe(self, ts_axe):
+        return self._sur_axe(self._dons, ts_axe)
+
+    def serie_viewers_sur_axe(self, ts_axe):
+        return self._sur_axe(self._viewers, ts_axe)
+
     def serie_viewers_precedente_alignee(self, ts):
         return list(self._ref_viewers) if self._ref_viewers else [None] * len(ts)
 
@@ -2049,14 +2067,14 @@ def _charge(stats):
 
 @pytest.fixture
 def comparaison_active(monkeypatch):
-    """Déclare qu'il y a de quoi superposer les éditions passées.
+    """Déclare la course commencée.
 
-    Elles sont alignées sur le temps de course de la courbe en cours : sous une
-    heure d'étendue, elles s'y écraseraient et ne sont pas envoyées.
+    Les éditions passées sont calées sur le vendredi 18 h : avant, elles n'ont
+    rien à dire et ne sont pas envoyées.
     """
     from core import history_store
 
-    monkeypatch.setattr(history_store, "comparaison_possible",
+    monkeypatch.setattr(history_store, "course_commencee",
                         lambda *_a: True)
 
 
@@ -2314,14 +2332,15 @@ def test_le_compte_d_objectifs_suit_la_cagnotte(qtbot):
 def comparaison_impossible(monkeypatch):
     from core import history_store
 
-    monkeypatch.setattr(history_store, "comparaison_possible",
+    monkeypatch.setattr(history_store, "course_commencee",
                         lambda *_a: False)
 
 
-def test_sans_etendue_aucune_edition_n_est_comparee(stats, comparaison_impossible):
-    """Douze minutes de relevés confrontées à des éditions ENTIÈRES, écrasées
-    sur ces mêmes douze minutes : 2021 y gagnait deux cent quarante mille euros
-    en un quart d'heure."""
+def test_avant_le_depart_aucune_edition_n_est_comparee(stats, comparaison_impossible):
+    """La cagnotte 2026 ouvre vingt-quatre heures avant la course.
+
+    Superposées à ce jeudi soir, les éditions passées y traçaient une
+    progression qui, pour elles, n'a pas eu lieu."""
     import json
 
     class _Hist:
@@ -2344,3 +2363,36 @@ def test_sans_etendue_aucune_edition_n_est_comparee(stats, comparaison_impossibl
     assert charge["rd"] == {}
     assert charge["rv"] == {}
     assert charge["ld"], "la courbe de l'édition en cours, elle, reste tracée"
+
+
+# ── le switch « toute la course » ──────────────────────────────────────────
+
+def test_le_switch_etend_l_axe_jusqu_au_lundi(stats, comparaison_active):
+    """Coché, il trace les éditions jusqu'au bout ; la courbe de l'année avance
+    derrière, à mesure que l'événement se déroule."""
+    from core.history_store import DEBUT_COURSE, FIN_COURSE, OUVERTURE_CAGNOTTE
+
+    stats._charts_ready = True
+    stats.update_history(_FauxHistorique(
+        dons=[(DEBUT_COURSE + i * 3600.0, 1000.0 * i) for i in range(3)],
+        viewers=[(DEBUT_COURSE, 10)]))
+    court = len(_charge(stats)["ld"])
+
+    stats._toute_la_course.setChecked(True)
+    charge = _charge(stats)
+    assert len(charge["ld"]) > court
+    attendu = int((FIN_COURSE - OUVERTURE_CAGNOTTE) / 1800.0) + 1
+    assert len(charge["ld"]) == attendu
+
+
+def test_le_switch_rejoue_le_dernier_historique(stats, comparaison_active):
+    """Sans cela, il faudrait attendre la relève suivante — dix minutes."""
+    from core.history_store import DEBUT_COURSE
+
+    stats._charts_ready = True
+    stats.update_history(_FauxHistorique(
+        dons=[(DEBUT_COURSE + i * 3600.0, 1000.0 * i) for i in range(3)],
+        viewers=[(DEBUT_COURSE, 10)]))
+    avant = _charge(stats)["ld"]
+    stats._toute_la_course.setChecked(True)      # le signal suffit
+    assert _charge(stats)["ld"] != avant
