@@ -134,10 +134,9 @@ def _police(taille: int):
             return ImageFont.truetype(chemin, taille)
         except OSError:
             continue
-    try:
-        return ImageFont.load_default(size=taille)
-    except TypeError:              # Pillow < 10.1 : pas de taille réglable
-        return ImageFont.load_default()
+    # `size` existe depuis Pillow 10.1, et requirements.txt n'accepte pas plus
+    # ancien : le repli sans taille qui vivait ici ne pouvait jamais servir.
+    return ImageFont.load_default(size=taille)  # NOSONAR — stub SonarLint périmé
 
 
 #: En dessous, un nom cesse d'être lisible sur une touche : mieux vaut alors
@@ -448,7 +447,12 @@ class Vignettes:
         inerte = bool(piste.get("inerte"))
         # Le ternissement porte sur les couleurs, pas sur une opacité : le fond
         # est noir, une opacité y donnerait le même gris pour tout.
-        attenue = 0.25 if inerte else (0.4 if muet else 1.0)
+        if inerte:
+            attenue = 0.25
+        elif muet:
+            attenue = 0.4
+        else:
+            attenue = 1.0
         blanc = tuple(int(255 * attenue) for _ in range(3))
         gris = tuple(int(150 * attenue) for _ in range(3))
 
@@ -804,7 +808,11 @@ class PiloteStreamDeck(QObject):
     def _peindre_tout(self) -> None:
         from StreamDeck.ImageHelpers import PILHelper
 
-        for boitier in list(self._boitiers):
+        # Une COPIE de la liste : `arreter()` la vide depuis le fil de Qt, et
+        # ne rejoint celui-ci qu'avec un délai — un dessin en cours de
+        # téléchargement d'avatar peut le dépasser. Itérer l'originale
+        # lèverait alors « list changed size during iteration ».
+        for boitier in list(self._boitiers):  # NOSONAR
             for index, touche in enumerate(boitier.disposition):
                 image, signature = self._touche(boitier, touche)
                 if not boitier.a_change(index, signature):
