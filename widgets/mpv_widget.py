@@ -394,6 +394,17 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             # le menu contextuel des cellules de la grille ne s'ouvre jamais.
             # Désabonnée, X propage les clics au widget parent.
             "input_cursor": False,
+            # Corollaire de la ligne au-dessus, et pas un réglage de confort.
+            # mpv cache le pointeur au bout d'une seconde d'immobilité
+            # (cursor-autohide vaut 1000 par défaut) et ne le réaffiche qu'en
+            # voyant la souris bouger — or `input_cursor: False` lui retire
+            # justement ces événements. Le pointeur disparaissait donc sur la
+            # vidéo une seconde après l'avoir lâchée, et ne revenait JAMAIS.
+            #
+            # C'est ZLink qui décide de ce qui se montre par-dessus le flux :
+            # la barre du bas apparaît au mouvement de souris, et viser ses
+            # boutons sans voir le pointeur n'est pas possible.
+            "cursor_autohide": "no",
             "really_quiet": True,
         }
         return mpv_kwargs
