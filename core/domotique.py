@@ -264,12 +264,36 @@ def reglages(config: dict | None = None) -> dict:
         "webhook_id": identifiant,
         "url": url,
         "evenements": [f for f in familles if f in EVENEMENTS],
+        # Faux par défaut : allumer un filtre à la place de quelqu'un le
+        # priverait d'annonces qu'il recevait la veille, sans rien lui dire.
+        "favoris_seulement": bool(brut.get("favoris_seulement", False)),
     }
 
 
 def actif(config: dict | None = None) -> bool:
     """Vrai si une URL exploitable est configurée."""
     return url_valable(reglages(config)["url"])
+
+
+def _dans_la_portee(conf: dict, donnees: dict[str, Any]) -> bool:
+    """Vrai si cet événement doit sortir, au vu du filtre « favoris ».
+
+    Le filtre est posé ICI et pas sur chaque branchement : les quatre familles
+    passent par `annonce`, et une cinquième ajoutée demain le respectera sans
+    qu'on y pense.
+
+    Un événement SANS chaîne le franchit toujours. Un palier de cagnotte
+    n'appartient à personne : le filtrer sur des favoris n'aurait aucun sens,
+    et il est de toute façon rare — ce n'est pas lui qui noie la maison.
+    """
+    if not conf.get("favoris_seulement"):
+        return True
+    login = str(donnees.get("login") or "").strip().lower()
+    if not login:
+        return True
+    from core import favorites
+
+    return login in favorites.get()
 
 
 def annonce(famille: str, donnees: dict[str, Any],
@@ -282,6 +306,8 @@ def annonce(famille: str, donnees: dict[str, Any],
     """
     conf = reglages(config)
     if famille not in conf["evenements"] or not url_valable(conf["url"]):
+        return False
+    if not _dans_la_portee(conf, donnees):
         return False
     charge = {"type": famille, **donnees}
     threading.Thread(target=_poster, args=(conf["url"], charge),

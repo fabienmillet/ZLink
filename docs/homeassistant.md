@@ -185,6 +185,19 @@ Pour continuer à l'utiliser pendant vos réglages :
     value_template: "{{ trigger.json.type in ['palier', 'essai'] }}"
 ```
 
+### Ne rien annoncer en dehors de ses favoris
+
+Trois cents participants un soir d'événement : « grosse donation » et « moment
+fort » partent alors sans arrêt, et la maison clignote pour des chaînes qu'on
+ne regarde même pas.
+
+*Paramètres → Home Assistant → **Portée*** coupe l'envoi à la source, pour les
+trois familles qui désignent une chaîne — donation, objectif, moment fort. Un
+palier de cagnotte n'appartient à personne : il part toujours.
+
+Le choix se pose là et non dans une condition YAML : filtrer ici, c'est ne pas
+émettre ; filtrer chez Home Assistant, c'est recevoir tout et jeter ensuite.
+
 ### Une couleur par palier
 
 Le montant est dans le message. De quoi passer du vert à l'or quand la

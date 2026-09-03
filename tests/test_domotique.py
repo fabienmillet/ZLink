@@ -518,3 +518,76 @@ def test_le_defaut_reste_en_clair():
     assert domotique.BASE_DEFAUT.startswith("http://")
     assert domotique.est_local(domotique.BASE_DEFAUT), (
         "un défaut en clair n'est acceptable que parce qu'il est local")
+
+
+# ── n'annoncer que ses favoris ───────────────────────────────────────────────
+
+CONF_FAVORIS = {"domotique": {**CONF["domotique"], "favoris_seulement": True}}
+
+
+@pytest.fixture
+def favoris(monkeypatch):
+    """Pose la liste des favoris sans toucher à config.json.
+
+    `_dans_la_portee` importe `core.favorites` au moment de l'appel : c'est
+    donc le module lui-même qu'on remplace, pas une référence capturée.
+    """
+    from core import favorites
+
+    def poser(*logins):
+        monkeypatch.setattr(favorites, "get", lambda: set(logins))
+    return poser
+
+
+def test_sans_filtre_tout_part_comme_avant():
+    """Le réglage est faux par défaut : personne ne perd d'annonce."""
+    assert domotique.reglages(CONF)["favoris_seulement"] is False
+
+
+def test_le_filtre_laisse_passer_un_favori(favoris):
+    favoris("zerator")
+    conf = domotique.reglages(CONF_FAVORIS)
+    assert domotique._dans_la_portee(conf, {"login": "zerator"})
+
+
+def test_le_filtre_arrete_une_chaine_non_suivie(favoris):
+    """Trois cents participants : « don » et « hype » partaient sans arrêt."""
+    favoris("zerator")
+    conf = domotique.reglages(CONF_FAVORIS)
+    assert not domotique._dans_la_portee(conf, {"login": "quelquun_dautre"})
+
+
+def test_le_filtre_ignore_la_casse(favoris):
+    """Les favoris sont rangés en minuscules ; l'API rend parfois autre chose."""
+    favoris("mistermv")
+    conf = domotique.reglages(CONF_FAVORIS)
+    assert domotique._dans_la_portee(conf, {"login": "MisterMV"})
+
+
+def test_un_palier_part_toujours(favoris):
+    """Il n'appartient à personne, et n'est pas ce qui noie la maison."""
+    favoris("zerator")
+    conf = domotique.reglages(CONF_FAVORIS)
+    assert domotique._dans_la_portee(conf, {"montant": 1_000_000.0,
+                                            "libelle": "1 M€"})
+
+
+def test_le_filtre_agit_sur_l_envoi_reel(poste, favoris):
+    """Posé dans `annonce`, il couvre les quatre familles d'un coup."""
+    favoris("zerator")
+    assert domotique.annonce("don", {"login": "zerator"}, config=CONF_FAVORIS)
+    assert not domotique.annonce("hype", {"login": "inconnu"},
+                                 config=CONF_FAVORIS)
+    assert domotique.annonce("palier", {"libelle": "1 M€"},
+                             config=CONF_FAVORIS)
+    assert [e[1]["type"] for e in poste] == ["don", "palier"]
+
+
+def test_sans_favori_le_filtre_ne_laisse_que_les_paliers(poste, favoris):
+    """Cocher la case sans avoir posé d'étoile éteint presque tout : c'est
+    cohérent, et l'infobulle du réglage le dit."""
+    favoris()
+    assert not domotique.annonce("don", {"login": "zerator"},
+                                 config=CONF_FAVORIS)
+    assert domotique.annonce("palier", {"libelle": "1 M€"},
+                             config=CONF_FAVORIS)

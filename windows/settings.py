@@ -927,6 +927,28 @@ class _PageDomotique(_PageBase):
             "L'automatisation s'y branche pour ne réagir qu'à ce qui "
             "l'intéresse."
         ))
+        # Séparée des quatre cases du dessus : ce n'est pas une cinquième
+        # famille d'événements mais un filtre qui s'applique à elles.
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_section_title("Portée"))
+
+        # Trois cents participants un soir d'événement : « grosse donation »
+        # et « moment fort » partent alors sans arrêt, et la maison clignote
+        # pour des chaînes qu'on ne regarde même pas. Le choix se pose ici, et
+        # non dans l'automatisation : Home Assistant recevrait quand même tout.
+        self._favoris_cb = QCheckBox(
+            "Ne rien annoncer en dehors de mes favoris")
+        self._favoris_cb.setFont(QFont(_FONT_UI, 11))
+        self._favoris_cb.setChecked(bool(conf.get("favoris_seulement")))
+        self._favoris_cb.setToolTip(
+            "S'applique aux familles qui désignent une chaîne : donation, "
+            "objectif, moment fort.\n"
+            "Un palier de cagnotte n'appartient à personne et part toujours.")
+        self._vl.addWidget(self._favoris_cb)
+        self._vl.addWidget(_hint(
+            "Un palier de cagnotte n'appartient à personne : il part toujours. "
+            "Le filtre ne vaut que pour les familles qui désignent une chaîne."
+        ))
 
         self._vl.addWidget(_sep())
         self._vl.addWidget(_section_title("L'automatisation à coller"))
@@ -1072,6 +1094,7 @@ class _PageDomotique(_PageBase):
             "webhook_id": self._webhook.text().strip(),
             "evenements": [c for c, case in self._cases.items()
                            if case.isChecked()],
+            "favoris_seulement": self._favoris_cb.isChecked(),
         }
 
 
