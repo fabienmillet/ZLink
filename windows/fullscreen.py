@@ -2751,6 +2751,19 @@ class FullscreenWindow(QMainWindow):
         if (not self._current_login or self._pip_active or self._ad_active
                 or self._replay_active):
             return
+        if not self._overlay.isVisible():
+            # La géométrie posée pendant qu'elle était cachée ne lui survit
+            # pas : la barre n'a jamais de layout — `central` n'en a aucun,
+            # tout y est placé en absolu — et Qt lui rend sa taille par défaut
+            # (100 px de large) à sa toute première apparition. Elle s'ouvrait
+            # donc en moignon dans le coin, titre tronqué et boutons écrasés
+            # les uns sur les autres.
+            #
+            # Replacée ICI, au moment où elle se montre, et non à chaque
+            # mouvement de souris : `_show_overlay` est rappelé à chacun, et
+            # recalculer toutes les géométries soixante fois par seconde pour
+            # une barre déjà en place ne servirait à rien.
+            self._update_mpv_geometry()
         self._overlay.show()
         self._overlay.raise_()
         self._remote_btn.show()
