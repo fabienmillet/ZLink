@@ -2422,13 +2422,13 @@ def clips(qtbot):
     return monter
 
 
-def _lignes_de(onglet):
-    return onglet.findChildren(panel._LigneClip)
+def _cartes_de(onglet):
+    return onglet.findChildren(panel._CarteClip)
 
 
 def test_l_onglet_liste_les_clips(clips):
     onglet = clips(_clip("a"), _clip("b", vues=50))
-    assert len(_lignes_de(onglet)) == 2
+    assert len(_cartes_de(onglet)) == 2
     assert "2 clips" in onglet._compte.text()
     assert "7 derniers jours" in onglet._compte.text()
 
@@ -2450,7 +2450,7 @@ def test_le_filtre_par_chaine_restreint_la_liste(clips):
     onglet = clips(_clip("a", login="ponce"), _clip("b", login="ponce"),
                    _clip("c", login="zerator", chaine="ZeratoR"))
     onglet._chaine.setCurrentIndex(onglet._chaine.findData("zerator"))
-    assert len(_lignes_de(onglet)) == 1
+    assert len(_cartes_de(onglet)) == 1
 
 
 def test_le_filtre_est_retenu_apres_un_rafraichissement(clips):
@@ -2468,16 +2468,17 @@ def test_le_tri_reordonne_sans_recharger(clips):
     la retrier serait une requête pour rien."""
     onglet = clips(_clip("vieux", vues=90, cree=100.0),
                    _clip("neuf", vues=10, cree=900.0))
-    assert _lignes_de(onglet)[0]._clip.slug == "vieux"
+    assert _cartes_de(onglet)[0]._clip.slug == "vieux"
     onglet._tri.setCurrentIndex(
         [onglet._tri.itemData(i) for i in range(onglet._tri.count())].index("recents"))
-    assert _lignes_de(onglet)[0]._clip.slug == "neuf"
+    assert _cartes_de(onglet)[0]._clip.slug == "neuf"
 
 
 def test_cliquer_un_clip_le_signale(clips, qtbot):
     onglet = clips(_clip("a"))
+    carte = _cartes_de(onglet)[0]
     with qtbot.waitSignal(onglet.clip_choisi) as attrape:
-        _lignes_de(onglet)[0].clique.emit(_lignes_de(onglet)[0]._clip)
+        carte.clique.emit(carte._clip)
     assert attrape.args[0].slug == "a"
 
 
@@ -2547,7 +2548,7 @@ def test_une_liste_vide_ne_remplace_pas_celle_qu_on_a(clips):
     """Un réseau qui se dérobe ne doit pas effacer ce qui est affiché."""
     onglet = clips(_clip("a"))
     onglet._recevoir([])
-    assert len(_lignes_de(onglet)) == 1
+    assert len(_cartes_de(onglet)) == 1
     assert onglet._bouton.text() == "Rafraîchir"
 
 
@@ -2571,3 +2572,72 @@ def test_un_clip_illisible_propose_twitch(qtbot):
     lecteur._lire("")
     assert "Ouvrir sur Twitch" in lecteur._etat.text()
     assert not lecteur._etat.isHidden()
+
+
+# ── la grille de vignettes ──────────────────────────────────────────────────
+
+def test_les_cartes_se_rangent_en_grille(clips):
+    """Une liste de titres ne dit pas ce qu'on va voir ; la vignette si."""
+    onglet = clips(*[_clip(f"c{i}") for i in range(9)])
+    onglet.resize(1400, 700)
+    onglet._reafficher()
+    assert onglet._colonnes >= 2
+    places = {(onglet._liste.getItemPosition(i)[0],
+               onglet._liste.getItemPosition(i)[1])
+              for i in range(onglet._liste.count())}
+    assert len(places) == 9, "chaque carte a sa propre case"
+    assert len({c for _l, c in places}) == onglet._colonnes
+
+
+@pytest.mark.parametrize("largeur,attendu", [
+    (1900, 6), (1290, 4), (630, 2), (300, 1), (80, 1),
+])
+def test_le_nombre_de_colonnes_suit_la_largeur(clips, largeur, attendu):
+    """Le panel s'affiche sur 1920 comme sur la moitié d'un 2560 : une grille
+    figée déborde sur l'un et laisse le vide sur l'autre.
+
+    La largeur est imposée plutôt que mesurée : sans passage par la boucle
+    d'événements, un `resize` ne se propage pas encore au viewport.
+    """
+    onglet = clips(_clip("a"))
+    onglet._zone.viewport().resize(largeur, 400)
+    assert onglet._colonnes_tenables() == attendu
+
+
+def test_la_duree_est_posee_sur_la_vignette(clips):
+    onglet = clips(_clip("a", duree=95.0))
+    carte = _cartes_de(onglet)[0]
+    assert carte._duree.text() == "1:35"
+
+
+def test_une_vignette_arrivee_ailleurs_ne_repeint_pas_la_carte(clips, qtbot):
+    """Toutes les cartes écoutent le même cache : sans la comparaison
+    d'adresse, chacune se repeindrait à chaque image reçue."""
+    onglet = clips(_clip("a"))
+    carte = _cartes_de(onglet)[0]
+    appels = []
+    carte._appliquer_vignette = lambda: appels.append(1)
+    carte._sur_vignette("https://autre.test/x.jpg")
+    assert appels == []
+    carte._sur_vignette(carte._clip.vignette)
+    assert appels == [1]
+
+
+def test_le_cache_ne_telecharge_qu_une_fois(qtbot, monkeypatch):
+    """Soixante-dix-huit cartes, et souvent la même chaîne : sans ce garde,
+    la même image partait autant de fois qu'elle apparaît."""
+    cache = panel._CacheVignettes()
+    lances = []
+    monkeypatch.setattr(panel.threading, "Thread",
+                        lambda *a, **k: type("T", (), {
+                            "start": lambda _s: lances.append(k.get("args"))})())
+    cache.pixmap("https://exemple.test/a.jpg")
+    cache.pixmap("https://exemple.test/a.jpg")
+    assert len(lances) == 1
+
+
+def test_une_adresse_vide_ne_lance_rien(monkeypatch):
+    cache = panel._CacheVignettes()
+    monkeypatch.setattr(panel.threading, "Thread",
+                        lambda *a, **k: pytest.fail("aucun fil attendu"))
+    assert cache.pixmap("") is None

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QObject,
     QPropertyAnimation,
     QRectF,
     QSize,
@@ -5939,61 +5940,146 @@ def _il_y_a(instant: float, maintenant: float | None = None) -> str:
     return f"il y a {int(ecart // 86400)} j"
 
 
-class _LigneClip(QFrame):
-    """Un clip dans la liste : qui, quoi, combien de vues, quand."""
+class _CacheVignettes(QObject):
+    """Les images de prévisualisation des clips, téléchargées une fois.
+
+    Un cache à part de celui des avatars : celui-là rend des pastilles RONDES,
+    et une vignette de clip est un rectangle 16:9. Le détourner aurait rogné
+    chaque image en cercle.
+
+    Le résultat revient par un SIGNAL. Un fil de téléchargement ne peut pas
+    toucher aux widgets, et un `QTimer.singleShot` posé depuis lui ne part
+    jamais — il naît dans un fil sans boucle d'événements.
+    """
+
+    #: L'adresse dont la vignette vient d'arriver. Chaque carte compare avec la
+    #: sienne : une seule connexion suffit alors pour toutes.
+    prete = pyqtSignal(str)
+
+    #: Au-delà, ce n'est pas une vignette. Twitch les rend en 480×272.
+    _MAX_OCTETS = 2 * 1024 * 1024
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._images: dict[str, QPixmap] = {}
+        self._encours: set[str] = set()
+
+    def pixmap(self, url: str) -> QPixmap | None:
+        """La vignette si elle est là. Sinon None, et le chargement démarre."""
+        if not url:
+            return None
+        if url in self._images:
+            return self._images[url]
+        if url not in self._encours:
+            self._encours.add(url)
+            threading.Thread(target=self._charger, args=(url,),
+                             daemon=True).start()
+        return None
+
+    def _charger(self, url: str) -> None:
+        import urllib.request
+
+        donnees = b""
+        try:
+            requete = urllib.request.Request(
+                url, headers={"User-Agent": "ZLink/1.0"})
+            with urllib.request.urlopen(requete, timeout=10) as reponse:
+                donnees = reponse.read(self._MAX_OCTETS + 1)
+        except Exception as exc:                            # noqa: BLE001
+            logger.debug("Vignette indisponible (%s) : %s", url[:60], exc)
+        if 0 < len(donnees) <= self._MAX_OCTETS:
+            image = QPixmap()
+            if image.loadFromData(donnees):
+                self._images[url] = image
+        self._encours.discard(url)
+        self.prete.emit(url)
+
+
+class _CarteClip(QFrame):
+    """Un clip en vignette : l'image d'abord, le texte dessous.
+
+    Une liste de titres ne dit pas ce qu'on va voir. La prévisualisation, si —
+    c'est elle qu'on parcourt, exactement comme sur une page de vidéos.
+    """
 
     clique = pyqtSignal(object)          # le Clip
 
-    def __init__(self, clip, parent: QWidget | None = None) -> None:
+    LARGEUR = 300
+    _HAUTEUR_IMAGE = 169                 # 300 × 9/16, au pixel près
+
+    def __init__(self, clip, cache: _CacheVignettes,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._clip = clip
-        self.setObjectName("ligneClip")
+        self._cache = cache
+        self.setFixedWidth(self.LARGEUR)
+        self.setObjectName("carteClip")
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setStyleSheet(
-            "QFrame#ligneClip { background: transparent; border: none; "
-            "border-bottom: 1px solid #1a1a1a; }"
-            "QFrame#ligneClip:hover { background: #141414; }")
-        h = QHBoxLayout(self)
-        h.setContentsMargins(10, 8, 12, 8)
-        h.setSpacing(12)
+            "QFrame#carteClip { background: transparent; border: none; "
+            "border-radius: 8px; }"
+            "QFrame#carteClip:hover { background: #161616; }")
 
-        avatar = QLabel()
-        avatar.setFixedSize(36, 36)
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setStyleSheet(_FOND_TRANSPARENT)
-        from widgets.bigscreen_widget import load_avatar_into_label as _load_av
-        _load_av(avatar, clip.login, clip.chaine, 36, "")
-        h.addWidget(avatar)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(6, 6, 6, 10)
+        v.setSpacing(8)
 
-        colonne = QVBoxLayout()
-        colonne.setSpacing(2)
+        # ── la vignette, avec la durée posée dessus ─────────────────────────
+        cadre = QWidget()
+        cadre.setFixedHeight(self._HAUTEUR_IMAGE)
+        cadre.setStyleSheet(_FOND_TRANSPARENT)
+        self._image = QLabel(cadre)
+        self._image.setGeometry(0, 0, self.LARGEUR - 12, self._HAUTEUR_IMAGE)
+        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image.setStyleSheet(
+            "background: #141414; border-radius: 6px; color: #333333;")
+        self._image.setText("…")
+        self._appliquer_vignette()
+
+        self._duree = QLabel(_duree_courte(clip.duree_s), cadre)
+        self._duree.setFont(QFont(_FONT_MONO, 9))
+        self._duree.setStyleSheet(
+            "background: rgba(0,0,0,200); color: #ffffff; "
+            "border-radius: 3px; padding: 1px 5px;")
+        self._duree.adjustSize()
+        self._duree.move(self.LARGEUR - 18 - self._duree.width(),
+                         self._HAUTEUR_IMAGE - 8 - self._duree.height())
+        v.addWidget(cadre)
+
+        # ── le texte ────────────────────────────────────────────────────────
         titre = QLabel(clip.titre)
         titre.setTextFormat(Qt.TextFormat.PlainText)   # il vient de Twitch
-        titre.setFont(_bold_font(_FONT_SEGOE, 11))
+        titre.setFont(_bold_font(_FONT_SEGOE, 10))
         titre.setStyleSheet(_SS_WHITE)
-        colonne.addWidget(titre)
-        dessous = " · ".join(x for x in (
-            clip.chaine, _il_y_a(clip.cree_le),
-            f"clippé par {clip.auteur}" if clip.auteur else "") if x)
-        sous = QLabel(dessous)
-        sous.setTextFormat(Qt.TextFormat.PlainText)
-        sous.setFont(QFont(_FONT_SEGOE, 10))
-        sous.setStyleSheet(_SS_MUTED)
-        colonne.addWidget(sous)
-        h.addLayout(colonne, stretch=1)
+        titre.setWordWrap(True)
+        titre.setFixedHeight(34)                       # deux lignes, pas plus
+        titre.setToolTip(_infobulle(clip.titre))
+        v.addWidget(titre)
 
-        vues = QLabel(f"{clip.vues:,}".replace(",", "\u202f") + " vues")
-        vues.setFont(QFont(_FONT_MONO, 10))
-        vues.setStyleSheet(_SS_VERT_NU)
-        vues.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        h.addWidget(vues)
+        vues = f"{clip.vues:,}".replace(",", "\u202f")
+        dessous = QLabel(" · ".join(x for x in (
+            clip.chaine, f"{vues} vues", _il_y_a(clip.cree_le)) if x))
+        dessous.setTextFormat(Qt.TextFormat.PlainText)
+        dessous.setFont(QFont(_FONT_SEGOE, 9))
+        dessous.setStyleSheet(_SS_MUTED)
+        v.addWidget(dessous)
 
-        duree = QLabel(_duree_courte(clip.duree_s))
-        duree.setFont(QFont(_FONT_MONO, 10))
-        duree.setStyleSheet(_SS_GRIS_NU)
-        duree.setFixedWidth(44)
-        duree.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        h.addWidget(duree)
+        cache.prete.connect(self._sur_vignette)
+
+    def _sur_vignette(self, url: str) -> None:
+        if url == self._clip.vignette:
+            self._appliquer_vignette()
+
+    def _appliquer_vignette(self) -> None:
+        image = self._cache.pixmap(self._clip.vignette)
+        if image is None or image.isNull():
+            return
+        largeur = self.LARGEUR - 12
+        self._image.setPixmap(image.scaled(
+            largeur, self._HAUTEUR_IMAGE,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation))
+        self._image.setText("")
 
     def mousePressEvent(self, event) -> None:      # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
@@ -6024,6 +6110,8 @@ class _ClipsTab(QWidget):
         super().__init__(parent)
         self._clips: list = []
         self._chargement = False
+        self._colonnes = 0
+        self._vignettes = _CacheVignettes(self)
         self._charges.connect(self._recevoir)
         self._build()
 
@@ -6077,9 +6165,12 @@ class _ClipsTab(QWidget):
         zone.viewport().setStyleSheet(_FOND_TRANSPARENT)
         self._contenu = QWidget()
         self._contenu.setStyleSheet(_SS_FOND_PAGE)
-        self._liste = QVBoxLayout(self._contenu)
+        self._liste = QGridLayout(self._contenu)
         self._liste.setContentsMargins(0, 0, 0, 0)
-        self._liste.setSpacing(0)
+        self._liste.setSpacing(10)
+        self._liste.setAlignment(Qt.AlignmentFlag.AlignTop
+                                 | Qt.AlignmentFlag.AlignLeft)
+        self._zone = zone
         zone.setWidget(self._contenu)
         v.addWidget(zone, stretch=1)
 
@@ -6172,12 +6263,34 @@ class _ClipsTab(QWidget):
             else "Aucun clip pour l'instant.")
         self._compte.setText(
             f"{len(clips)} clips · 7 derniers jours" if clips else "")
-        for clip in clips:
-            ligne = _LigneClip(clip)
-            ligne.clique.connect(self.clip_choisi)
-            self._liste.addWidget(ligne)
-            ligne.show()
-        self._liste.addStretch()
+        colonnes = self._colonnes_tenables()
+        self._colonnes = colonnes
+        for rang, clip in enumerate(clips):
+            carte = _CarteClip(clip, self._vignettes)
+            carte.clique.connect(self.clip_choisi)
+            self._liste.addWidget(carte, rang // colonnes, rang % colonnes)
+            carte.show()
+
+    def _colonnes_tenables(self) -> int:
+        """Combien de cartes tiennent en largeur. Au moins une.
+
+        Recalculé plutôt que fixé : le panel s'affiche sur des écrans de
+        1920 comme sur la moitié d'un 2560, et une grille figée à quatre
+        colonnes déborde sur l'un et laisse le vide sur l'autre.
+        """
+        largeur = self._zone.viewport().width() if self._zone else 0
+        pas = _CarteClip.LARGEUR + self._liste.spacing()
+        return max(1, int((largeur + self._liste.spacing()) // pas))
+
+    def resizeEvent(self, event) -> None:              # type: ignore[override]
+        """Recompose la grille quand le nombre de colonnes change.
+
+        Seulement quand il CHANGE : reconstruire soixante-dix-huit cartes à
+        chaque pixel de redimensionnement ferait ramer la fenêtre.
+        """
+        super().resizeEvent(event)
+        if self._clips and self._colonnes_tenables() != self._colonnes:
+            self._reafficher()
 
 
 class _LecteurClip(QDialog):
