@@ -978,22 +978,24 @@ def test_la_bande_couvre_bien_huit_heures():
 
 @pytest.fixture
 def collecte_ouverte(monkeypatch):
-    """Place l'horloge après l'ouverture de la cagnotte.
+    """Déclare qu'il y a de quoi comparer les éditions.
 
-    Les abscisses ne sont rebasées sur le temps de course QUE là : avant, il
-    n'y a pas de course, et l'axe porte l'heure vraie. Chaque test dit donc de
-    quel régime il parle.
+    Les abscisses ne sont rebasées sur le temps de course QUE là : sans
+    comparaison, le rebasage n'a rien à aligner et l'axe porte l'heure vraie.
+    Chaque test dit donc de quel régime il parle.
     """
     from core import history_store
 
-    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: True)
+    monkeypatch.setattr(history_store, "comparaison_possible",
+                        lambda *_a: True)
 
 
 @pytest.fixture
 def collecte_fermee(monkeypatch):
     from core import history_store
 
-    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: False)
+    monkeypatch.setattr(history_store, "comparaison_possible",
+                        lambda *_a: False)
 
 
 def test_une_serie_courte_passe_aux_minutes(collecte_ouverte):
@@ -1058,3 +1060,30 @@ def test_avant_l_ouverture_l_axe_porte_l_heure_vraie(collecte_fermee):
 
 def test_apres_l_ouverture_l_axe_repart_du_temps_de_course(collecte_ouverte):
     assert panel.abscisses_graphe([_horodatage(23, 11)])[0] == "18h00"
+
+
+# ── de quoi comparer, ou pas ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("etendue_s,attendu", [
+    (0, False),          # un seul instant : rien à comparer
+    (180, False),        # trois minutes : les éditions s'y écraseraient
+    (3600, True),        # une heure : la superposition a un sens
+    (72 * 3600, True),
+])
+def test_la_comparaison_depend_des_donnees_pas_du_calendrier(etendue_s, attendu):
+    """Une constante d'ouverture était une hypothèse, et elle était fausse.
+
+    Relevée sur les éditions précédentes, elle tombait le vendredi — or la
+    cagnotte 2026 a ouvert le jeudi à midi. Un garde calendaire aurait masqué
+    douze heures de comparaison parfaitement valables.
+    """
+    from core.history_store import comparaison_possible
+
+    instants = [1000.0] if not etendue_s else [1000.0, 1000.0 + etendue_s]
+    assert comparaison_possible(instants) is attendu
+
+
+def test_une_serie_vide_ne_compare_rien():
+    from core.history_store import comparaison_possible
+
+    assert comparaison_possible([]) is False

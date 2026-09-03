@@ -2049,14 +2049,15 @@ def _charge(stats):
 
 @pytest.fixture
 def collecte_ouverte(monkeypatch):
-    """Place l'horloge après l'ouverture de la cagnotte.
+    """Déclare qu'il y a de quoi comparer les éditions.
 
-    Les éditions passées ne sont alignées — et l'axe rebasé — que là. Avant, il
-    n'y a pas de temps de course : le graphe se trace seul, à l'heure vraie.
+    Elles ne sont alignées — et l'axe rebasé — que là. Sans étendue suffisante,
+    le graphe se trace seul, à l'heure vraie.
     """
     from core import history_store
 
-    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: True)
+    monkeypatch.setattr(history_store, "comparaison_possible",
+                        lambda *_a: True)
 
 
 def test_les_graphes_transportent_la_courbe_de_reference(stats, collecte_ouverte):
@@ -2318,7 +2319,8 @@ def test_le_compte_d_objectifs_suit_la_cagnotte(qtbot):
 def collecte_fermee(monkeypatch):
     from core import history_store
 
-    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: False)
+    monkeypatch.setattr(history_store, "comparaison_possible",
+                        lambda *_a: False)
 
 
 def test_avant_l_ouverture_aucune_edition_n_est_comparee(stats, collecte_fermee):

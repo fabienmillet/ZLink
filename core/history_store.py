@@ -94,21 +94,28 @@ def _sane_point(ts_ms: object, val: object) -> tuple[float, float] | None:
     return ts, float(val)
 
 
-def cagnotte_ouverte(maintenant: float | None = None) -> bool:
-    """La collecte a-t-elle commencé.
+#: Étendue minimale de la courbe en cours avant d'y superposer les éditions
+#: passées. En deçà, elles seraient écrasées sur quelques minutes de relevés :
+#: 2021 y gagnait deux cent quarante mille euros en un quart d'heure.
+_ETENDUE_MINIMALE_COMPARAISON = 3600.0
 
-    À ne pas confondre avec `_EVENT_START` : les directs ouvrent le jeudi, la
-    cagnotte le vendredi à 18 h. Entre les deux, ZLink relève déjà des points —
-    des dons d'avant-course — mais il n'y a pas encore de TEMPS DE COURSE, et
-    c'est lui qui rend les éditions comparables.
 
-    Sans ce garde, un jeudi soir affichait douze minutes de relevés rebasées
-    sur « vendredi 18h00 », avec les quatre éditions passées écrasées sur ces
-    mêmes douze minutes : 2021 y gagnait deux cent quarante mille euros en un
-    quart d'heure.
+def comparaison_possible(instants: list[float]) -> bool:
+    """Peut-on superposer les éditions passées à celle-ci.
+
+    La question porte sur les DONNÉES, pas sur le calendrier. Une constante
+    d'ouverture était une hypothèse : relevée sur les éditions précédentes,
+    elle tombait le vendredi — or la cagnotte 2026 a ouvert le jeudi à midi.
+    Un garde calendaire aurait masqué douze heures de comparaison parfaitement
+    valables.
+
+    Ce qui compte est qu'il y ait de quoi comparer : les éditions sont alignées
+    sur le TEMPS DE COURSE compté depuis le premier point de la courbe en
+    cours, et une courbe de trois minutes n'en offre pas.
     """
-    return (maintenant if maintenant is not None
-            else time.time()) >= OUVERTURE_CAGNOTTE
+    if len(instants) < 2:
+        return False
+    return (instants[-1] - instants[0]) >= _ETENDUE_MINIMALE_COMPARAISON
 
 
 class HistoryStore:
@@ -381,6 +388,72 @@ class HistoryStore:
         ts, vals = zip(*pairs)
         return list(ts), list(vals)
 
+    @staticmethod
+    async def _telecharger_edition(event_id: str, client=None) -> dict | None:
+        """Le JSON d'une édition, ou None si la source se dérobe.
+
+        Rendre None plutôt que lever : une comparaison manquante retire une
+        courbe, elle n'empêche pas de suivre l'événement.
+        """
+        url = (_URL_EDITION_BASE + str(event_id).strip("/ ") + "/global.json")
+        try:
+            import httpx
+            if client is None:
+                async with httpx.AsyncClient(timeout=15) as propre:
+                    reponse = await propre.get(url)
+                    reponse.raise_for_status()
+                    return reponse.json()
+            reponse = await client.get(url)
+            reponse.raise_for_status()
+            return reponse.json()
+        except Exception as exc:  # noqa: BLE001 — toute panne réseau vaut « pas de courbe »
+            logger.warning("Édition %s : historique indisponible — %s",
+                           event_id, exc)
+            return None
+
+    async def charger_edition_en_cours(self, event_id: str, client=None) -> bool:
+        """Préremplit la courbe de l'édition EN COURS, depuis son début.
+
+        Sans elle, ZLink ne trace que ce qu'il a relevé lui-même : lancer le
+        panel à minuit donnait une minute de courbe, sur un graphe qui annonce
+        soixante-douze heures — et l'axe des ordonnées, tassé sur cet
+        intervalle, répétait « 535k€ » huit fois de suite.
+
+        La source est celle des éditions passées, à l'identifiant de l'édition
+        courante près. Elle publie déjà l'événement depuis son ouverture, au
+        même format et à la même finesse : rien à inventer, ni à aller chercher
+        ailleurs.
+
+        Les points chargés sont posés AVANT ceux du direct, et `_live_depuis`
+        reste vierge — ce préchargement n'est pas une observation de ZLink, et
+        `_garder` doit continuer de le borner à la fenêtre de l'édition.
+        """
+        data = await self._telecharger_edition(event_id, client)
+        if data is None:
+            return False
+        graphe = (data or {}).get("graph") or {}
+        dons = self._lire_serie(graphe.get("donations", {}).get("all"))
+        vues = self._lire_serie(graphe.get("viewers"))
+        if len(dons) < 2:
+            logger.warning("Édition en cours : courbe de cagnotte inexploitable")
+            return False
+        if not self._chronologique(dons, "en cours"):
+            return False
+        # Tout-ou-rien, et les listes sont construites AVANT de toucher à
+        # l'état : une section viewers manquante ne doit pas laisser la
+        # cagnotte préchargée face à une audience vide.
+        self._donation.clear()
+        self._donation.extend(dons)
+        self._viewers.clear()
+        self._viewers.extend((t, int(v)) for t, v in vues)
+        self._live_depuis = None
+        logger.info(
+            "Édition en cours préchargée : %d points de cagnotte, %d de "
+            "viewers, depuis %s",
+            len(dons), len(vues),
+            datetime.fromtimestamp(dons[0][0], tz=timezone.utc).isoformat())
+        return True
+
     async def charger_editions(self, editions=EDITIONS, client=None) -> list[str]:
         """Charge toutes les éditions superposables. Rend celles qui tiennent.
 
@@ -473,20 +546,8 @@ class HistoryStore:
         Rend False sans rien casser si la source se dérobe : une comparaison
         manquante retire une courbe, elle n'empêche pas de suivre l'événement.
         """
-        url = (_URL_EDITION_BASE + str(event_id).strip("/ ") + "/global.json")
-        try:
-            import httpx
-            if client is None:
-                async with httpx.AsyncClient(timeout=15) as propre:
-                    reponse = await propre.get(url)
-                    reponse.raise_for_status()
-                    data = reponse.json()
-            else:
-                reponse = await client.get(url)
-                reponse.raise_for_status()
-                data = reponse.json()
-        except Exception as exc:  # noqa: BLE001 — toute panne réseau vaut « pas de courbe »
-            logger.warning("Édition %s : historique indisponible — %s", event_id, exc)
+        data = await self._telecharger_edition(event_id, client)
+        if data is None:
             return False
 
         nom = libelle or str(event_id)

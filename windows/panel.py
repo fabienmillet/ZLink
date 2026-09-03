@@ -5637,17 +5637,6 @@ def _etiquette_graphe(ts: float, avec_minutes: bool) -> str:
     return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
 
 
-def _comparaison_possible() -> bool:
-    """Peut-on confronter l'édition en cours aux précédentes.
-
-    Elles sont alignées sur le TEMPS DE COURSE, compté depuis l'ouverture de la
-    cagnotte. Tant qu'elle n'a pas ouvert, ce temps n'existe pas.
-    """
-    from core.history_store import cagnotte_ouverte
-
-    return cagnotte_ouverte()
-
-
 def abscisses_graphe(instants: list[float]) -> list[str]:
     """Étiquettes d'axe calées sur le CALENDRIER de l'édition.
 
@@ -5669,12 +5658,11 @@ def abscisses_graphe(instants: list[float]) -> list[str]:
         return []
     depart = instants[0]
     minutes = (instants[-1] - depart) <= _SEUIL_MINUTES_AXE
-    from core.history_store import cagnotte_ouverte
+    from core.history_store import comparaison_possible
 
-    if not cagnotte_ouverte():
-        # Avant l'ouverture de la collecte, il n'y a pas de temps de course :
-        # rebaser afficherait « vendredi 18h00 » un jeudi soir, sans rien
-        # aligner puisqu'aucune édition n'est comparée. L'heure vraie, donc.
+    if not comparaison_possible(instants):
+        # Rien à aligner : le rebasage n'a plus de raison d'être, et il
+        # afficherait une heure qui n'est pas celle des relevés.
         return [_etiquette_graphe(t, minutes) for t in instants]
     return [_etiquette_graphe(OUVERTURE_CAGNOTTE + (t - depart), minutes)
             for t in instants]
@@ -6682,6 +6670,7 @@ window.zlUpdate = function (payload) {{
         """Met à jour les graphes Chart.js cagnotte et viewers."""
         ts_d, vals_d = history.get_donation_series()
         ts_v, vals_v = history.get_viewers_series()
+        from core.history_store import comparaison_possible
         has_data = bool(ts_d or ts_v)
         self._charts_empty.setVisible(not has_data)
         if self._charts_view is not None:
@@ -6702,10 +6691,10 @@ window.zlUpdate = function (payload) {{
                 # écrasées sur les quelques minutes déjà relevées, et 2021
                 # gagnerait deux cent quarante mille euros en un quart d'heure.
                 "rd": _references(history.series_editions_alignees(ts_d))
-                if _comparaison_possible() else {},
+                if comparaison_possible(ts_d) else {},
                 "rv": _references(
                     history.series_viewers_editions_alignees(ts_v))
-                if _comparaison_possible() else {},
+                if comparaison_possible(ts_v) else {},
             })
             self._push_charts()
 

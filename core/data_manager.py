@@ -281,6 +281,13 @@ class DataManager(QObject):
         que pas de comparaison.
         """
         try:
+            # L'édition EN COURS d'abord : sans elle, ZLink ne trace que ce
+            # qu'il a relevé depuis son lancement — une minute de courbe sur un
+            # graphe qui en annonce soixante-douze heures. La source la publie
+            # depuis l'ouverture, au même format que les précédentes.
+            from core.api_client import GDOC_EVENT_ID
+
+            _run(self._history.charger_edition_en_cours(GDOC_EVENT_ID))
             if not _run(self._history.charger_editions()):
                 _run(self._history.load_historical_2026())
         except Exception:

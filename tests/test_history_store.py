@@ -975,3 +975,71 @@ def test_les_series_de_toutes_les_editions_s_alignent(horloge):
     assert set(alignees) == {"a", "b"}
     assert alignees["a"] == [0.0, 1000.0, 2000.0]
     assert alignees["b"] == [0.0, 500.0, 1000.0]
+
+
+# ── l'édition en cours, préchargée depuis son début ─────────────────────────
+
+_GRAPHE_EN_COURS = {
+    "graph": {
+        "donations": {"all": {
+            "labels": [1_788_408_000_000, 1_788_411_600_000, 1_788_415_200_000],
+            "values": [0.0, 120_000.0, 532_730.49],
+        }},
+        "viewers": {
+            "labels": [1_788_408_000_000, 1_788_411_600_000, 1_788_415_200_000],
+            "values": [5290, 90_000, 143_633],
+        },
+    },
+}
+
+
+@pytest.fixture
+def sans_reseau(monkeypatch):
+    """Rend le JSON voulu au lieu d'aller le chercher."""
+    def poser(charge):
+        async def _faux(_event_id, _client=None):
+            return charge
+        monkeypatch.setattr(HistoryStore, "_telecharger_edition",
+                            staticmethod(_faux))
+    return poser
+
+
+def test_l_edition_en_cours_est_prechargee_depuis_son_debut(sans_reseau):
+    """Sans elle, ZLink ne trace que ce qu'il a relevé depuis son lancement.
+
+    Lancer le panel à minuit donnait une minute de courbe sur un graphe qui en
+    annonce soixante-douze heures, et l'axe des ordonnées répétait « 535k€ »
+    huit fois de suite.
+    """
+    sans_reseau(_GRAPHE_EN_COURS)
+    h = HistoryStore()
+    assert asyncio.run(h.charger_edition_en_cours("peu-importe"))
+    ts, vals = h.get_donation_series()
+    assert len(ts) == 3
+    assert vals[0] == 0.0 and vals[-1] == pytest.approx(532_730.49)
+    assert (ts[-1] - ts[0]) == 7200.0
+
+
+def test_le_prechargement_ne_se_fait_pas_passer_pour_du_direct(sans_reseau):
+    """`_live_depuis` sépare ce que ZLink a observé du reste : le préchargement
+    n'est pas une observation, et `_garder` doit continuer de le borner."""
+    sans_reseau(_GRAPHE_EN_COURS)
+    h = HistoryStore()
+    asyncio.run(h.charger_edition_en_cours("peu-importe"))
+    assert h._live_depuis is None
+
+
+def test_une_source_muette_laisse_la_courbe_intacte(sans_reseau):
+    """Une comparaison manquante retire une courbe, elle n'efface pas l'autre."""
+    sans_reseau(None)
+    h = HistoryStore()
+    h.add_point(42.0, 7, instant=_EVENT_START + 60)
+    assert not asyncio.run(h.charger_edition_en_cours("peu-importe"))
+    assert h.get_donation_series()[1] == [42.0]
+
+
+def test_une_courbe_trop_courte_est_refusee(sans_reseau):
+    """Deux points au moins : une valeur seule ne trace rien."""
+    sans_reseau({"graph": {"donations": {"all": {"labels": [1_788_408_000_000],
+                                                 "values": [0.0]}}}})
+    assert not asyncio.run(HistoryStore().charger_edition_en_cours("x"))
