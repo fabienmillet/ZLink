@@ -334,13 +334,19 @@ def telecommande_branchee(monkeypatch):
 
     monkeypatch.setattr(remote_api.RemoteAPI, "demarrer",
                         lambda self, port=0: True)
+    # Un Stream Deck branché sur la machine de développement serait ouvert pour
+    # de vrai, ses touches réécrites par la suite de tests, et le boîtier
+    # laissé dans cet état. Les tests ne touchent pas au matériel.
+    monkeypatch.setattr(main, "_streamdeck_direct", lambda: None)
     pieces = {"grille": _GrilleSignaux(), "console": _ConsoleSignaux(),
               "plein": _PleinEcranSignaux(), "donnees": _DonneesSignaux()}
 
     def brancher(avec_console=True):
+        # La fonction rend TOUTES les télécommandes ouvertes ; ces tests
+        # portent sur la première, celle du WebSocket.
         pieces["api"] = main._brancher_telecommande(
             pieces["grille"], pieces["console"] if avec_console else None,
-            pieces["plein"], pieces["donnees"])
+            pieces["plein"], pieces["donnees"])[0]
         return pieces
 
     return brancher

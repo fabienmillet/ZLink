@@ -10,3 +10,15 @@ pyqtgraph>=0.13.0
 # Sans elle, verify_signature() échouait à l'import et retournait False :
 # une mise à jour signée aurait été rejetée comme non vérifiable.
 pycryptodome>=3.20.0
+
+# Stream Deck piloté en direct, sans logiciel Elgato (core/streamdeck_direct.py).
+#
+# Linux seulement : ailleurs, le boîtier appartient au logiciel d'Elgato, qui
+# l'ouvre en exclusif — on passe alors par l'extension de streamdeck/, et ces
+# deux paquets ne serviraient à rien.
+#
+# Il leur faut hidapi, qui est un paquet SYSTÈME et non Python :
+# `pacman -S hidapi`, `apt install libhidapi-hidraw0`, `dnf install hidapi`.
+# Sans lui l'énumération ne rend rien, ZLink le note et tourne sans.
+streamdeck>=0.9.5 ; sys_platform == "linux"
+Pillow>=10.1.0 ; sys_platform == "linux"

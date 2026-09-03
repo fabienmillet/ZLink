@@ -178,9 +178,15 @@ sl = Analysis(
 #     dépendances masquaient celles de la libmpv de l'hôte, qui ne se chargeait
 #     alors plus du tout (« undefined symbol: vaMapBuffer2 »).
 #
-# On écarte donc libmpv et TOUT ce qu'elle tire, plutôt qu'une liste de noms
-# constatés : la fermeture se recalcule à chaque construction et suit le mpv du
-# runner sans qu'on ait à la tenir à jour.
+# Même raisonnement pour hidapi, que core/streamdeck_direct.py charge de la
+# même façon : elle tire libudev, dont le format de base de données suit la
+# version de systemd de la machine. Une libudev d'Ubuntu 22.04 posée devant
+# celle d'un hôte récent ne sait plus énumérer ses propres périphériques — le
+# Stream Deck deviendrait introuvable sur le poste où il est branché.
+#
+# On écarte donc ces deux bibliothèques et TOUT ce qu'elles tirent, plutôt
+# qu'une liste de noms constatés : la fermeture se recalcule à chaque
+# construction et suit le système du runner sans qu'on ait à la tenir à jour.
 
 
 def _dependances_declarees(chemin):
@@ -203,10 +209,16 @@ def _fermeture(racines, index):
     return vus
 
 
+#: Bibliothèques que ZLink charge par ctypes au lancement, chez l'hôte. Aucune
+#: n'est une dépendance Python : PyInstaller ne les voit que parce qu'il résout
+#: les `find_library()` du code à la construction, sur SA machine.
+RACINES_DE_L_HOTE = ("libmpv.so", "libhidapi")
+
+
 def _ecarter_bibliotheques_de_l_hote(binaires):
     index = {os.path.basename(nom): chemin for nom, chemin, _ in binaires}
     ecartes = _fermeture(
-        [nom for nom in index if nom.startswith("libmpv.so")], index
+        [nom for nom in index if nom.startswith(RACINES_DE_L_HOTE)], index
     )
     # Le runtime GCC arrive aussi par l'ICU de Qt : il survivrait à la
     # disparition de libmpv du paquet, on le nomme donc séparément.

@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — accès aux boîtiers Stream Deck sans droits administrateur.
+#
+# Sans cette règle, /dev/hidraw* appartient à root seul : ZLink voit le
+# boîtier mais ne peut pas l'ouvrir, et n'a rien d'autre à dire que
+# « permission refusée ». C'est le seul obstacle sérieux à l'installation
+# sous Linux.
+#
+#   sudo cp packaging/70-zlink-streamdeck.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+# puis rebrancher le boîtier — une règle ne s'applique qu'aux périphériques
+# branchés après son chargement.
+#
+# TAG+="uaccess" plutôt que MODE="0666" : l'accès est donné à la session
+# ouverte physiquement sur la machine, et à elle seule. Un mode 0666 le
+# donnerait à tout ce qui tourne sur le poste, y compris à distance.
+#
+# 0fd9 est l'identifiant Elgato Systems ; la règle couvre donc tous les
+# modèles, présents et à venir, sans liste à tenir à jour.
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0fd9", TAG+="uaccess"

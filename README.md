@@ -122,7 +122,7 @@ signature Ed25519 (`.sig`) et son empreinte figure dans `SHA256SUMS`.
 |---|---|
 | **Windows** | Aucune installation. Le dossier est autonome et se déplace, y compris sur une clé. |
 | **macOS** | Glissez `ZLink.app` dans Applications. |
-| **Linux** | `mpv` doit être présent sur le système : `dnf install mpv` ou `apt install libmpv2`. |
+| **Linux** | `mpv` doit être présent sur le système : `dnf install mpv` ou `apt install libmpv2`. Un Stream Deck branché est piloté directement, sans logiciel Elgato — voir [streamdeck/README.md](streamdeck/README.md). |
 
 Au premier lancement, un assistant demande quels écrans utiliser, combien de
 flux dans la grille et quelles alertes activer. Il se rejoue par `--setup`.

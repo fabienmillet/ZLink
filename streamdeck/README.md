@@ -4,16 +4,95 @@ Piloter la régie depuis le boîtier : choisir le flux affiché en grand, décle
 les gestes du plein écran, régler le son aux molettes.
 
 ```
-  Stream Deck  ⇄  zlink-deck.exe  ⇄  ZLink (127.0.0.1:8730)
+  Windows, macOS   Stream Deck  ⇄  zlink-deck.exe  ⇄  ZLink (127.0.0.1:8730)
+  Linux            Stream Deck  ⇄  ZLink
 ```
 
-Le plugin ne décide de rien. Une touche pressée devient une commande, un état
-reçu devient une image ; ce qui se passe à l'écran reste écrit dans ZLink, où
-c'est déjà testé.
+Deux chemins, parce que le boîtier n'appartient pas au même monde des deux
+côtés. Sous Windows et macOS, le logiciel d'Elgato l'ouvre en exclusif : pour y
+écrire, il faut être une extension qu'il lance lui-même, d'où l'exécutable et
+le WebSocket. Ce logiciel n'existe pas sous Linux — le boîtier y est un simple
+périphérique HID que personne ne réclame, et ZLink l'ouvre directement.
+
+Ni l'un ni l'autre ne décide de rien. Une touche pressée devient une commande,
+un état reçu devient une image ; ce qui se passe à l'écran reste écrit dans
+ZLink, où c'est déjà testé.
 
 ---
 
-## Installation
+## Linux : rien à installer
+
+Il n'y a ni extension à poser, ni exécutable à construire, ni jeton, ni profil
+à importer. On branche le boîtier, on lance ZLink, les touches s'allument.
+
+`core/streamdeck_direct.py` énumère les Stream Deck branchés au démarrage et
+les pilote en direct. Il porte les mêmes signaux que la télécommande
+WebSocket : `main.py` branche l'un ou l'autre sur les mêmes fenêtres, sans
+savoir par où l'ordre est arrivé.
+
+### Ce qu'il faut sur la machine
+
+**hidapi**, qui est un paquet système et non Python :
+
+```bash
+sudo pacman -S hidapi          # Arch
+sudo apt install libhidapi-hidraw0   # Debian, Ubuntu
+sudo dnf install hidapi        # Fedora
+```
+
+**Et la règle udev**, sans laquelle `/dev/hidraw*` appartient à root seul :
+
+```bash
+sudo cp packaging/70-zlink-streamdeck.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+puis **rebrancher le boîtier** — une règle ne s'applique qu'aux périphériques
+branchés après son chargement. C'est le seul obstacle sérieux de
+l'installation, et le journal le dit en toutes lettres quand il se présente :
+
+```
+Stream Deck : Stream Deck + inaccessible (…). Sous Linux, poser la règle
+udev 70-zlink-streamdeck.rules puis rebrancher le boîtier
+```
+
+Rien de tout cela n'est fatal. Sans hidapi, sans la règle, ou sans boîtier,
+ZLink le note dans son journal et tourne exactement comme avant.
+
+### La disposition suit le modèle
+
+Sans logiciel Elgato, il n'y a pas de profil à importer : les touches sont
+posées par le code, et c'est le matériel qui décide de quoi. Ce sont les deux
+profils décrits plus bas, rendus à leur destination — un test les compare à
+ceux que `gen_profils.py` écrit, pour qu'un utilisateur qui passe de Windows à
+Linux retrouve ses touches au même endroit.
+
+| Boîtier | Ce qu'il reçoit |
+|---|---|
+| **avec molettes** (Stream Deck +) | La régie : Chat, Don, Clip, Revoir, Muet, Favori, Précédent, Suivant — et le mixage aux molettes |
+| **sans molette** (Original, MK.2, XL) | La grille : les chaînes, et les deux dernières touches pour paginer |
+| **six touches ou moins** (Mini) | La grille entière, sans pagination : deux flèches y coûteraient plus de chaînes qu'elles n'en donneraient |
+
+L'écran du Stream Deck + est composé par ZLink lui-même — le logiciel Elgato le
+découpait en quatre cases à partir d'un `setFeedback`, ici c'est une seule
+image de 800 × 100 à peindre. On y touche une case pour couper sa piste.
+
+### Si un autre logiciel pilote déjà le boîtier
+
+ZLink n'est pas seul à savoir le faire sous Linux, et deux programmes qui
+écrivent sur le même Stream Deck se le disputent image par image. Poser dans
+`config.json` :
+
+```json
+{"streamdeck": {"direct": false}}
+```
+
+---
+
+## Installation (Windows, macOS)
+
+Tout ce qui suit ne concerne que les systèmes où le logiciel Elgato tourne.
+Sous Linux, voir la section précédente : il n'y a rien à installer.
 
 **Depuis ZLink** — c'est la voie normale, et elle ne demande rien d'autre :
 

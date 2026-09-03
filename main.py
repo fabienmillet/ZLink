@@ -575,40 +575,93 @@ def _brancher_domotique(grid, data_manager) -> None:
                          "couleur": couleur, "extrait": extrait}))
 
 
-def _brancher_telecommande(grid, panel, fullscreen, data_manager):
-    """Ouvre la télécommande locale et la relie à ce qui existe déjà.
+def _brancher_gestes_boitier(source, grid, panel, fullscreen) -> None:
+    """Relie les gestes d'un boîtier à ce que les fenêtres savent déjà faire.
 
-    Elle n'apporte aucun geste nouveau : elle rejoue ceux du clavier et de la
-    console de mixage, depuis un boîtier posé sur le bureau. Rend l'objet, ou
-    None si l'écoute a échoué — auquel cas ZLink tourne sans, exactement comme
-    avant.
-
-    L'état est publié à chaque changement qui se voit sur les touches : la
-    liste des cellules, la chaîne affichée en grand. Rien n'est envoyé en
-    boucle — une touche qui ne change pas n'a pas besoin d'être redessinée.
+    `source` est indifféremment la télécommande WebSocket ou le pilote Stream
+    Deck en direct : les deux portent les mêmes signaux, et rien ici n'a besoin
+    de savoir par quel chemin l'ordre est arrivé.
     """
-    from core.remote_api import RemoteAPI
-
-    telecommande = RemoteAPI()
-    if not telecommande.demarrer():
-        return None
-
-    telecommande.slot_demande.connect(fullscreen.slot_requested)
-    telecommande.voisin_demande.connect(fullscreen.neighbour_requested)
-    telecommande.action_demandee.connect(fullscreen.run_action)
-    telecommande.chaine_demandee.connect(fullscreen.stream_change_requested)
-    telecommande.volume_demande.connect(fullscreen.set_volume)
-    telecommande.muet_demande.connect(fullscreen.set_muted)
+    source.slot_demande.connect(fullscreen.slot_requested)
+    source.voisin_demande.connect(fullscreen.neighbour_requested)
+    source.action_demandee.connect(fullscreen.run_action)
+    source.chaine_demandee.connect(fullscreen.stream_change_requested)
+    source.volume_demande.connect(fullscreen.set_volume)
+    source.muet_demande.connect(fullscreen.set_muted)
     # Par la console de mixage quand elle existe, et seulement à défaut par la
     # grille : la console tient le niveau de chaque tranche, et c'est ce niveau
     # que la télécommande relit avant chaque cran. La court-circuiter laissait
     # la molette repartir du même point indéfiniment.
     if panel is not None:
-        telecommande.volume_chaine_demande.connect(panel.regler_mixage)
-        telecommande.muet_chaine_demande.connect(panel.couper_mixage)
+        source.volume_chaine_demande.connect(panel.regler_mixage)
+        source.muet_chaine_demande.connect(panel.couper_mixage)
     elif grid is not None:
-        telecommande.volume_chaine_demande.connect(grid.grid.set_cell_volume)
-        telecommande.muet_chaine_demande.connect(grid.grid.set_cell_muted)
+        source.volume_chaine_demande.connect(grid.grid.set_cell_volume)
+        source.muet_chaine_demande.connect(grid.grid.set_cell_muted)
+
+
+def _telecommande_websocket():
+    """La télécommande locale, pour l'extension Stream Deck d'Elgato."""
+    from core.remote_api import RemoteAPI
+
+    telecommande = RemoteAPI()
+    return telecommande if telecommande.demarrer() else None
+
+
+def _streamdeck_direct():
+    """Les Stream Deck branchés, pilotés sans logiciel Elgato.
+
+    C'est la voie Linux : le logiciel d'Elgato n'y existe pas, le boîtier n'y
+    appartient à personne, et ZLink peut donc l'ouvrir lui-même. Rend None
+    partout ailleurs — sous Windows et macOS le boîtier est tenu en exclusif
+    par le logiciel Elgato, et le lui disputer ne ferait que casser les deux.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    # Porte de sortie. ZLink n'est pas seul à savoir piloter un Stream Deck
+    # sous Linux — streamdeck-ui, Boatswain — et deux programmes qui écrivent
+    # sur le même boîtier se le disputent image par image. Qui en fait tourner
+    # un autre pose « streamdeck.direct » à false dans config.json.
+    from core import config_store
+
+    if not (config_store.load().get("streamdeck") or {}).get("direct", True):
+        logger.info("Stream Deck : pilotage direct désactivé par la configuration")
+        return None
+    from core.streamdeck_direct import PiloteStreamDeck
+
+    pilote = PiloteStreamDeck()
+    if not pilote.demarrer():
+        return None
+    # Sans cet arrêt, les touches gardent leur dernière image après la
+    # fermeture de ZLink, et le boîtier reste ouvert jusqu'au débranchement.
+    application = QApplication.instance()
+    if application is not None:
+        application.aboutToQuit.connect(pilote.arreter)
+    return pilote
+
+
+def _brancher_telecommande(grid, panel, fullscreen, data_manager):
+    """Ouvre les télécommandes disponibles et les relie à ce qui existe déjà.
+
+    Elles n'apportent aucun geste nouveau : elles rejouent ceux du clavier et
+    de la console de mixage, depuis un boîtier posé sur le bureau. Deux
+    chemins, selon le système — le WebSocket qu'interroge l'extension Elgato,
+    et sous Linux le pilotage direct du boîtier. Rend la liste de ce qui a
+    répondu, ou None si rien n'a répondu : ZLink tourne alors sans, exactement
+    comme avant.
+
+    L'état est publié à chacune, à chaque changement qui se voit sur les
+    touches : la liste des cellules, la chaîne affichée en grand. Rien n'est
+    envoyé en boucle — une touche qui ne change pas n'a pas besoin d'être
+    redessinée.
+    """
+    destinataires = [source for source in (_telecommande_websocket(),
+                                          _streamdeck_direct())
+                     if source is not None]
+    if not destinataires:
+        return None
+    for source in destinataires:
+        _brancher_gestes_boitier(source, grid, panel, fullscreen)
 
     def _publier(*_args) -> None:
         # Une lecture d'etat qui echoue ne doit pas emporter le signal qui l'a
@@ -619,7 +672,8 @@ def _brancher_telecommande(grid, panel, fullscreen, data_manager):
         except Exception:                                     # noqa: BLE001
             logger.exception("Telecommande : etat illisible, publication sautee")
             return
-        telecommande.publier_etat(etat)
+        for source in destinataires:
+            source.publier_etat(etat)
 
     data_manager.streamers_updated.connect(_publier)
     fullscreen.stream_changed.connect(_publier)
@@ -643,7 +697,7 @@ def _brancher_telecommande(grid, panel, fullscreen, data_manager):
         fullscreen.favori_change.connect(
             lambda login, _favori: panel.rafraichir_favori(login))
     _publier()
-    return telecommande
+    return destinataires
 
 
 def _etat_pour_telecommande(grid, panel, fullscreen) -> dict:
