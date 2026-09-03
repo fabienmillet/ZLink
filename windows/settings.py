@@ -1208,6 +1208,96 @@ class _PageStreamDeck(_PageBase):
         """Page d'action : rien à enregistrer."""
 
 
+#: Ce que fait chaque touche, par fenêtre. La table est ici et non déduite du
+#: code : `windows/fullscreen.py` range ses touches dans un dictionnaire
+#: construit à la première frappe, à partir de méthodes liées à l'instance —
+#: il n'y a rien à lire tant qu'une fenêtre n'existe pas, et les réglages
+#: s'ouvrent sans plein écran. Un test compare les deux.
+_RACCOURCIS = [
+    ("Partout", [
+        ("Ctrl + K", "Ouvrir la recherche : une chaîne, une action"),
+        ("Échap", "Fermer ce qui est ouvert — recherche, menu, replay, fenêtre"),
+    ]),
+    ("Plein écran", [
+        ("1 … 9", "Afficher la chaîne de ce rang dans la grille"),
+        ("← / →", "Chaîne précédente / suivante"),
+        ("+ / −", "Monter / baisser le son de 5 points"),
+        ("M", "Couper ou rendre le son"),
+        ("C", "Garder le moment qui vient de passer"),
+        ("R", "Revoir les dernières secondes"),
+        ("F", "Mettre ou retirer des favoris"),
+        ("↑ / ↓", "Parcourir le menu de la télécommande"),
+        ("Entrée / Espace", "Valider dans le menu de la télécommande"),
+    ]),
+    ("Grille", [
+        ("1 … 9", "Passer cette cellule en plein écran"),
+        ("Échap", "Revenir au panel"),
+    ]),
+]
+
+
+class _PageRaccourcis(_PageBase):
+    """Page Raccourcis — ce que fait le clavier, sans avoir à l'essayer.
+
+    Les touches n'étaient écrites nulle part : ni bulle d'aide, ni menu, et un
+    raccourci qu'on ignore n'existe pas. « C » garde le moment en cours, le
+    geste le plus fréquent en régie — le découvrir supposait de lire le code.
+    """
+
+    def __init__(self, config: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self._vl.addWidget(_h2("Raccourcis clavier"))
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_hint(
+            "Les touches du plein écran agissent sur la chaîne affichée en "
+            "grand. Elles rappellent la barre du bas au passage, pour montrer "
+            "ce qu'elles viennent de changer."
+        ))
+
+        for titre, lignes in _RACCOURCIS:
+            self._vl.addWidget(_section_title(titre))
+            for touche, quoi in lignes:
+                self._vl.addWidget(self._ligne(touche, quoi))
+
+        self._vl.addWidget(_sep())
+        self._vl.addWidget(_hint(
+            "Les mêmes gestes sont sur le Stream Deck, pour qui en a un : "
+            "voir l'onglet Stream Deck."
+        ))
+        self._vl.addStretch()
+
+    @staticmethod
+    def _ligne(touche: str, quoi: str) -> QWidget:
+        """Une touche dessinée comme une touche, et ce qu'elle fait.
+
+        Le cadre n'est pas de l'ornement : « + / − » et « 1 … 9 » posés en
+        texte ordinaire au milieu d'une phrase ne se distinguent plus de la
+        ponctuation qui les entoure.
+        """
+        row = QWidget()
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(14)
+
+        cle = QLabel(touche)
+        cle.setFont(QFont(_FONT_MONO, 10, QFont.Weight.Bold))
+        cle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cle.setFixedWidth(130)
+        cle.setStyleSheet(
+            f"color: #ffffff; background: {_C_HOVER}; "
+            f"border: 1px solid {_C_BORDER}; border-radius: 4px; padding: 4px 0;"
+        )
+        hl.addWidget(cle)
+
+        desc = QLabel(quoi)
+        desc.setFont(QFont(_FONT_UI, 11))
+        desc.setStyleSheet("color: #cccccc;")
+        desc.setWordWrap(True)
+        hl.addWidget(desc, stretch=1)
+        return row
+
+
 class _PageCredits(_PageBase):
     """Page Crédits — sources de données, auteur, licence."""
 
@@ -1311,6 +1401,7 @@ _NAV_ITEMS = [
     ("Clips",        "mdi6.record-circle-outline"),
     (_TITRE_DECK,    "mdi6.view-grid-outline"),
     (_TITRE_DOMOTIQUE, "mdi6.home-automation"),
+    ("Raccourcis",   "mdi6.keyboard-outline"),
     ("Crédits",      "mdi6.heart-outline"),
 ]
 
@@ -1416,11 +1507,14 @@ class SettingsPanel(QWidget):
         self._page_clips   = _PageClips(self._config)
         self._page_deck    = _PageStreamDeck(self._config)
         self._page_domo    = _PageDomotique(self._config)
+        self._page_touches = _PageRaccourcis(self._config)
         self._page_credits = _PageCredits(self._config)
 
+        # L'ordre suit celui de `_NAV_ITEMS` : c'est l'index de la barre
+        # latérale qui désigne la page, une divergence les décalerait toutes.
         for page in (self._page_streams, self._page_screens, self._page_hype,
                      self._page_clips, self._page_deck, self._page_domo,
-                     self._page_credits):
+                     self._page_touches, self._page_credits):
             self._pages_stack.addWidget(_scroll_wrap(page))
 
         cl.addWidget(self._pages_stack, stretch=1)
