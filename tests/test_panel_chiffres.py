@@ -2122,3 +2122,109 @@ def test_les_abscisses_suivent_le_calendrier_de_l_evenement(stats):
     assert charge["ld"] == attendu
     assert charge["ld"][0].startswith("Ven"), (
         "la cagnotte ouvre un vendredi, toutes éditions confondues")
+
+
+# ── Goals : restreindre « les plus proches » à la grille ou aux favoris ─────
+
+@pytest.fixture
+def _sans_portee(monkeypatch):
+    """Grille et favoris pilotés depuis le test, sans toucher au disque."""
+    def poser(grille=(), favoris=()):
+        monkeypatch.setattr(panel, "portee_des_objectifs",
+                            lambda vue: {"grille": set(grille),
+                                         "favoris": set(favoris)}.get(vue))
+    return poser
+
+
+def _noms_affiches(goals) -> set[str]:
+    """Les chaînes réellement listées, et non tout QLabel de l'onglet.
+
+    `_textes` ramène aussi l'en-tête de la fiche streamer, masqué dans ces
+    vues mais toujours présent : il portait le nom du dernier streamer choisi
+    et faisait passer le filtre pour inopérant.
+    """
+    noms = set()
+    for ligne in _lignes(goals):
+        noms |= set(_textes(ligne))
+    return noms
+
+
+def _trois_streamers(goals):
+    goals.set_streamers([
+        _S("ponce", donation=500.0, display="Ponce"),
+        _S("zerator", donation=800.0, display="ZeratoR"),
+        _S("domingo", donation=200.0, display="Domingo"),
+    ])
+    goals.seed_cache({
+        "ponce": [_G("piment", 1000.0)],
+        "zerator": [_G("crâne rasé", 1000.0)],
+        "domingo": [_G("karaoké", 1000.0)],
+    })
+
+
+def test_la_portee_grille_ne_garde_que_les_chaines_affichees(goals, _sans_portee):
+    """Un objectif à deux euros de tomber chez quelqu'un qu'on n'affiche pas
+    ne se joue pas : c'est la grille qu'on pilote."""
+    _sans_portee(grille=("ponce", "domingo"))
+    _trois_streamers(goals)
+    goals._changer_vue("grille")
+    noms = _noms_affiches(goals)
+    assert "Ponce" in noms and "Domingo" in noms
+    assert "ZeratoR" not in noms
+
+
+def test_la_portee_favoris_ne_garde_que_les_favoris(goals, _sans_portee):
+    _sans_portee(favoris=("zerator",))
+    _trois_streamers(goals)
+    goals._changer_vue("favoris")
+    noms = _noms_affiches(goals)
+    assert "ZeratoR" in noms
+    assert "Ponce" not in noms and "Domingo" not in noms
+
+
+def test_la_vue_tous_ne_filtre_toujours_rien(goals, _sans_portee):
+    """La portée d'origine ne bouge pas : les deux autres s'ajoutent à elle."""
+    _sans_portee(grille=("ponce",))
+    _trois_streamers(goals)
+    goals._changer_vue("tous")
+    assert {"Ponce", "ZeratoR", "Domingo"} <= _noms_affiches(goals)
+
+
+def test_l_entete_dit_la_portee_retenue(goals, _sans_portee):
+    """Trois listes d'apparence identique : sans le dire, on ne sait plus
+    laquelle on regarde."""
+    _sans_portee(grille=("ponce",), favoris=("zerator",))
+    _trois_streamers(goals)
+    for vue, attendu in (("tous", "LES PLUS PROCHES (3)"),
+                         ("grille", "LES PLUS PROCHES · GRILLE (1)"),
+                         ("favoris", "LES PLUS PROCHES · FAVORIS (1)")):
+        goals._changer_vue(vue)
+        assert attendu in _textes(goals), vue
+
+
+def test_une_portee_vide_le_dit_sans_promettre_l_attente(goals, _sans_portee):
+    """« Ils apparaîtront au fil des chaînes consultées » est vrai pour
+    l'ensemble, et trompeur pour une grille vide : là, c'est la grille qu'il
+    faut remplir."""
+    _sans_portee(grille=())
+    _trois_streamers(goals)
+    goals._changer_vue("grille")
+    textes = " ".join(_textes(goals))
+    assert "grille" in textes.lower()
+    assert "au fil des chaînes consultées" not in textes
+
+
+def test_changer_de_portee_reconstruit_bien_la_liste(goals, _sans_portee):
+    """L'empreinte évite les reconstructions inutiles — elle ne doit pas
+    empêcher celle-ci : les deux listes ont la même longueur."""
+    _sans_portee(grille=("ponce",), favoris=("zerator",))
+    _trois_streamers(goals)
+    goals._changer_vue("grille")
+    assert "Ponce" in _noms_affiches(goals)
+    goals._changer_vue("favoris")
+    noms = _noms_affiches(goals)
+    assert "ZeratoR" in noms and "Ponce" not in noms
+
+
+def test_les_quatre_portees_sont_proposees(goals):
+    assert list(goals._boutons_vue) == ["streamer", "tous", "grille", "favoris"]

@@ -3675,6 +3675,43 @@ class _EnteteStreamer(QFrame):
         return f"{faits} objectif{pluriel} atteint{pluriel} sur {total}"
 
 
+#: Ce que dit l'en-tête de la liste, selon la portée retenue.
+_TITRES_OBJECTIFS = {
+    "tous": "LES PLUS PROCHES",
+    "grille": "LES PLUS PROCHES · GRILLE",
+    "favoris": "LES PLUS PROCHES · FAVORIS",
+}
+
+#: Et ce qu'on dit quand il n'y a rien à montrer. Le message change avec la
+#: portée : « ils apparaîtront au fil des chaînes consultées » est vrai pour
+#: l'ensemble, mais trompeur pour une grille vide — là, c'est la grille qu'il
+#: faut remplir, pas attendre.
+_ABSENCE_OBJECTIFS = {
+    "tous": ("Aucun objectif à afficher pour l'instant.\n"
+             "Ils apparaîtront au fil des chaînes consultées."),
+    "grille": ("Aucun objectif parmi les chaînes de la grille.\n"
+               "Ajoutez-en depuis l'onglet Streamers, ou changez de portée."),
+    "favoris": ("Aucun objectif parmi vos favoris.\n"
+                "L'étoile d'une fiche de streamer l'y ajoute."),
+}
+
+
+def portee_des_objectifs(vue: str) -> set[str] | None:
+    """Les logins que la vue retient, ou None pour ne rien filtrer.
+
+    Lue à chaque affichage plutôt que gardée : la grille se remplit et les
+    favoris se posent pendant que l'onglet est ouvert, et une liste figée à la
+    construction montrerait l'état d'il y a une heure.
+    """
+    if vue == "grille":
+        from core.selection_store import SelectionStore
+
+        return set(SelectionStore().get_selected())
+    if vue == "favoris":
+        return set(favorites.get())
+    return None
+
+
 class _GoalsTab(QWidget):
     """Onglet Goals — les objectifs d'une chaîne, ou les plus proches de tomber.
 
@@ -3767,8 +3804,14 @@ class _GoalsTab(QWidget):
         h.addStretch(1)
 
         self._boutons_vue: dict[str, QPushButton] = {}
+        # « Les plus proches » regarde tout ce qui est en cache — trois cents
+        # participants un soir d'événement. Or ce qu'on pilote, c'est la
+        # grille ; et ce qu'on suit, ce sont les favoris. Un objectif à deux
+        # euros de tomber chez quelqu'un qu'on n'affiche pas ne se joue pas.
         for cle, libelle in (("streamer", "Ce streamer"),
-                             ("tous", "Les plus proches")):
+                             ("tous", "Les plus proches"),
+                             ("grille", "Grille"),
+                             ("favoris", "Favoris")):
             b = QPushButton(libelle)
             b.setFont(QFont(_FONT_SEGOE, 10))
             b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -3803,43 +3846,46 @@ class _GoalsTab(QWidget):
         """Réaffiche la vue courante depuis ce qu'on sait déjà."""
         self._entete.setVisible(self._vue == "streamer")
         self._combo.setEnabled(self._vue == "streamer")
-        if self._vue == "tous":
-            self._montrer_tous()
-        else:
+        if self._vue == "streamer":
             self._on_streamer_changed(self._combo.currentIndex())
+        else:
+            self._montrer_tous()
 
     def _montrer_tous(self) -> None:
-        """Tous les objectifs connus, le plus proche de tomber en tête.
+        """Les objectifs connus, le plus proche de tomber en tête.
 
         On ne montre que ce qui est déjà en cache : aller chercher les
         objectifs des trois cents participants ferait trois cents requêtes pour
         une page qu'on parcourt en diagonale.
+
+        La portée suit le bouton actif — tout, la grille, ou les favoris.
         """
+        portee = portee_des_objectifs(self._vue)
         dons = {s.twitch_login: s for s in self._streamers}
         lignes = []
         for login, goals in self._cache.items():
             s = dons.get(login)
-            if s is None:
+            if s is None or (portee is not None and login not in portee):
                 continue
             for g in goals:
                 if g.accomplished or g.amount <= 0:
                     continue
                 lignes.append((_part_objectif(s.donation, g.amount), s, g))
         if not lignes:
-            self._show_placeholder(
-                "Aucun objectif à afficher pour l'instant.\n"
-                "Ils apparaîtront au fil des chaînes consultées.")
+            self._show_placeholder(_ABSENCE_OBJECTIFS.get(
+                self._vue, _ABSENCE_OBJECTIFS["tous"]))
             return
         lignes.sort(key=lambda t: -t[0])
         retenues = lignes[:self._MAX_TOUS]
-        empreinte = ("tous", len(lignes),
+        empreinte = (self._vue, len(lignes),
                      tuple((round(part, 4), s.twitch_login, g.name, g.amount)
                            for part, s, g in retenues))
         if empreinte == self._empreinte:
             return          # rien n'a bougé : ne pas reconstruire pour rien
         self._empreinte = empreinte
         _clear_layout(self._goals_layout)
-        self._ajouter_entete(f"LES PLUS PROCHES ({len(retenues)})", "#f5c518")
+        self._ajouter_entete(
+            f"{_TITRES_OBJECTIFS[self._vue]} ({len(retenues)})", "#f5c518")
         for _part, s, g in retenues:
             self._goals_layout.addWidget(_LigneObjectif(
                 g, s.donation,
