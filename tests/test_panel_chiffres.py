@@ -2641,3 +2641,157 @@ def test_une_adresse_vide_ne_lance_rien(monkeypatch):
     monkeypatch.setattr(panel.threading, "Thread",
                         lambda *a, **k: pytest.fail("aucun fil attendu"))
     assert cache.pixmap("") is None
+
+
+# ── le lecteur : transport, copie, démontage ────────────────────────────────
+
+class _FauxLecteur:
+    """Un MpvWidget réduit à ce que la fenêtre lui demande."""
+
+    def __init__(self, duree=60.0) -> None:
+        self._duree = duree
+        self._position = 0.0
+        self._pause = False
+        self.gestes: list[str] = []
+
+    def duree(self): return self._duree
+    def position(self): return self._position
+    def en_pause(self): return self._pause
+    def set_pause(self, v): self._pause = bool(v)
+    def chercher(self, s): self._position = float(s)
+    def play(self, _u): self.gestes.append("play")
+    def shutdown(self): self.gestes.append("shutdown")
+    def hide(self): self.gestes.append("hide")
+    def setParent(self, _p): self.gestes.append("setParent")
+    def deleteLater(self): self.gestes.append("deleteLater")
+
+
+@pytest.fixture
+def lecteur(qtbot):
+    """La fenêtre de lecture, avec une doublure à la place de mpv."""
+    def monter(duree=60.0):
+        fenetre = panel._LecteurClip(_clip("a"))
+        qtbot.addWidget(fenetre)
+        fenetre._lecteur = _FauxLecteur(duree)
+        # Une passe pour que la barre prenne sa plage : sans durée connue,
+        # elle va de zéro à zéro et refuse toute valeur.
+        fenetre._rafraichir_transport()
+        return fenetre
+    return monter
+
+
+def test_l_horloge_et_la_barre_suivent_la_lecture(lecteur):
+    fenetre = lecteur()
+    fenetre._lecteur.chercher(26.0)
+    fenetre._rafraichir_transport()
+    assert fenetre._horloge.text() == "0:26 / 1:00"
+    assert fenetre._barre.maximum() == 600      # dixièmes de seconde
+    assert fenetre._barre.value() == 260
+
+
+def test_le_curseur_ne_saute_pas_sous_le_doigt(lecteur):
+    """Relue cinq fois par seconde, la position ramenait le curseur sous le
+    doigt à chaque fois pendant un glissé."""
+    fenetre = lecteur()
+    fenetre._tenu = True                  # comme si on tenait le curseur
+    fenetre._barre.setValue(500)
+    fenetre._lecteur.chercher(1.0)        # la lecture, elle, est ailleurs
+    fenetre._rafraichir_transport()
+    assert fenetre._barre.value() == 500
+
+
+def test_relacher_le_curseur_deplace_la_lecture(lecteur):
+    fenetre = lecteur()
+    fenetre._tenu = True
+    fenetre._barre.setValue(420)
+    fenetre._relacher()
+    assert fenetre._lecteur.position() == pytest.approx(42.0)
+    assert fenetre._tenu is False
+
+
+def test_cliquer_dans_la_barre_deplace_aussi(lecteur):
+    """C'est le geste qu'on fait d'abord, et il ne produisait rien."""
+    fenetre = lecteur()
+    fenetre._barre.setValue(300)          # valueChanged, hors glissé
+    assert fenetre._lecteur.position() == pytest.approx(30.0)
+
+
+def test_la_pause_bascule_et_se_voit(lecteur):
+    fenetre = lecteur()
+    fenetre.basculer_pause()
+    assert fenetre._lecteur.en_pause() and fenetre._bouton_pause.text() == "▶"
+    fenetre.basculer_pause()
+    assert not fenetre._lecteur.en_pause() and fenetre._bouton_pause.text() == "⏸"
+
+
+def test_l_espace_met_en_pause(lecteur, qtbot):
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtCore import QEvent
+
+    fenetre = lecteur()
+    fenetre.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space,
+                                    Qt.KeyboardModifier.NoModifier))
+    assert fenetre._lecteur.en_pause()
+
+
+@pytest.mark.parametrize("touche,attendu", [
+    (Qt.Key.Key_Right, 15.0), (Qt.Key.Key_Left, 5.0),
+])
+def test_les_fleches_sautent_de_cinq_secondes(lecteur, touche, attendu):
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtCore import QEvent
+
+    fenetre = lecteur()
+    fenetre._lecteur.chercher(10.0)
+    fenetre.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, touche,
+                                    Qt.KeyboardModifier.NoModifier))
+    assert fenetre._lecteur.position() == pytest.approx(attendu)
+
+
+def test_le_lien_se_copie_et_le_dit(lecteur):
+    """Sans retour visible, on ne sait pas si le clic a porté."""
+    from PyQt6.QtWidgets import QApplication
+
+    fenetre = lecteur()
+    fenetre.copier_le_lien()
+    assert QApplication.clipboard().text() == "https://clips.twitch.tv/a"
+    assert fenetre._copier.text() == "Lien copié"
+
+
+def test_la_fermeture_demonte_le_lecteur_dans_l_ordre(lecteur):
+    """`stop()` seul laissait Qt détruire la fenêtre native de mpv après coup,
+    sur un identifiant déjà rendu : « BadWindow » sur X_DestroyWindow, fatal
+    pour tout le programme.
+
+    Masquer AVANT de détacher : un widget détaché et visible devient une
+    fenêtre à l'écran.
+    """
+    fenetre = lecteur()
+    faux = fenetre._lecteur
+    fenetre.close()
+    assert faux.gestes == ["shutdown", "hide", "setParent", "deleteLater"]
+    assert fenetre._lecteur is None
+
+
+def test_le_transport_survit_a_la_fermeture(lecteur):
+    """Le minuteur peut battre une fois de plus après le démontage."""
+    fenetre = lecteur()
+    fenetre.close()
+    fenetre._rafraichir_transport()       # ne lève pas
+    fenetre.basculer_pause()
+    fenetre._relacher()
+
+
+def test_le_retour_de_copie_meurt_avec_la_fenetre(lecteur, qtbot):
+    """`QTimer.singleShot` survit à sa cible.
+
+    Fermer le lecteur dans la seconde et demie faisait lever « wrapped C/C++
+    object has been deleted » au fond de la boucle de Qt — loin du geste qui
+    l'avait causé, et dans un tout autre test.
+    """
+    fenetre = lecteur()
+    fenetre.copier_le_lien()
+    assert fenetre._retour.isActive()
+    fenetre.close()
+    qtbot.wait(50)
+    assert not fenetre._retour.isActive()

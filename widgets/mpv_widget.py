@@ -808,6 +808,64 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         if self._player is not None:
             self._player.volume = self._want_volume
 
+    # ── transport : position, pause, recherche ──────────────────────────
+    #
+    # Réservé aux médias de durée CONNUE — un clip, un replay enregistré. Un
+    # flux Twitch repris en direct annonce la durée depuis le début de
+    # l'émission, soit des heures : une barre de progression bâtie dessus
+    # afficherait 99 % dès la première image.
+
+    def position(self) -> float:
+        """Où en est la lecture, en secondes. Zéro si on ne sait pas."""
+        return self._propriete("time-pos")
+
+    def duree(self) -> float:
+        """Durée du média, en secondes. Zéro tant qu'elle n'est pas connue."""
+        return self._propriete("duration")
+
+    def _propriete(self, nom: str) -> float:
+        """Une propriété numérique de mpv, ou zéro.
+
+        mpv lève dès que la propriété n'est pas encore disponible — entre le
+        `play()` et la première image, elles le sont toutes. Un lecteur qui
+        remonterait l'exception ne survivrait pas à sa propre ouverture.
+        """
+        if self._player is None:
+            return 0.0
+        try:
+            valeur = getattr(self._player, nom.replace("-", "_"))
+        except Exception:                                  # noqa: BLE001
+            return 0.0
+        try:
+            return max(0.0, float(valeur))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def chercher(self, secondes: float) -> None:
+        """Se place à cet instant, en absolu."""
+        if self._player is None:
+            return
+        try:
+            self._player.seek(max(0.0, float(secondes)), reference="absolute")
+        except Exception as exc:                           # noqa: BLE001
+            logger.debug("MpvWidget: recherche impossible — %s", exc)
+
+    def set_pause(self, en_pause: bool) -> None:
+        if self._player is None:
+            return
+        try:
+            self._player.pause = bool(en_pause)
+        except Exception as exc:                           # noqa: BLE001
+            logger.debug("MpvWidget: pause impossible — %s", exc)
+
+    def en_pause(self) -> bool:
+        if self._player is None:
+            return False
+        try:
+            return bool(self._player.pause)
+        except Exception:                                  # noqa: BLE001
+            return False
+
     @staticmethod
     def _on_vo_configured(_nom: str, valeur: object) -> None:
         """L'affichage vient d'être (re)configuré : reprendre le gestionnaire X."""

@@ -6321,19 +6321,70 @@ class _LecteurClip(QDialog):
         self._lecteur = MpvWidget(self)
         v.addWidget(self._lecteur, stretch=1)
 
+        # ── transport ───────────────────────────────────────────────────────
+        transport = QHBoxLayout()
+        transport.setContentsMargins(12, 8, 12, 0)
+        transport.setSpacing(10)
+
+        self._bouton_pause = QPushButton("⏸")
+        self._bouton_pause.setFixedSize(34, 30)
+        self._bouton_pause.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._bouton_pause.setToolTip("Lecture / pause — Espace")
+        self._bouton_pause.clicked.connect(self.basculer_pause)
+        transport.addWidget(self._bouton_pause)
+
+        self._barre = QSlider(Qt.Orientation.Horizontal)
+        self._barre.setRange(0, 0)
+        self._barre.setToolTip("Se déplacer dans le clip")
+        # Le curseur SUIT la lecture, sauf pendant qu'on le tient : sans ce
+        # drapeau, la position relue toutes les deux cents millisecondes le
+        # ramenait sous le doigt à chaque fois.
+        self._barre.sliderPressed.connect(lambda: setattr(self, "_tenu", True))
+        self._barre.sliderReleased.connect(self._relacher)
+        # Cliquer AILLEURS que sur le curseur doit aussi déplacer la lecture :
+        # c'est le geste qu'on fait d'abord, et il ne produisait rien.
+        self._barre.valueChanged.connect(self._sur_valeur)
+        transport.addWidget(self._barre, stretch=1)
+
+        self._horloge = QLabel("0:00 / 0:00")
+        self._horloge.setFont(QFont(_FONT_MONO, 10))
+        self._horloge.setStyleSheet(_SS_MUTED)
+        transport.addWidget(self._horloge)
+        v.addLayout(transport)
+
         bas = QHBoxLayout()
-        bas.setContentsMargins(12, 8, 12, 10)
+        bas.setContentsMargins(12, 6, 12, 10)
+        bas.setSpacing(8)
         titre = QLabel(clip.titre)
         titre.setTextFormat(Qt.TextFormat.PlainText)
         titre.setFont(_bold_font(_FONT_SEGOE, 11))
         titre.setStyleSheet(_SS_WHITE)
         bas.addWidget(titre, stretch=1)
+
+        self._copier = QPushButton("Copier le lien")
+        self._copier.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._copier.clicked.connect(self.copier_le_lien)
+        bas.addWidget(self._copier)
+
         ouvrir = QPushButton("Ouvrir sur Twitch")
         ouvrir.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         ouvrir.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl(clip.url)))
         bas.addWidget(ouvrir)
         v.addLayout(bas)
+
+        # Cinq fois par seconde : assez pour que le curseur ne saute pas,
+        # assez peu pour ne rien coûter. Démarré à la première image, pas ici :
+        # avant elle, mpv ne connaît ni position ni durée.
+        self._tenu = False
+        self._suivi = QTimer(self)
+        self._suivi.setInterval(200)
+        self._suivi.timeout.connect(self._rafraichir_transport)
+
+        self._retour = QTimer(self)
+        self._retour.setSingleShot(True)
+        self._retour.timeout.connect(
+            lambda: self._copier.setText("Copier le lien"))
 
         self._etat = QLabel("Chargement du clip…")
         self._etat.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -6357,16 +6408,107 @@ class _LecteurClip(QDialog):
             self._etat.setText(
                 "Ce clip ne se laisse pas lire ici — « Ouvrir sur Twitch ».")
             return
+        if self._lecteur is None:
+            return
         self._etat.hide()
         self._lecteur.play(url)
+        self._suivi.start()
+
+    # -- transport ------------------------------------------------------------
+
+    def _rafraichir_transport(self) -> None:
+        """Recale le curseur et l'horloge sur la lecture."""
+        if self._lecteur is None:
+            return
+        duree = self._lecteur.duree()
+        position = self._lecteur.position()
+        if duree > 0 and self._barre.maximum() != int(duree * 10):
+            self._barre.setRange(0, int(duree * 10))
+        if not self._tenu:
+            self._barre.blockSignals(True)
+            self._barre.setValue(int(position * 10))
+            self._barre.blockSignals(False)
+        self._horloge.setText(
+            f"{_duree_courte(position)} / {_duree_courte(duree)}")
+        self._bouton_pause.setText("▶" if self._lecteur.en_pause() else "⏸")
+
+    def _sur_valeur(self, valeur: int) -> None:
+        """Un clic dans la barre déplace la lecture tout de suite.
+
+        Pendant un GLISSÉ on ne cherche pas à chaque pixel : mpv redécoderait
+        des dizaines de fois par seconde. C'est le relâchement qui tranche.
+        """
+        if not self._tenu and self._lecteur is not None:
+            self._lecteur.chercher(valeur / 10.0)
+
+    def _relacher(self) -> None:
+        self._tenu = False
+        if self._lecteur is not None:
+            self._lecteur.chercher(self._barre.value() / 10.0)
+
+    def basculer_pause(self) -> None:
+        if self._lecteur is None:
+            return
+        en_pause = not self._lecteur.en_pause()
+        self._lecteur.set_pause(en_pause)
+        self._bouton_pause.setText("▶" if en_pause else "⏸")
+
+    def copier_le_lien(self) -> None:
+        """L'adresse du clip dans le presse-papiers, et on le dit.
+
+        Sans retour visible, on ne sait pas si le clic a porté — et on
+        recommence, ou on colle dans le vide.
+        """
+        QApplication.clipboard().setText(self._clip.url)
+        self._copier.setText("Lien copié")
+        # Un minuteur PORTÉ par la fenêtre, et non `QTimer.singleShot` : celui-ci
+        # survit à sa cible. Fermer le lecteur dans la seconde et demie faisait
+        # lever « wrapped C/C++ object has been deleted » au fond de la boucle
+        # de Qt, loin du geste qui l'avait causé.
+        self._retour.start(1500)
+
+    def keyPressEvent(self, event) -> None:                # type: ignore[override]
+        """Espace met en pause, les flèches sautent de cinq secondes."""
+        touche = event.key()
+        if touche == Qt.Key.Key_Space:
+            self.basculer_pause()
+            return
+        if touche in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            if self._lecteur is not None:
+                pas = 5.0 if touche == Qt.Key.Key_Right else -5.0
+                self._lecteur.chercher(max(0.0, self._lecteur.position() + pas))
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:                   # type: ignore[override]
-        # Sans cela, mpv continue de lire une fenêtre fermée : on entend le
-        # clip sans plus rien voir.
-        try:
-            self._lecteur.stop()
-        except Exception:                                  # noqa: BLE001
-            logger.debug("Clips : arrêt du lecteur")
+        """Démonte le lecteur dans l'ordre, sinon X tue le processus.
+
+        `stop()` seul ne suffisait pas : la fenêtre native de mpv était encore
+        détruite par Qt après coup, sur un identifiant que mpv venait de rendre
+        — « BadWindow (invalid Window parameter) » sur X_DestroyWindow, fatal
+        pour tout le programme.
+
+        `shutdown()` termine le player en reprenant le gestionnaire d'erreur
+        Xlib, puis les trois gestes habituels : masquer AVANT de détacher — un
+        widget détaché et visible devient une fenêtre à l'écran — détacher,
+        puis seulement programmer la destruction.
+
+        C'est la séquence que le plein écran applique déjà à son lecteur de
+        replay ; elle n'avait pas été reprise ici.
+        """
+        self._suivi.stop()
+        # Le retour de « Lien copié » aussi : porté par la fenêtre il ne peut
+        # plus lever, mais le laisser battre après la fermeture n'a aucun sens.
+        self._retour.stop()
+        lecteur, self._lecteur = self._lecteur, None
+        if lecteur is not None:
+            try:
+                lecteur.shutdown()
+            except Exception:                              # noqa: BLE001
+                logger.debug("Clips : arrêt du lecteur")
+            lecteur.hide()
+            lecteur.setParent(None)
+            lecteur.deleteLater()
         super().closeEvent(event)
 
 
