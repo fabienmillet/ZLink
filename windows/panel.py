@@ -5637,6 +5637,17 @@ def _etiquette_graphe(ts: float, avec_minutes: bool) -> str:
     return f"{JOURS_FR[dt.weekday()]} {dt.hour:02d}h"
 
 
+def _comparaison_possible() -> bool:
+    """Peut-on confronter l'édition en cours aux précédentes.
+
+    Elles sont alignées sur le TEMPS DE COURSE, compté depuis l'ouverture de la
+    cagnotte. Tant qu'elle n'a pas ouvert, ce temps n'existe pas.
+    """
+    from core.history_store import cagnotte_ouverte
+
+    return cagnotte_ouverte()
+
+
 def abscisses_graphe(instants: list[float]) -> list[str]:
     """Étiquettes d'axe calées sur le CALENDRIER de l'édition.
 
@@ -5658,6 +5669,13 @@ def abscisses_graphe(instants: list[float]) -> list[str]:
         return []
     depart = instants[0]
     minutes = (instants[-1] - depart) <= _SEUIL_MINUTES_AXE
+    from core.history_store import cagnotte_ouverte
+
+    if not cagnotte_ouverte():
+        # Avant l'ouverture de la collecte, il n'y a pas de temps de course :
+        # rebaser afficherait « vendredi 18h00 » un jeudi soir, sans rien
+        # aligner puisqu'aucune édition n'est comparée. L'heure vraie, donc.
+        return [_etiquette_graphe(t, minutes) for t in instants]
     return [_etiquette_graphe(OUVERTURE_CAGNOTTE + (t - depart), minutes)
             for t in instants]
 
@@ -6679,9 +6697,15 @@ window.zlUpdate = function (payload) {{
                 "vd": [round(v) for v in vals_d],
                 "lv": abscisses_graphe(ts_v),
                 "vv": [round(v) for v in vals_v],
-                "rd": _references(history.series_editions_alignees(ts_d)),
+                # Pas de comparaison sans temps de course : avant
+                # l'ouverture de la cagnotte, les éditions passées seraient
+                # écrasées sur les quelques minutes déjà relevées, et 2021
+                # gagnerait deux cent quarante mille euros en un quart d'heure.
+                "rd": _references(history.series_editions_alignees(ts_d))
+                if _comparaison_possible() else {},
                 "rv": _references(
-                    history.series_viewers_editions_alignees(ts_v)),
+                    history.series_viewers_editions_alignees(ts_v))
+                if _comparaison_possible() else {},
             })
             self._push_charts()
 

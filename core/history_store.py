@@ -94,6 +94,23 @@ def _sane_point(ts_ms: object, val: object) -> tuple[float, float] | None:
     return ts, float(val)
 
 
+def cagnotte_ouverte(maintenant: float | None = None) -> bool:
+    """La collecte a-t-elle commencé.
+
+    À ne pas confondre avec `_EVENT_START` : les directs ouvrent le jeudi, la
+    cagnotte le vendredi à 18 h. Entre les deux, ZLink relève déjà des points —
+    des dons d'avant-course — mais il n'y a pas encore de TEMPS DE COURSE, et
+    c'est lui qui rend les éditions comparables.
+
+    Sans ce garde, un jeudi soir affichait douze minutes de relevés rebasées
+    sur « vendredi 18h00 », avec les quatre éditions passées écrasées sur ces
+    mêmes douze minutes : 2021 y gagnait deux cent quarante mille euros en un
+    quart d'heure.
+    """
+    return (maintenant if maintenant is not None
+            else time.time()) >= OUVERTURE_CAGNOTTE
+
+
 class HistoryStore:
     """Stocke les séries temporelles donation + viewers depuis le démarrage.
 

@@ -976,7 +976,27 @@ def test_la_bande_couvre_bien_huit_heures():
 
 # ── graphes HTML : les étiquettes d'axe ─────────────────────────────────────
 
-def test_une_serie_courte_passe_aux_minutes():
+@pytest.fixture
+def collecte_ouverte(monkeypatch):
+    """Place l'horloge après l'ouverture de la cagnotte.
+
+    Les abscisses ne sont rebasées sur le temps de course QUE là : avant, il
+    n'y a pas de course, et l'axe porte l'heure vraie. Chaque test dit donc de
+    quel régime il parle.
+    """
+    from core import history_store
+
+    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: True)
+
+
+@pytest.fixture
+def collecte_fermee(monkeypatch):
+    from core import history_store
+
+    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: False)
+
+
+def test_une_serie_courte_passe_aux_minutes(collecte_ouverte):
     """Avant l'événement, la série ne couvre que quelques minutes.
 
     Rebasées sur l'ouverture de la cagnotte — vendredi 18h00 — elles tombaient
@@ -990,7 +1010,7 @@ def test_une_serie_courte_passe_aux_minutes():
     assert all("Ven" not in e for e in etiquettes)
 
 
-def test_une_serie_longue_garde_le_jour():
+def test_une_serie_longue_garde_le_jour(collecte_ouverte):
     """Sur trois jours, l'heure seule ne dit plus de quel jour on parle."""
     serie = [1000.0 + 3 * 3600 * i for i in range(28)]   # 81 heures
     etiquettes = panel.abscisses_graphe(serie)
@@ -998,7 +1018,7 @@ def test_une_serie_longue_garde_le_jour():
     assert len(set(etiquettes)) == len(etiquettes)
 
 
-def test_la_bascule_se_fait_a_deux_heures():
+def test_la_bascule_se_fait_a_deux_heures(collecte_ouverte):
     """Le même seuil que `DateAxisItem`, pour les graphes pyqtgraph du fichier."""
     juste_en_dessous = [0.0, float(panel._SEUIL_MINUTES_AXE)]
     juste_au_dessus = [0.0, float(panel._SEUIL_MINUTES_AXE) + 1]
@@ -1010,7 +1030,7 @@ def test_une_serie_vide_ne_casse_rien():
     assert panel.abscisses_graphe([]) == []
 
 
-def test_l_axe_repart_de_l_ouverture_et_non_de_l_horloge():
+def test_l_axe_repart_de_l_ouverture_et_non_de_l_horloge(collecte_ouverte):
     """Deux séries d'égale étendue donnent le même axe, quel que soit l'instant.
 
     C'est ce qui aligne les éditions entre elles : les valeurs de 2025 sont
@@ -1019,3 +1039,22 @@ def test_l_axe_repart_de_l_ouverture_et_non_de_l_horloge():
     a = panel.abscisses_graphe([0.0, 3600.0 * 6])
     b = panel.abscisses_graphe([1_700_000_000.0, 1_700_000_000.0 + 3600 * 6])
     assert a == b
+
+
+def test_avant_l_ouverture_l_axe_porte_l_heure_vraie(collecte_fermee):
+    """Un jeudi soir, rebaser affichait « 18h00 » sans rien aligner.
+
+    Les éditions passées ne sont pas comparées tant que la cagnotte n'a pas
+    ouvert : le rebasage n'a alors plus de raison d'être, et il ment sur
+    l'heure.
+    """
+    from datetime import datetime, timezone
+
+    depart = datetime(2026, 9, 3, 21, 11, tzinfo=timezone.utc).timestamp()
+    etiquettes = panel.abscisses_graphe([depart + 30 * i for i in range(26)])
+    assert etiquettes[0] == "23h11"
+    assert etiquettes[-1] == "23h23"
+
+
+def test_apres_l_ouverture_l_axe_repart_du_temps_de_course(collecte_ouverte):
+    assert panel.abscisses_graphe([_horodatage(23, 11)])[0] == "18h00"

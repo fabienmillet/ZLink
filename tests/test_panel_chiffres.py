@@ -2047,7 +2047,19 @@ def _charge(stats):
     return json.loads(stats._charts_payload)
 
 
-def test_les_graphes_transportent_la_courbe_de_reference(stats):
+@pytest.fixture
+def collecte_ouverte(monkeypatch):
+    """Place l'horloge après l'ouverture de la cagnotte.
+
+    Les éditions passées ne sont alignées — et l'axe rebasé — que là. Avant, il
+    n'y a pas de temps de course : le graphe se trace seul, à l'heure vraie.
+    """
+    from core import history_store
+
+    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: True)
+
+
+def test_les_graphes_transportent_la_courbe_de_reference(stats, collecte_ouverte):
     """Sans elle, on voit sa propre courbe monter sans savoir si c'est mieux
     ou moins bien que l'an dernier — la question de tout le monde pendant
     l'événement."""
@@ -2073,7 +2085,7 @@ def test_sans_reference_la_courbe_est_absente_plutot_que_plate(stats):
     assert charge["rv"] == {}
 
 
-def test_un_trou_dans_la_reference_reste_un_trou(stats):
+def test_un_trou_dans_la_reference_reste_un_trou(stats, collecte_ouverte):
     """`null` interrompt la courbe ; zéro dessinerait une falaise."""
     stats._charts_ready = True
     stats.update_history(_FauxHistorique(
@@ -2095,7 +2107,7 @@ def test_l_arrondi_de_la_reference_garde_les_trous(serie, attendu):
     assert panel._arrondi_ou_rien(serie) == attendu
 
 
-def test_les_abscisses_suivent_le_calendrier_de_l_evenement(stats):
+def test_les_abscisses_suivent_le_calendrier_de_l_evenement(stats, collecte_ouverte):
     """Elles suivaient l'horloge du jour.
 
     À sept jours de l'événement — ou en mode mock — le graphe annonçait
@@ -2300,3 +2312,38 @@ def test_le_compte_d_objectifs_suit_la_cagnotte(qtbot):
     buts = [_But(m) for m in (101.0, 306.0, 500.0, 20_000.0)]
     faits = sum(1 for b in buts if panel._objectif_atteint(b, 16_140.0))
     assert faits == 3
+
+
+@pytest.fixture
+def collecte_fermee(monkeypatch):
+    from core import history_store
+
+    monkeypatch.setattr(history_store, "cagnotte_ouverte", lambda *_a: False)
+
+
+def test_avant_l_ouverture_aucune_edition_n_est_comparee(stats, collecte_fermee):
+    """Un jeudi soir, douze minutes de relevés étaient confrontées à des
+    éditions ENTIÈRES écrasées sur ces mêmes douze minutes : 2021 y gagnait
+    deux cent quarante mille euros en un quart d'heure."""
+    import json
+
+    class _Hist:
+        def get_donation_series(self):
+            return [1000.0 + 30 * i for i in range(26)], [1.0] * 26
+
+        def get_viewers_series(self):
+            return [1000.0 + 30 * i for i in range(26)], [1.0] * 26
+
+        def series_editions_alignees(self, ts):
+            return {"2025": [float(i) for i in range(len(ts))]}
+
+        def series_viewers_editions_alignees(self, ts):
+            return {"2025": [float(i) for i in range(len(ts))]}
+
+    stats.update_history(_Hist())
+    charge = json.loads(json.loads(stats._charts_payload)) \
+        if isinstance(json.loads(stats._charts_payload), str) \
+        else json.loads(stats._charts_payload)
+    assert charge["rd"] == {}
+    assert charge["rv"] == {}
+    assert charge["ld"], "la courbe de l'édition en cours, elle, reste tracée"
