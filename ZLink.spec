@@ -13,8 +13,6 @@
 
 import pathlib
 import re
-import shutil
-import subprocess
 import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -152,93 +150,95 @@ sl = Analysis(
     noarchive=False,
 )
 
-# ─── Linux : laisser à l'hôte les bibliothèques qui lui appartiennent ────────
+# ─── Linux : le paquet livre l'application, la distribution livre le système ──
 #
 # PyInstaller ramasse les dépendances natives telles qu'elles sont sur la
-# machine de construction et les pose dans _internal/, que le lanceur met
+# machine de construction et les pose dans `_internal/`, que le lanceur met
 # DEVANT les chemins système. Une bibliothèque embarquée masque donc celle de
 # l'hôte pour tout le processus — y compris pour du code qui n'est pas le
-# nôtre. Et le binaire de release est bâti sur ubuntu-22.04 exprès, pour viser
-# une vieille glibc : ce qu'on embarque est par construction plus ancien que ce
-# qu'une distribution à jour installe.
+# nôtre. Et la release est bâtie sur ubuntu-22.04 exprès, pour viser une
+# vieille glibc : ce qu'on embarque est par construction plus ancien que ce
+# qu'installe une distribution à jour.
 #
-# Deux masquages rendaient le paquet Linux inutilisable ailleurs que sur le
-# runner :
+# Trois pannes l'ont montré, chacune d'une famille différente :
 #
-#   - Le runtime GCC. Celui d'Ubuntu 22.04 s'arrête à GLIBCXX_3.4.30, quand le
-#     pilote Mesa de l'hôte (bâti avec GCC 13+) en réclame davantage. Mesa
-#     charge le nôtre, n'y trouve pas ses symboles, et le pilote ne s'initialise
-#     pas : « Could not initialize GLX », puis Qt abandonne au démarrage.
+#   - libstdc++ d'Ubuntu 22.04 plafonne à GLIBCXX_3.4.30, quand le pilote Mesa
+#     de l'hôte en réclame davantage : « Could not initialize GLX », Qt
+#     abandonne au démarrage.
 #
-#   - libmpv et sa fermeture. Le README dit que mpv vient du système sous Linux,
-#     et widgets/mpv_widget.py ne cherche de libmpv embarquée que sous les noms
-#     de l'ABI 2 : celle du runner (libmpv.so.1, mpv 0.34) n'est donc jamais
-#     utilisée. Elle était pourtant embarquée — PyInstaller résout le
-#     ctypes.util.find_library('mpv') de python-mpv à la construction — et ses
-#     dépendances masquaient celles de la libmpv de l'hôte, qui ne se chargeait
-#     alors plus du tout (« undefined symbol: vaMapBuffer2 »).
+#   - libmpv et sa fermeture (ffmpeg, libva, libass, fontconfig) masquaient les
+#     dépendances de la libmpv de l'hôte, qui ne se chargeait plus du tout
+#     (« undefined symbol: vaMapBuffer2 »).
 #
-# Même raisonnement pour hidapi, que core/streamdeck_direct.py charge de la
-# même façon : elle tire libudev, dont le format de base de données suit la
-# version de systemd de la machine. Une libudev d'Ubuntu 22.04 posée devant
-# celle d'un hôte récent ne sait plus énumérer ses propres périphériques — le
-# Stream Deck deviendrait introuvable sur le poste où il est branché.
+#   - libxkbcommon-x11 était embarquée mais PAS libxkbcommon, que PyInstaller
+#     écarte de lui-même. La paire était donc coupée en deux : une moitié du
+#     build, l'autre de l'hôte, alors qu'elles partagent des structures
+#     internes. Segfault dans xkb_state_update_mask, avant la première fenêtre.
 #
-# On écarte donc ces deux bibliothèques et TOUT ce qu'elles tirent, plutôt
-# qu'une liste de noms constatés : la fermeture se recalcule à chaque
-# construction et suit le système du runner sans qu'on ait à la tenir à jour.
+# Les nommer une par une était une chasse sans fin : chaque release en révélait
+# une nouvelle, et rien ne dit laquelle vient ensuite. La règle est donc
+# inversée, et tient en une phrase — CE QUI VIENT DES RÉPERTOIRES SYSTÈME DE LA
+# MACHINE DE CONSTRUCTION N'EST PAS EMBARQUÉ. Le paquet livre l'application et
+# ses roues Python (Qt compris, qui vient des roues PyQt6) ; la distribution de
+# l'utilisateur livre le reste, cohérent avec lui-même par construction.
+#
+# C'est aussi ce que la documentation demande déjà à cet utilisateur : mpv doit
+# être installé (README), et le workflow de publication installe la même liste
+# de paquets Qt sur son runner.
+
+#: D'où viennent les bibliothèques qui appartiennent à la machine, et non à
+#: l'application.
+PREFIXES_SYSTEME = ("/usr/lib", "/usr/lib64", "/lib", "/lib64",
+                    "/usr/local/lib")
+
+#: L'exception, et elle est structurelle : Python lui-même n'est pas une
+#: bibliothèque du système, c'est l'interpréteur que le paquet EMBARQUE. Bâtir
+#: avec le Python de la distribution range sa libpython et tous ses modules
+#: d'extension — binascii, zlib, _socket… — sous /usr/lib/pythonX.Y ; les
+#: écarter livre un exécutable qui meurt sur « No module named 'binascii' »
+#: avant la première ligne. Les runners de publication passent par
+#: actions/setup-python, hors de ces répertoires, mais une construction locale
+#: n'a pas à casser pour autant.
+import sysconfig
+
+RACINES_DE_PYTHON = tuple(
+    os.path.realpath(chemin) for chemin in {
+        sysconfig.get_paths().get("stdlib"),
+        sysconfig.get_paths().get("platstdlib"),
+        sysconfig.get_paths().get("purelib"),
+        sysconfig.get_paths().get("platlib"),
+    } if chemin
+)
 
 
-def _dependances_declarees(chemin):
-    """SONAME listés en DT_NEEDED par un binaire ELF."""
-    sortie = subprocess.run(
-        ["objdump", "-p", chemin], capture_output=True, text=True, check=True
-    ).stdout
-    return re.findall(r"NEEDED\s+(\S+)", sortie)
+def _vient_du_systeme(chemin: str) -> bool:
+    """Vrai si ce fichier appartient à la distribution, et non à l'application.
 
-
-def _fermeture(racines, index):
-    """`racines` et, transitivement, tout ce dont elles dépendent dans le paquet."""
-    vus, a_voir = set(), list(racines)
-    while a_voir:
-        nom = a_voir.pop()
-        if nom in vus or nom not in index:
-            continue
-        vus.add(nom)
-        a_voir += _dependances_declarees(index[nom])
-    return vus
-
-
-#: Bibliothèques que ZLink charge par ctypes au lancement, chez l'hôte. Aucune
-#: n'est une dépendance Python : PyInstaller ne les voit que parce qu'il résout
-#: les `find_library()` du code à la construction, sur SA machine.
-RACINES_DE_L_HOTE = ("libmpv.so", "libhidapi")
+    Python est du côté de l'application : c'est son interpréteur qui est
+    embarqué, même quand la distribution l'a rangé dans /usr/lib.
+    """
+    reel = os.path.realpath(chemin)
+    if reel.startswith(RACINES_DE_PYTHON):
+        return False
+    return reel.startswith(PREFIXES_SYSTEME)
 
 
 def _ecarter_bibliotheques_de_l_hote(binaires):
-    index = {os.path.basename(nom): chemin for nom, chemin, _ in binaires}
-    ecartes = _fermeture(
-        [nom for nom in index if nom.startswith(RACINES_DE_L_HOTE)], index
-    )
-    # Le runtime GCC arrive aussi par l'ICU de Qt : il survivrait à la
-    # disparition de libmpv du paquet, on le nomme donc séparément.
-    ecartes |= {
-        nom for nom in index
-        if nom.startswith(("libstdc++.so", "libgcc_s.so"))
-    }
-    return [e for e in binaires if os.path.basename(e[0]) not in ecartes]
+    """Ne garde que ce qui vient de l'application et de son environnement."""
+    return [e for e in binaires
+            if os.path.basename(e[0]).startswith("libpython")
+            or not _vient_du_systeme(e[1])]
 
 
 if sys.platform.startswith("linux"):
-    # objdump absent : mieux vaut rater la construction que livrer un paquet qui
-    # ne démarrera pas, avec un message que personne ne rattachera à ça.
-    if shutil.which("objdump") is None:
-        raise SystemExit(
-            "ZLink.spec : objdump est requis pour construire sous Linux "
-            "(paquet binutils)."
-        )
+    _avant = len(a.binaries) + len(sl.binaries)
     a.binaries = _ecarter_bibliotheques_de_l_hote(a.binaries)
     sl.binaries = _ecarter_bibliotheques_de_l_hote(sl.binaries)
+    _apres = len(a.binaries) + len(sl.binaries)
+    # Écrit au journal de construction : le jour où un paquet Linux ne démarre
+    # pas, ce nombre est la première chose à regarder.
+    print(f"ZLink.spec : {_avant - _apres} bibliothèque(s) système laissée(s) "
+          f"à l'hôte, {_apres} embarquée(s).")
 
 
 pyz = PYZ(a.pure)
