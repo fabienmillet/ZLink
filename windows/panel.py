@@ -6013,11 +6013,18 @@ class _ClipsTab(QWidget):
     """
 
     clip_choisi = pyqtSignal(object)     # le Clip à lire
+    #: Interne. Un fil de travail ne peut pas toucher aux widgets, et
+    #: `QTimer.singleShot` posé DEPUIS ce fil ne part jamais : le timer naît
+    #: dans un fil sans boucle d'événements. Qt, lui, met une émission de
+    #: signal en file d'attente vers le fil du destinataire — c'est ce que fait
+    #: déjà `DataManager` pour ses propres relèves.
+    _charges = pyqtSignal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._clips: list = []
         self._chargement = False
+        self._charges.connect(self._recevoir)
         self._build()
 
     def _build(self) -> None:
@@ -6116,7 +6123,7 @@ class _ClipsTab(QWidget):
             logger.exception("Clips : chargement impossible")
             clips = []
         # Le fil de Qt est le seul à toucher aux widgets : on repasse par lui.
-        QTimer.singleShot(0, lambda: self._recevoir(clips))
+        self._charges.emit(clips)
 
     def _recevoir(self, clips: list) -> None:
         self._chargement = False
@@ -6181,9 +6188,14 @@ class _LecteurClip(QDialog):
     jeton signé — de quoi le donner à mpv, qui joue déjà tout le reste.
     """
 
+    #: Interne, pour la même raison que dans l'onglet : le fil qui résout
+    #: l'adresse ne peut pas toucher au lecteur.
+    _resolue = pyqtSignal(str)
+
     def __init__(self, clip, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._clip = clip
+        self._resolue.connect(self._lire)
         self.setWindowTitle(f"{clip.chaine} — {clip.titre}")
         self.resize(960, 600)
         self.setStyleSheet("background: #0a0a0a;")
@@ -6225,7 +6237,7 @@ class _LecteurClip(QDialog):
         except Exception:                                  # noqa: BLE001
             logger.exception("Clips : lecture impossible")
             url = ""
-        QTimer.singleShot(0, lambda: self._lire(url))
+        self._resolue.emit(url)
 
     def _lire(self, url: str) -> None:
         if not url:

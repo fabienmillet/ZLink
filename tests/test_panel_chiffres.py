@@ -2521,3 +2521,53 @@ def test_la_duree_se_lit_en_minutes(secondes, attendu):
 def test_la_fraicheur_prime_sur_la_date(ecart, attendu):
     """La date exacte d'un clip n'apprend rien ; sa fraîcheur si."""
     assert panel._il_y_a(1000.0, maintenant=1000.0 + ecart) == attendu
+
+
+def test_le_fil_de_chargement_repasse_par_un_signal(clips, qtbot, monkeypatch):
+    """`QTimer.singleShot` posé DEPUIS un fil de travail ne part jamais.
+
+    Le timer naît dans un fil sans boucle d'événements : le résultat n'était
+    jamais rendu au fil de Qt, et l'onglet restait sur « Chargement… » avec une
+    liste vide. Qt, lui, met une émission de signal en file d'attente vers le
+    fil du destinataire.
+    """
+    from core import twitch_clips
+
+    onglet = clips()
+    attendus = [_clip("a"), _clip("b")]
+    monkeypatch.setattr(panel, "_run_coro", lambda _coro: attendus)
+    monkeypatch.setattr(twitch_clips, "lister", lambda *a, **k: None)
+
+    with qtbot.waitSignal(onglet._charges, timeout=2000) as attrape:
+        onglet._charger()                 # le corps du fil, appelé directement
+    assert [c.slug for c in attrape.args[0]] == ["a", "b"]
+
+
+def test_une_liste_vide_ne_remplace_pas_celle_qu_on_a(clips):
+    """Un réseau qui se dérobe ne doit pas effacer ce qui est affiché."""
+    onglet = clips(_clip("a"))
+    onglet._recevoir([])
+    assert len(_lignes_de(onglet)) == 1
+    assert onglet._bouton.text() == "Rafraîchir"
+
+
+def test_le_lecteur_repasse_aussi_par_un_signal(qtbot, monkeypatch):
+    """Même piège : le fil qui résout l'adresse ne peut pas toucher au lecteur."""
+    from core import twitch_clips
+
+    monkeypatch.setattr(panel, "_run_coro", lambda _coro: "https://cdn/x.mp4?sig=1")
+    monkeypatch.setattr(twitch_clips, "url_de_lecture", lambda *a, **k: None)
+    lecteur = panel._LecteurClip(_clip("a"))
+    qtbot.addWidget(lecteur)
+    with qtbot.waitSignal(lecteur._resolue, timeout=2000) as attrape:
+        lecteur._resoudre()
+    assert attrape.args[0] == "https://cdn/x.mp4?sig=1"
+
+
+def test_un_clip_illisible_propose_twitch(qtbot):
+    """Plutôt que de rester muet devant un lecteur noir."""
+    lecteur = panel._LecteurClip(_clip("a"))
+    qtbot.addWidget(lecteur)
+    lecteur._lire("")
+    assert "Ouvrir sur Twitch" in lecteur._etat.text()
+    assert not lecteur._etat.isHidden()
