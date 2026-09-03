@@ -2048,11 +2048,11 @@ def _charge(stats):
 
 
 @pytest.fixture
-def collecte_ouverte(monkeypatch):
-    """Déclare qu'il y a de quoi comparer les éditions.
+def comparaison_active(monkeypatch):
+    """Déclare qu'il y a de quoi superposer les éditions passées.
 
-    Elles ne sont alignées — et l'axe rebasé — que là. Sans étendue suffisante,
-    le graphe se trace seul, à l'heure vraie.
+    Elles sont alignées sur le temps de course de la courbe en cours : sous une
+    heure d'étendue, elles s'y écraseraient et ne sont pas envoyées.
     """
     from core import history_store
 
@@ -2060,7 +2060,7 @@ def collecte_ouverte(monkeypatch):
                         lambda *_a: True)
 
 
-def test_les_graphes_transportent_la_courbe_de_reference(stats, collecte_ouverte):
+def test_les_graphes_transportent_la_courbe_de_reference(stats, comparaison_active):
     """Sans elle, on voit sa propre courbe monter sans savoir si c'est mieux
     ou moins bien que l'an dernier — la question de tout le monde pendant
     l'événement."""
@@ -2086,7 +2086,7 @@ def test_sans_reference_la_courbe_est_absente_plutot_que_plate(stats):
     assert charge["rv"] == {}
 
 
-def test_un_trou_dans_la_reference_reste_un_trou(stats, collecte_ouverte):
+def test_un_trou_dans_la_reference_reste_un_trou(stats, comparaison_active):
     """`null` interrompt la courbe ; zéro dessinerait une falaise."""
     stats._charts_ready = True
     stats.update_history(_FauxHistorique(
@@ -2108,34 +2108,29 @@ def test_l_arrondi_de_la_reference_garde_les_trous(serie, attendu):
     assert panel._arrondi_ou_rien(serie) == attendu
 
 
-def test_les_abscisses_suivent_le_calendrier_de_l_evenement(stats, collecte_ouverte):
-    """Elles suivaient l'horloge du jour.
+def test_les_abscisses_portent_l_heure_vraie_des_releves(stats):
+    """Elles étaient rebasées sur l'ouverture de la cagnotte.
 
-    À sept jours de l'événement — ou en mode mock — le graphe annonçait
-    « jeudi 16 h » en regard d'une valeur de 2025 qui appartenait, elle, au
-    vendredi soir. Les courbes étaient bien alignées entre elles ; l'axe seul
-    racontait autre chose.
+    Le remède valait quand ZLink ne traçait que ses propres relevés : leur date
+    n'avait alors aucun rapport avec le temps de course. L'édition en cours
+    étant préchargée depuis son début, ses horodatages SONT ce temps — rebaser
+    une seconde fois déplaçait l'axe d'une journée entière.
     """
     from datetime import datetime, timezone
 
-    from core.history_store import OUVERTURE_CAGNOTTE
-
     stats._charts_ready = True
-    # Trois relevés pris un jour quelconque, espacés de six heures.
-    quelconque = 1_700_000_000.0
+    depart = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc).timestamp()
     stats.update_history(_FauxHistorique(
-        dons=[(quelconque + i * 21_600.0, 100.0 * i) for i in range(3)],
-        viewers=[(quelconque, 10)]))
+        dons=[(depart + i * 21_600.0, 100.0 * i) for i in range(3)],
+        viewers=[(depart, 10)]))
     charge = _charge(stats)
 
     attendu = []
     for i in range(3):
-        dt = (datetime.fromtimestamp(OUVERTURE_CAGNOTTE + i * 21_600.0,
-                                     tz=timezone.utc) + panel.PARIS)
+        dt = (datetime.fromtimestamp(depart + i * 21_600.0, tz=timezone.utc)
+              + panel.PARIS)
         attendu.append(f"{panel.JOURS_FR[dt.weekday()]} {dt.hour:02d}h")
     assert charge["ld"] == attendu
-    assert charge["ld"][0].startswith("Ven"), (
-        "la cagnotte ouvre un vendredi, toutes éditions confondues")
 
 
 # ── Goals : restreindre « les plus proches » à la grille ou aux favoris ─────
@@ -2316,17 +2311,17 @@ def test_le_compte_d_objectifs_suit_la_cagnotte(qtbot):
 
 
 @pytest.fixture
-def collecte_fermee(monkeypatch):
+def comparaison_impossible(monkeypatch):
     from core import history_store
 
     monkeypatch.setattr(history_store, "comparaison_possible",
                         lambda *_a: False)
 
 
-def test_avant_l_ouverture_aucune_edition_n_est_comparee(stats, collecte_fermee):
-    """Un jeudi soir, douze minutes de relevés étaient confrontées à des
-    éditions ENTIÈRES écrasées sur ces mêmes douze minutes : 2021 y gagnait
-    deux cent quarante mille euros en un quart d'heure."""
+def test_sans_etendue_aucune_edition_n_est_comparee(stats, comparaison_impossible):
+    """Douze minutes de relevés confrontées à des éditions ENTIÈRES, écrasées
+    sur ces mêmes douze minutes : 2021 y gagnait deux cent quarante mille euros
+    en un quart d'heure."""
     import json
 
     class _Hist:

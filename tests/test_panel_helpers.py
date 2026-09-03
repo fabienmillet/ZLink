@@ -976,90 +976,55 @@ def test_la_bande_couvre_bien_huit_heures():
 
 # ── graphes HTML : les étiquettes d'axe ─────────────────────────────────────
 
-@pytest.fixture
-def collecte_ouverte(monkeypatch):
-    """Déclare qu'il y a de quoi comparer les éditions.
+def _serie(depart_h: int, depart_m: int, pas_s: int, combien: int) -> list[float]:
+    """Une série de relevés, à l'heure locale d'affichage (UTC+2)."""
+    from datetime import datetime, timezone
 
-    Les abscisses ne sont rebasées sur le temps de course QUE là : sans
-    comparaison, le rebasage n'a rien à aligner et l'axe porte l'heure vraie.
-    Chaque test dit donc de quel régime il parle.
+    depart = datetime(2026, 9, 3, depart_h - 2, depart_m,
+                      tzinfo=timezone.utc).timestamp()
+    return [depart + pas_s * i for i in range(combien)]
+
+
+def test_l_axe_porte_l_heure_vraie_des_releves():
+    """Il était rebasé sur une origine fixe, l'ouverture de la cagnotte.
+
+    Le remède valait quand ZLink ne traçait que ses propres relevés. L'édition
+    en cours étant préchargée depuis son début, ses horodatages SONT le temps
+    de course : rebaser une seconde fois ne corrigeait plus rien, ça déplaçait
+    l'axe. Douze heures allant du jeudi midi au vendredi minuit s'affichaient
+    « Ven 18h → Sam 06h ».
     """
-    from core import history_store
-
-    monkeypatch.setattr(history_store, "comparaison_possible",
-                        lambda *_a: True)
-
-
-@pytest.fixture
-def collecte_fermee(monkeypatch):
-    from core import history_store
-
-    monkeypatch.setattr(history_store, "comparaison_possible",
-                        lambda *_a: False)
+    etiquettes = panel.abscisses_graphe(_serie(12, 0, 600, 73))
+    assert etiquettes[0] == "Jeu 12h"
+    assert etiquettes[-1] == "Ven 00h"
 
 
-def test_une_serie_courte_passe_aux_minutes(collecte_ouverte):
-    """Avant l'événement, la série ne couvre que quelques minutes.
-
-    Rebasées sur l'ouverture de la cagnotte — vendredi 18h00 — elles tombaient
-    toutes dans la même heure : l'axe affichait « Ven 18h » vingt-huit fois de
-    suite, ce qui ne situait plus rien.
-    """
-    serie = [1000.0 + 30 * i for i in range(28)]      # 14 minutes
-    etiquettes = panel.abscisses_graphe(serie)
-    assert etiquettes[0] == "18h00"
+def test_une_serie_courte_passe_aux_minutes():
+    """Sur quelques minutes, le jour et l'heure sont identiques d'un bout à
+    l'autre : l'axe affichait la même étiquette vingt-huit fois."""
+    etiquettes = panel.abscisses_graphe(_serie(19, 37, 30, 28))
+    assert etiquettes[0] == "19h37"
     assert len(set(etiquettes)) > 1
-    assert all("Ven" not in e for e in etiquettes)
+    assert all("Jeu" not in e for e in etiquettes)
 
 
-def test_une_serie_longue_garde_le_jour(collecte_ouverte):
+def test_une_serie_longue_garde_le_jour():
     """Sur trois jours, l'heure seule ne dit plus de quel jour on parle."""
-    serie = [1000.0 + 3 * 3600 * i for i in range(28)]   # 81 heures
-    etiquettes = panel.abscisses_graphe(serie)
-    assert etiquettes[0] == "Ven 18h"
+    etiquettes = panel.abscisses_graphe(_serie(18, 0, 3 * 3600, 28))
+    assert etiquettes[0] == "Jeu 18h"
     assert len(set(etiquettes)) == len(etiquettes)
 
 
-def test_la_bascule_se_fait_a_deux_heures(collecte_ouverte):
+def test_la_bascule_se_fait_a_deux_heures():
     """Le même seuil que `DateAxisItem`, pour les graphes pyqtgraph du fichier."""
-    juste_en_dessous = [0.0, float(panel._SEUIL_MINUTES_AXE)]
-    juste_au_dessus = [0.0, float(panel._SEUIL_MINUTES_AXE) + 1]
-    assert panel.abscisses_graphe(juste_en_dessous)[0] == "18h00"
-    assert panel.abscisses_graphe(juste_au_dessus)[0] == "Ven 18h"
+    en_dessous = _serie(18, 0, panel._SEUIL_MINUTES_AXE, 2)
+    au_dessus = _serie(18, 0, panel._SEUIL_MINUTES_AXE + 1, 2)
+    assert panel.abscisses_graphe(en_dessous)[0] == "18h00"
+    assert panel.abscisses_graphe(au_dessus)[0] == "Jeu 18h"
 
 
 def test_une_serie_vide_ne_casse_rien():
     assert panel.abscisses_graphe([]) == []
-
-
-def test_l_axe_repart_de_l_ouverture_et_non_de_l_horloge(collecte_ouverte):
-    """Deux séries d'égale étendue donnent le même axe, quel que soit l'instant.
-
-    C'est ce qui aligne les éditions entre elles : les valeurs de 2025 sont
-    replacées sur le même temps de course, l'axe doit l'être aussi.
-    """
-    a = panel.abscisses_graphe([0.0, 3600.0 * 6])
-    b = panel.abscisses_graphe([1_700_000_000.0, 1_700_000_000.0 + 3600 * 6])
-    assert a == b
-
-
-def test_avant_l_ouverture_l_axe_porte_l_heure_vraie(collecte_fermee):
-    """Un jeudi soir, rebaser affichait « 18h00 » sans rien aligner.
-
-    Les éditions passées ne sont pas comparées tant que la cagnotte n'a pas
-    ouvert : le rebasage n'a alors plus de raison d'être, et il ment sur
-    l'heure.
-    """
-    from datetime import datetime, timezone
-
-    depart = datetime(2026, 9, 3, 21, 11, tzinfo=timezone.utc).timestamp()
-    etiquettes = panel.abscisses_graphe([depart + 30 * i for i in range(26)])
-    assert etiquettes[0] == "23h11"
-    assert etiquettes[-1] == "23h23"
-
-
-def test_apres_l_ouverture_l_axe_repart_du_temps_de_course(collecte_ouverte):
-    assert panel.abscisses_graphe([_horodatage(23, 11)])[0] == "18h00"
 
 
 # ── de quoi comparer, ou pas ────────────────────────────────────────────────

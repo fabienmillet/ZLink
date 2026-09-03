@@ -121,7 +121,7 @@ from core.api_client import (
     StreamerInfo,
     fetch_donation_goals,
 )
-from core.history_store import OUVERTURE_CAGNOTTE, HistoryStore
+from core.history_store import HistoryStore
 from typing import TYPE_CHECKING
 from widgets.bigscreen_widget import BigScreenWidget
 
@@ -5638,34 +5638,29 @@ def _etiquette_graphe(ts: float, avec_minutes: bool) -> str:
 
 
 def abscisses_graphe(instants: list[float]) -> list[str]:
-    """Étiquettes d'axe calées sur le CALENDRIER de l'édition.
+    """Étiquettes d'axe, à l'heure VRAIE des relevés.
 
-    Elles suivaient l'horloge du moment. À sept jours de l'événement — ou en
-    mode mock — le graphe annonçait « jeudi 16 h » en regard d'une valeur de
-    2025 qui appartenait, elle, au vendredi soir : les courbes étaient bien
-    alignées entre elles, l'axe seul racontait autre chose. On repart donc de
-    l'ouverture de la cagnotte, la même origine que celle qui aligne les
-    éditions.
+    Elles étaient rebasées sur une origine fixe — l'ouverture de la cagnotte —
+    pour que l'axe raconte la même chose que les courbes de comparaison. Le
+    remède valait quand ZLink ne traçait que ses propres relevés : leur date
+    n'avait alors aucun rapport avec le temps de course.
 
-    Le format suit l'ÉTENDUE de la série, et non le titre du graphe. Avant
-    l'événement, la série ne couvre que les quelques minutes déjà relevées :
-    rebasées sur l'ouverture, elles tombaient toutes dans la même heure, et
-    l'axe affichait « Ven 18h » vingt-huit fois de suite. C'est la règle que
-    `DateAxisItem` applique déjà aux graphes pyqtgraph du même fichier, à deux
-    heures de bascule.
+    L'édition en cours est désormais préchargée depuis son début. Ses
+    horodatages SONT le temps de course, et les éditions passées sont replacées
+    dessus par `_alignee` — Chart.js les aligne ensuite par indice, sur ces
+    mêmes abscisses. Rebaser une seconde fois ne corrigeait donc plus rien :
+    ça déplaçait l'axe. Douze heures de relevés allant du jeudi midi au
+    vendredi minuit s'affichaient « Ven 18h → Sam 06h ».
+
+    Le format, lui, suit l'ÉTENDUE de la série : en deçà de deux heures il
+    passe aux minutes, comme `DateAxisItem` le fait pour les graphes pyqtgraph
+    du même fichier. Sans quoi une série courte affiche la même heure d'un bout
+    à l'autre.
     """
     if not instants:
         return []
-    depart = instants[0]
-    minutes = (instants[-1] - depart) <= _SEUIL_MINUTES_AXE
-    from core.history_store import comparaison_possible
-
-    if not comparaison_possible(instants):
-        # Rien à aligner : le rebasage n'a plus de raison d'être, et il
-        # afficherait une heure qui n'est pas celle des relevés.
-        return [_etiquette_graphe(t, minutes) for t in instants]
-    return [_etiquette_graphe(OUVERTURE_CAGNOTTE + (t - depart), minutes)
-            for t in instants]
+    minutes = (instants[-1] - instants[0]) <= _SEUIL_MINUTES_AXE
+    return [_etiquette_graphe(t, minutes) for t in instants]
 
 
 # ---------------------------------------------------------------------------
