@@ -13,6 +13,8 @@
 
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -149,6 +151,83 @@ sl = Analysis(
     excludes=["tkinter", "test", "unittest", "PyQt6"],
     noarchive=False,
 )
+
+# ─── Linux : laisser à l'hôte les bibliothèques qui lui appartiennent ────────
+#
+# PyInstaller ramasse les dépendances natives telles qu'elles sont sur la
+# machine de construction et les pose dans _internal/, que le lanceur met
+# DEVANT les chemins système. Une bibliothèque embarquée masque donc celle de
+# l'hôte pour tout le processus — y compris pour du code qui n'est pas le
+# nôtre. Et le binaire de release est bâti sur ubuntu-22.04 exprès, pour viser
+# une vieille glibc : ce qu'on embarque est par construction plus ancien que ce
+# qu'une distribution à jour installe.
+#
+# Deux masquages rendaient le paquet Linux inutilisable ailleurs que sur le
+# runner :
+#
+#   - Le runtime GCC. Celui d'Ubuntu 22.04 s'arrête à GLIBCXX_3.4.30, quand le
+#     pilote Mesa de l'hôte (bâti avec GCC 13+) en réclame davantage. Mesa
+#     charge le nôtre, n'y trouve pas ses symboles, et le pilote ne s'initialise
+#     pas : « Could not initialize GLX », puis Qt abandonne au démarrage.
+#
+#   - libmpv et sa fermeture. Le README dit que mpv vient du système sous Linux,
+#     et widgets/mpv_widget.py ne cherche de libmpv embarquée que sous les noms
+#     de l'ABI 2 : celle du runner (libmpv.so.1, mpv 0.34) n'est donc jamais
+#     utilisée. Elle était pourtant embarquée — PyInstaller résout le
+#     ctypes.util.find_library('mpv') de python-mpv à la construction — et ses
+#     dépendances masquaient celles de la libmpv de l'hôte, qui ne se chargeait
+#     alors plus du tout (« undefined symbol: vaMapBuffer2 »).
+#
+# On écarte donc libmpv et TOUT ce qu'elle tire, plutôt qu'une liste de noms
+# constatés : la fermeture se recalcule à chaque construction et suit le mpv du
+# runner sans qu'on ait à la tenir à jour.
+
+
+def _dependances_declarees(chemin):
+    """SONAME listés en DT_NEEDED par un binaire ELF."""
+    sortie = subprocess.run(
+        ["objdump", "-p", chemin], capture_output=True, text=True, check=True
+    ).stdout
+    return re.findall(r"NEEDED\s+(\S+)", sortie)
+
+
+def _fermeture(racines, index):
+    """`racines` et, transitivement, tout ce dont elles dépendent dans le paquet."""
+    vus, a_voir = set(), list(racines)
+    while a_voir:
+        nom = a_voir.pop()
+        if nom in vus or nom not in index:
+            continue
+        vus.add(nom)
+        a_voir += _dependances_declarees(index[nom])
+    return vus
+
+
+def _ecarter_bibliotheques_de_l_hote(binaires):
+    index = {os.path.basename(nom): chemin for nom, chemin, _ in binaires}
+    ecartes = _fermeture(
+        [nom for nom in index if nom.startswith("libmpv.so")], index
+    )
+    # Le runtime GCC arrive aussi par l'ICU de Qt : il survivrait à la
+    # disparition de libmpv du paquet, on le nomme donc séparément.
+    ecartes |= {
+        nom for nom in index
+        if nom.startswith(("libstdc++.so", "libgcc_s.so"))
+    }
+    return [e for e in binaires if os.path.basename(e[0]) not in ecartes]
+
+
+if sys.platform.startswith("linux"):
+    # objdump absent : mieux vaut rater la construction que livrer un paquet qui
+    # ne démarrera pas, avec un message que personne ne rattachera à ça.
+    if shutil.which("objdump") is None:
+        raise SystemExit(
+            "ZLink.spec : objdump est requis pour construire sous Linux "
+            "(paquet binutils)."
+        )
+    a.binaries = _ecarter_bibliotheques_de_l_hote(a.binaries)
+    sl.binaries = _ecarter_bibliotheques_de_l_hote(sl.binaries)
+
 
 pyz = PYZ(a.pure)
 pyz_sl = PYZ(sl.pure)
