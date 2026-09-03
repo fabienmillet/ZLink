@@ -824,31 +824,40 @@ def test_les_points_sont_remis_dans_l_ordre():
 
 def test_la_courbe_passee_est_alignee_sur_le_temps_de_course(horloge):
     """Les deux éditions ne tombent pas les mêmes jours : c'est le temps écoulé
-    depuis le premier relevé qui les rend comparables, pas la date."""
+    depuis L'OUVERTURE DES DONS qui les rend comparables, pas la date.
+
+    Et pas non plus le premier relevé : celui de l'édition en cours précède sa
+    collecte de plusieurs heures — les directs ouvrent avant la cagnotte.
+    """
     store = HistoryStore()
-    _charger_edition(store, _edition([(_J, 0), (_J + _H, 1200), (_J + 2 * _H, 2000)]))
+    # L'édition de référence est publiée dès l'ouverture des dons : premier
+    # point déjà positif, comme les quatre vraies.
+    _charger_edition(store, _edition([(_J, 600), (_J + _H, 1200),
+                                      (_J + 2 * _H, 2000)]))
 
     depart = _EVENT_START + 3600.0
     for i in range(3):
         horloge["t"] = depart + i * 1800.0        # relevés toutes les 30 min
-        store.add_point(i * 1000.0, 10)
+        store.add_point(i * 1000.0, 10)           # le premier est à zéro
 
     ts, _vals = store.get_donation_series()
     aligne = store.serie_precedente_alignee(ts)
-    # 0 min → 0 €, 30 min → moitié du premier palier, 60 min → 1 200 €.
-    assert aligne == [0.0, 600.0, 1200.0]
+    # La course commence au deuxième relevé, le premier don. Avant lui, la
+    # référence n'a rien à dire ; ensuite : 0 min → 600 €, 30 min → 900 €.
+    assert aligne == [None, 600.0, 900.0]
 
 
 def test_hors_de_la_plage_couverte_la_courbe_s_interrompt(horloge):
     """None, et non zéro : une falaise se lirait comme un effondrement."""
     store = HistoryStore()
-    _charger_edition(store, _edition([(_J, 0), (_J + _H, 1000)]))
+    _charger_edition(store, _edition([(_J, 500), (_J + _H, 1000)]))
     depart = _EVENT_START + 3600.0
-    for i in (0, 2):
+    for i, montant in ((0, 500.0), (2, 1500.0)):
         horloge["t"] = depart + i * 3600.0
-        store.add_point(i * 500.0, 10)
+        store.add_point(montant, 10)
     ts, _vals = store.get_donation_series()
-    assert store.serie_precedente_alignee(ts) == [0.0, None]
+    # Deux heures après l'ouverture des dons, la référence n'en couvre qu'une.
+    assert store.serie_precedente_alignee(ts) == [500.0, None]
 
 
 def test_sans_reference_chargee_la_serie_alignee_est_vide(horloge):
@@ -959,22 +968,26 @@ def test_des_releves_tous_au_meme_instant_sont_ecartes():
 
 def test_les_series_de_toutes_les_editions_s_alignent(horloge):
     store = HistoryStore()
+    # Positives dès leur premier point, comme les quatre vraies : une édition
+    # est publiée à partir de l'ouverture de ses dons.
     table = {
-        "id-a": _edition_complete(2000, [(_J, 0), (_J + 2 * _H, 2000)]),
-        "id-b": _edition_complete(1000, [(_J, 0), (_J + 2 * _H, 1000)]),
+        "id-a": _edition_complete(2000, [(_J, 500), (_J + 2 * _H, 2000)]),
+        "id-b": _edition_complete(1000, [(_J, 250), (_J + 2 * _H, 1000)]),
     }
     _charger_toutes(store, table, (("a", "id-a"), ("b", "id-b")))
 
     depart = _EVENT_START + 3600.0
     for i in range(3):
         horloge["t"] = depart + i * 3600.0
-        store.add_point(i * 900.0, 10)
+        store.add_point(i * 900.0, 10)            # le premier est à zéro
     ts, _vals = store.get_donation_series()
 
     alignees = store.series_editions_alignees(ts)
     assert set(alignees) == {"a", "b"}
-    assert alignees["a"] == [0.0, 1000.0, 2000.0]
-    assert alignees["b"] == [0.0, 500.0, 1000.0]
+    # La course des deux côtés démarre au premier don. Les références sont
+    # muettes avant celui de l'édition en cours.
+    assert alignees["a"] == [None, 500.0, 1250.0]
+    assert alignees["b"] == [None, 250.0, 625.0]
 
 
 # ── l'édition en cours, préchargée depuis son début ─────────────────────────
@@ -1043,3 +1056,46 @@ def test_une_courbe_trop_courte_est_refusee(sans_reseau):
     sans_reseau({"graph": {"donations": {"all": {"labels": [1_788_408_000_000],
                                                  "values": [0.0]}}}})
     assert not asyncio.run(HistoryStore().charger_edition_en_cours("x"))
+
+
+# ── l'origine de la course : le premier don, pas le premier relevé ──────────
+
+def test_l_origine_est_le_premier_don():
+    """Les éditions passées sont publiées à partir de l'ouverture des dons —
+    premier point déjà positif. Celle en cours est relevée dès l'ouverture des
+    DIRECTS, six heures et demie plus tôt, à zéro.
+
+    Caler sur le premier relevé décalait les comparaisons d'autant : au bout de
+    sept heures, 2026 en était à sa première heure de collecte quand 2021
+    affichait déjà sept heures et un million d'euros.
+    """
+    assert HistoryStore.origine_course(
+        [(100.0, 0.0), (200.0, 0.0), (300.0, 42.0), (400.0, 90.0)]) == 300.0
+
+
+def test_une_edition_publiee_apres_l_ouverture_garde_son_premier_point():
+    """Le cas des quatre vraies : elles démarrent déjà positives."""
+    assert HistoryStore.origine_course([(100.0, 500.0), (200.0, 900.0)]) == 100.0
+
+
+def test_une_courbe_restee_a_zero_retombe_sur_son_premier_point():
+    """Avant le premier euro, il n'y a pas encore de course : on ne décale pas
+    dans le vide, sinon l'origine sortirait de la série."""
+    assert HistoryStore.origine_course([(100.0, 0.0), (200.0, 0.0)]) == 100.0
+
+
+def test_sans_courbe_il_n_y_a_pas_d_origine():
+    assert HistoryStore.origine_course([]) is None
+
+
+def test_l_origine_courante_reste_dans_l_axe_affiche(horloge):
+    """Hors de la fenêtre, elle décalerait toutes les références d'un bloc."""
+    store = HistoryStore()
+    depart = _EVENT_START + 3600.0
+    for i, montant in enumerate((0.0, 0.0, 1000.0)):
+        horloge["t"] = depart + i * 1800.0
+        store.add_point(montant, 10)
+    ts, _vals = store.get_donation_series()
+    origine = store._origine_courante(ts)
+    assert ts[0] <= origine <= ts[-1]
+    assert origine == ts[2]      # le premier don

@@ -281,17 +281,36 @@ class HistoryStore:
     # -- comparaison avec l'édition précédente ---------------------------------
 
     @staticmethod
-    def _interpoler(points: list, elapsed_s: float) -> float | None:
+    def origine_course(dons: list) -> float | None:
+        """Instant où la collecte démarre : le premier relevé NON NUL.
+
+        Pas le premier relevé tout court. Les éditions passées sont publiées à
+        partir de l'ouverture des dons — leur premier point est déjà positif —
+        alors que celle en cours est relevée dès l'ouverture des DIRECTS, six
+        heures et demie plus tôt, à zéro.
+
+        Caler sur le premier relevé décalait donc les comparaisons d'autant :
+        au bout de sept heures de course, 2026 en était à sa première heure de
+        collecte quand 2021 affichait déjà sept heures et un million d'euros.
+        """
+        for ts, valeur in dons:
+            if valeur > 0:
+                return ts
+        return dons[0][0] if dons else None
+
+    @staticmethod
+    def _interpoler(points: list, elapsed_s: float,
+                    origine: float | None = None) -> float | None:
         """Valeur d'une série après `elapsed_s`, entre les deux points encadrants.
 
-        L'origine est le PREMIER point relevé, pas une date : deux éditions ne
-        tombent pas les mêmes jours, et c'est le temps de course qui les rend
-        comparables. Hors de la plage couverte, rien — extrapoler une édition
-        terminée n'aurait pas de sens.
+        L'origine est celle de la COURSE — l'ouverture des dons — et non une
+        date : deux éditions ne tombent pas les mêmes jours, et c'est le temps
+        de course qui les rend comparables. Hors de la plage couverte, rien :
+        extrapoler une édition terminée n'aurait pas de sens.
         """
         if len(points) < 2 or elapsed_s < 0:
             return None
-        cible = points[0][0] + elapsed_s
+        cible = (points[0][0] if origine is None else origine) + elapsed_s
         if cible > points[-1][0]:
             return None
         # Les points sont peu nombreux (quelques centaines) : la recherche
@@ -303,21 +322,36 @@ class HistoryStore:
                 return va + (vb - va) * (cible - ta) / (tb - ta)
         return None
 
-    def _alignee(self, points: list,
-                 ts_courants: list[float]) -> list[float | None]:
+    def _alignee(self, points: list, ts_courants: list[float],
+                 origine_ref: float | None = None) -> list[float | None]:
         """La série `points` replacée sur l'horloge de l'édition en cours.
 
         Une valeur par instant courant, pour que les deux courbes partagent
         exactement le même axe : Chart.js aligne ses séries par INDICE, pas par
         abscisse — deux tableaux de longueurs différentes se décaleraient.
 
+        Les deux temps de course sont comptés depuis l'OUVERTURE DES DONS de
+        chaque édition, et non depuis leur premier relevé : celui de l'édition
+        en cours précède sa collecte de plusieurs heures.
+
         None là où l'édition de référence ne couvre pas encore, ou plus : la
         courbe s'y interrompt au lieu de retomber à zéro.
         """
         if not points or not ts_courants:
             return [None] * len(ts_courants)
-        origine = ts_courants[0]
-        return [self._interpoler(points, t - origine) for t in ts_courants]
+        depart = self._origine_courante(ts_courants)
+        return [self._interpoler(points, t - depart, origine_ref)
+                for t in ts_courants]
+
+    def _origine_courante(self, ts_courants: list[float]) -> float:
+        """Ouverture des dons de l'édition en cours, dans l'axe fourni."""
+        origine = self.origine_course(
+            [(t, v) for t, v in self._donation if self._garder(t)])
+        if origine is None or not ts_courants:
+            return ts_courants[0] if ts_courants else 0.0
+        # Bornée à l'axe : une origine hors de la fenêtre affichée
+        # décalerait toutes les références d'un bloc.
+        return min(max(origine, ts_courants[0]), ts_courants[-1])
 
     def serie_precedente_alignee(
             self, ts_courants: list[float]) -> list[float | None]:
@@ -487,13 +521,18 @@ class HistoryStore:
     def series_editions_alignees(
             self, ts_courants: list[float]) -> dict[str, list]:
         """Cagnotte de chaque édition retenue, au même temps de course."""
-        return {libelle: self._alignee(donnees["dons"], ts_courants)
+        return {libelle: self._alignee(donnees["dons"], ts_courants,
+                                       donnees.get("origine"))
                 for libelle, donnees in self._editions.items()}
 
     def series_viewers_editions_alignees(
             self, ts_courants: list[float]) -> dict[str, list]:
         """Audience de chaque édition retenue, au même temps de course."""
-        return {libelle: self._alignee(donnees["vues"], ts_courants)
+        # L'origine reste celle des DONS : le temps de course est une
+        # propriété de l'édition, pas de la métrique qu'on regarde. Les
+        # audiences d'avant l'ouverture existent, elles ne sont pas la course.
+        return {libelle: self._alignee(donnees["vues"], ts_courants,
+                                       donnees.get("origine"))
                 for libelle, donnees in self._editions.items()}
 
     @staticmethod
@@ -565,7 +604,8 @@ class HistoryStore:
 
         # Tout-ou-rien, comme le chargeur historique : remplacer une série et
         # pas l'autre laisserait deux éditions différentes côte à côte.
-        self._editions[nom] = {"dons": dons, "vues": vues}
+        self._editions[nom] = {"dons": dons, "vues": vues,
+                               "origine": self.origine_course(dons)}
         if not libelle:
             # Appel direct, hors du chargement groupé : l'édition demandée
             # devient la référence de la phrase de comparaison.
