@@ -1,0 +1,160 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ZLink — panel ZEvent. Copyright (C) 2026 Fabien MILLET.
+# Distribué sans AUCUNE GARANTIE, selon les termes de la GNU General Public
+# License version 3 ou ultérieure. Voir le fichier LICENSE.
+"""Les clips Twitch de la catégorie ZEvent.
+
+Rien n'ici ne touche au réseau : la réponse de `gql.twitch.tv` est fournie par
+le test. Ce qui est vérifié, c'est ce que ZLink en fait — le tri, la borne de
+sept jours, et le fait qu'une source muette ne casse pas l'onglet.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from core import twitch_clips as tc
+
+
+def _noeud(slug="abc", titre="Un moment", vues=100, duree=30.0,
+           login="ponce", chaine="Ponce", auteur="Quelquun",
+           cree="2026-09-03T18:18:00Z"):
+    return {"slug": slug, "title": titre, "viewCount": vues,
+            "createdAt": cree, "durationSeconds": duree,
+            "broadcaster": {"login": login, "displayName": chaine},
+            "curator": {"displayName": auteur},
+            "thumbnailURL": "https://exemple.test/v.jpg"}
+
+
+@pytest.fixture
+def reponse(monkeypatch):
+    """Remplace la requête GraphQL par la charge voulue, et la retient."""
+    vues = []
+
+    def poser(charge):
+        async def _faux(requete, client=None):
+            vues.append(requete)
+            return charge
+        monkeypatch.setattr(tc, "_demander", _faux)
+        return vues
+    return poser
+
+
+# ── la liste ────────────────────────────────────────────────────────────────
+
+def test_les_clips_se_lisent(reponse):
+    reponse({"game": {"clips": {"edges": [{"node": _noeud()}]}}})
+    clips = asyncio.run(tc.lister())
+    assert len(clips) == 1
+    c = clips[0]
+    assert (c.slug, c.chaine, c.vues, c.auteur) == ("abc", "Ponce", 100, "Quelquun")
+    assert c.url == "https://clips.twitch.tv/abc"
+
+
+def test_la_fenetre_est_de_sept_jours(reponse):
+    """Sans elle, la catégorie remonte les clips de l'édition précédente."""
+    vues = reponse({"game": {"clips": {"edges": []}}})
+    asyncio.run(tc.lister())
+    assert "LAST_WEEK" in vues[0]
+
+
+def test_une_seule_requete_suffit(reponse):
+    """Twitch oppose un contrôle d'intégrité aux requêtes paginées.
+
+    On en fait donc UNE, large, plutôt que cinq qui se feraient refuser.
+    """
+    vues = reponse({"game": {"clips": {"edges": []}}})
+    asyncio.run(tc.lister())
+    assert len(vues) == 1
+    assert f"first: {tc.PAR_REQUETE}" in vues[0]
+
+
+def test_un_clip_sans_slug_est_ecarte(reponse):
+    """Sans lui, ni lecture ni lien : la ligne ne mènerait nulle part."""
+    reponse({"game": {"clips": {"edges": [
+        {"node": _noeud(slug="")}, {"node": _noeud(slug="ok")}]}}})
+    assert [c.slug for c in asyncio.run(tc.lister())] == ["ok"]
+
+
+def test_une_date_illisible_ne_casse_rien(reponse):
+    reponse({"game": {"clips": {"edges": [{"node": _noeud(cree="jamais")}]}}})
+    assert asyncio.run(tc.lister())[0].cree_le == 0.0
+
+
+def test_une_source_muette_rend_une_liste_vide(reponse):
+    """Un clip manquant n'empêche pas de suivre l'événement."""
+    reponse({})
+    assert asyncio.run(tc.lister()) == []
+
+
+# ── les tris ────────────────────────────────────────────────────────────────
+
+def _clips():
+    return [
+        tc.Clip("a", "A", vues=10, cree_le=300.0, duree_s=60.0,
+                login="zerator", chaine="ZeratoR", auteur="", vignette=""),
+        tc.Clip("b", "B", vues=90, cree_le=100.0, duree_s=20.0,
+                login="ponce", chaine="Ponce", auteur="", vignette=""),
+        tc.Clip("c", "C", vues=50, cree_le=200.0, duree_s=40.0,
+                login="ponce", chaine="Ponce", auteur="", vignette=""),
+    ]
+
+
+@pytest.mark.parametrize("cle,attendu", [
+    ("vues", ["b", "c", "a"]),
+    ("recents", ["a", "c", "b"]),
+    ("duree", ["a", "c", "b"]),
+    # La chaîne d'abord, puis les vues : un tri par nom qui mélangerait les
+    # clips d'un même streamer n'aiderait pas à les parcourir.
+    ("chaine", ["b", "c", "a"]),
+])
+def test_les_tris(cle, attendu):
+    assert [c.slug for c in tc.trier(_clips(), cle)] == attendu
+
+
+def test_un_tri_inconnu_retombe_sur_les_vues():
+    assert [c.slug for c in tc.trier(_clips(), "inventé")] == ["b", "c", "a"]
+
+
+def test_les_tris_proposes_sont_tous_traites():
+    """Une entrée du menu sans effet se remarque après coup, en direct."""
+    reference = [c.slug for c in tc.trier(_clips(), "vues")]
+    autres = [cle for cle in tc.TRIS if cle != "vues"]
+    assert autres, "il faut plus d'un tri pour que le menu ait un sens"
+    assert any([c.slug for c in tc.trier(_clips(), cle)] != reference
+               for cle in autres)
+
+
+# ── la lecture ──────────────────────────────────────────────────────────────
+
+def test_l_url_de_lecture_porte_le_jeton(reponse):
+    """Sans le jeton signé, le CDN répond 403 : l'adresse seule ne suffit pas."""
+    reponse({"clip": {
+        "videoQualities": [{"quality": "1080", "sourceURL": "https://cdn/x.mp4"}],
+        "playbackAccessToken": {"signature": "sig1", "value": "tok1"}}})
+    url = asyncio.run(tc.url_de_lecture("abc"))
+    assert url.startswith("https://cdn/x.mp4?")
+    assert "sig=sig1" in url and "token=tok1" in url
+
+
+def test_la_meilleure_piste_est_prise(reponse):
+    """Twitch les rend par qualité décroissante."""
+    reponse({"clip": {
+        "videoQualities": [{"quality": "1080", "sourceURL": "https://cdn/haut"},
+                           {"quality": "360", "sourceURL": "https://cdn/bas"}],
+        "playbackAccessToken": {"signature": "s", "value": "t"}}})
+    assert asyncio.run(tc.url_de_lecture("abc")).startswith("https://cdn/haut?")
+
+
+@pytest.mark.parametrize("charge", [
+    {},
+    {"clip": {"videoQualities": [], "playbackAccessToken": {"signature": "s"}}},
+    {"clip": {"videoQualities": [{"sourceURL": "u"}],
+              "playbackAccessToken": {}}},
+])
+def test_une_lecture_impossible_rend_une_adresse_vide(reponse, charge):
+    """L'onglet propose alors d'ouvrir sur Twitch, plutôt que de rester muet."""
+    reponse(charge)
+    assert asyncio.run(tc.url_de_lecture("abc")) == ""

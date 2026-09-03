@@ -1264,7 +1264,8 @@ def fenetre(qtbot, monkeypatch, favoris):
     return w
 
 
-ONGLETS = ["Accueil", "Programme", "Stats", "Goals", "Streamers", "Mixer"]
+ONGLETS = ["Accueil", "Programme", "Stats", "Goals", "Clips",
+           "Streamers", "Mixer"]
 
 
 def test_la_barre_porte_les_onglets_attendus(fenetre):

@@ -5917,6 +5917,334 @@ def _part_objectifs(cache: dict, s: StreamerInfo) -> float:
  _C_OBJ, _C_VUE, _C_TEND, _C_DON, _C_TEND_DON) = range(10)
 
 
+# ---------------------------------------------------------------------------
+# Tab: Clips — ce que la communauté a gardé du plateau
+# ---------------------------------------------------------------------------
+
+def _duree_courte(secondes: float) -> str:
+    """« 1:05 ». Les clips font moins d'une minute pour la plupart."""
+    total = max(0, int(round(secondes)))
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _il_y_a(instant: float, maintenant: float | None = None) -> str:
+    """« il y a 3 h ». La date exacte d'un clip n'apprend rien ; sa fraîcheur si."""
+    if not instant:
+        return ""
+    ecart = max(0.0, (time.time() if maintenant is None else maintenant) - instant)
+    if ecart < 3600:
+        return f"il y a {int(ecart // 60)} min"
+    if ecart < 86400:
+        return f"il y a {int(ecart // 3600)} h"
+    return f"il y a {int(ecart // 86400)} j"
+
+
+class _LigneClip(QFrame):
+    """Un clip dans la liste : qui, quoi, combien de vues, quand."""
+
+    clique = pyqtSignal(object)          # le Clip
+
+    def __init__(self, clip, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._clip = clip
+        self.setObjectName("ligneClip")
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setStyleSheet(
+            "QFrame#ligneClip { background: transparent; border: none; "
+            "border-bottom: 1px solid #1a1a1a; }"
+            "QFrame#ligneClip:hover { background: #141414; }")
+        h = QHBoxLayout(self)
+        h.setContentsMargins(10, 8, 12, 8)
+        h.setSpacing(12)
+
+        avatar = QLabel()
+        avatar.setFixedSize(36, 36)
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setStyleSheet(_FOND_TRANSPARENT)
+        from widgets.bigscreen_widget import load_avatar_into_label as _load_av
+        _load_av(avatar, clip.login, clip.chaine, 36, "")
+        h.addWidget(avatar)
+
+        colonne = QVBoxLayout()
+        colonne.setSpacing(2)
+        titre = QLabel(clip.titre)
+        titre.setTextFormat(Qt.TextFormat.PlainText)   # il vient de Twitch
+        titre.setFont(_bold_font(_FONT_SEGOE, 11))
+        titre.setStyleSheet(_SS_WHITE)
+        colonne.addWidget(titre)
+        dessous = " · ".join(x for x in (
+            clip.chaine, _il_y_a(clip.cree_le),
+            f"clippé par {clip.auteur}" if clip.auteur else "") if x)
+        sous = QLabel(dessous)
+        sous.setTextFormat(Qt.TextFormat.PlainText)
+        sous.setFont(QFont(_FONT_SEGOE, 10))
+        sous.setStyleSheet(_SS_MUTED)
+        colonne.addWidget(sous)
+        h.addLayout(colonne, stretch=1)
+
+        vues = QLabel(f"{clip.vues:,}".replace(",", "\u202f") + " vues")
+        vues.setFont(QFont(_FONT_MONO, 10))
+        vues.setStyleSheet(_SS_VERT_NU)
+        vues.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(vues)
+
+        duree = QLabel(_duree_courte(clip.duree_s))
+        duree.setFont(QFont(_FONT_MONO, 10))
+        duree.setStyleSheet(_SS_GRIS_NU)
+        duree.setFixedWidth(44)
+        duree.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(duree)
+
+    def mousePressEvent(self, event) -> None:      # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clique.emit(self._clip)
+        super().mousePressEvent(event)
+
+
+class _ClipsTab(QWidget):
+    """Onglet Clips — ce que la communauté a gardé du plateau.
+
+    Les moments forts y remontent d'eux-mêmes : un clip est fait par quelqu'un
+    qui regardait, et vu par d'autres avant de l'être par nous. C'est le seul
+    endroit du panel où l'information vient des spectateurs.
+
+    La fenêtre est de sept jours, comme sur Twitch : sans elle, la catégorie
+    remonte les clips des éditions précédentes.
+    """
+
+    clip_choisi = pyqtSignal(object)     # le Clip à lire
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._clips: list = []
+        self._chargement = False
+        self._build()
+
+    def _build(self) -> None:
+        from core import twitch_clips
+
+        # Le fond est posé ici, comme les autres pages : sans lui la page
+        # emprunte celui du système, et un titre blanc sur blanc disparaît.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(_SS_FOND_PAGE)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(24, 16, 24, 16)
+        v.setSpacing(10)
+
+        entete = QHBoxLayout()
+        entete.setSpacing(12)
+        self._compte = QLabel("")
+        self._compte.setFont(QFont(_FONT_SEGOE, 10))
+        self._compte.setStyleSheet(_SS_MUTED)
+        entete.addWidget(self._compte)
+        entete.addStretch(1)
+
+        # Le filtre par chaîne se remplit avec CE QUI A ÉTÉ CLIPPÉ, pas avec
+        # les trois cents participants : une liste où la plupart des entrées ne
+        # rendent rien ne se parcourt pas.
+        self._chaine = QComboBox()
+        self._chaine.setFixedHeight(28)
+        self._chaine.setMinimumWidth(180)
+        self._chaine.currentIndexChanged.connect(self._reafficher)
+        entete.addWidget(self._chaine)
+
+        self._tri = QComboBox()
+        self._tri.setFixedHeight(28)
+        for cle, libelle in twitch_clips.TRIS.items():
+            self._tri.addItem(libelle, cle)
+        self._tri.currentIndexChanged.connect(self._reafficher)
+        entete.addWidget(self._tri)
+
+        self._bouton = QPushButton("Rafraîchir")
+        self._bouton.setFixedHeight(28)
+        self._bouton.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._bouton.clicked.connect(self.rafraichir)
+        entete.addWidget(self._bouton)
+        v.addLayout(entete)
+
+        zone = QScrollArea()
+        zone.setWidgetResizable(True)
+        zone.setFrameShape(QFrame.Shape.NoFrame)
+        zone.setStyleSheet(_FOND_TRANSPARENT)
+        zone.viewport().setStyleSheet(_FOND_TRANSPARENT)
+        self._contenu = QWidget()
+        self._contenu.setStyleSheet(_SS_FOND_PAGE)
+        self._liste = QVBoxLayout(self._contenu)
+        self._liste.setContentsMargins(0, 0, 0, 0)
+        self._liste.setSpacing(0)
+        zone.setWidget(self._contenu)
+        v.addWidget(zone, stretch=1)
+
+        self._vide = QLabel("Aucun clip pour l'instant.")
+        self._vide.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._vide.setFont(QFont(_FONT_SEGOE, 12))
+        self._vide.setStyleSheet(_SS_GRIS_EFFACE)
+        v.addWidget(self._vide)
+
+    # -- chargement -----------------------------------------------------------
+
+    def showEvent(self, event) -> None:                    # type: ignore[override]
+        """Charge à la PREMIÈRE ouverture, pas au lancement du panel.
+
+        Une requête que personne n'a demandée coûte une seconde de démarrage à
+        qui n'ouvrira jamais cet onglet — et la plupart ne l'ouvriront pas.
+        """
+        super().showEvent(event)
+        if not self._clips and not self._chargement:
+            self.rafraichir()
+
+    def rafraichir(self) -> None:
+        """Recharge la liste. Une passe à la fois.
+
+        Sans ce garde, cliquer deux fois lançait deux requêtes concurrentes
+        dont la plus lente écrasait la plus récente.
+        """
+        if self._chargement:
+            return
+        self._chargement = True
+        self._bouton.setEnabled(False)
+        self._bouton.setText("Chargement…")
+        threading.Thread(target=self._charger, daemon=True).start()
+
+    def _charger(self) -> None:
+        from core import twitch_clips
+
+        try:
+            clips = _run_coro(twitch_clips.lister())
+        except Exception:                                  # noqa: BLE001
+            logger.exception("Clips : chargement impossible")
+            clips = []
+        # Le fil de Qt est le seul à toucher aux widgets : on repasse par lui.
+        QTimer.singleShot(0, lambda: self._recevoir(clips))
+
+    def _recevoir(self, clips: list) -> None:
+        self._chargement = False
+        self._bouton.setEnabled(True)
+        self._bouton.setText("Rafraîchir")
+        if clips:
+            self._clips = clips
+            self._remplir_les_chaines()
+        self._reafficher()
+
+    def _remplir_les_chaines(self) -> None:
+        """Les chaînes réellement présentes, par ordre de clips décroissant.
+
+        Le choix courant est retenu : rafraîchir la liste ne doit pas ramener
+        d'autorité sur « toutes les chaînes » quelqu'un qui en suivait une.
+        """
+        courant = self._chaine.currentData()
+        comptes: dict[str, int] = {}
+        libelles: dict[str, str] = {}
+        for clip in self._clips:
+            comptes[clip.login] = comptes.get(clip.login, 0) + 1
+            libelles[clip.login] = clip.chaine or clip.login
+        self._chaine.blockSignals(True)
+        self._chaine.clear()
+        self._chaine.addItem(f"Toutes les chaînes ({len(comptes)})", "")
+        for login, combien in sorted(comptes.items(),
+                                     key=lambda kv: (-kv[1], kv[0])):
+            self._chaine.addItem(f"{libelles[login]}  ({combien})", login)
+        rang = self._chaine.findData(courant) if courant else 0
+        self._chaine.setCurrentIndex(max(0, rang))
+        self._chaine.blockSignals(False)
+
+    # -- affichage ------------------------------------------------------------
+
+    def _reafficher(self) -> None:
+        from core import twitch_clips
+
+        _clear_layout(self._liste)
+        cle = self._tri.currentData() or "vues"
+        login = str(self._chaine.currentData() or "")
+        retenus = [c for c in self._clips if not login or c.login == login]
+        clips = twitch_clips.trier(retenus, str(cle))
+        self._vide.setVisible(not clips)
+        self._vide.setText(
+            "Aucun clip pour cette chaîne." if login and self._clips
+            else "Aucun clip pour l'instant.")
+        self._compte.setText(
+            f"{len(clips)} clips · 7 derniers jours" if clips else "")
+        for clip in clips:
+            ligne = _LigneClip(clip)
+            ligne.clique.connect(self.clip_choisi)
+            self._liste.addWidget(ligne)
+            ligne.show()
+        self._liste.addStretch()
+
+
+class _LecteurClip(QDialog):
+    """Le clip choisi, lu par le lecteur de ZLink.
+
+    Pas l'embed de Twitch : il vérifie le domaine de la page qui l'accueille,
+    ce qu'une application de bureau n'a pas. L'API rend l'adresse du MP4 et un
+    jeton signé — de quoi le donner à mpv, qui joue déjà tout le reste.
+    """
+
+    def __init__(self, clip, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._clip = clip
+        self.setWindowTitle(f"{clip.chaine} — {clip.titre}")
+        self.resize(960, 600)
+        self.setStyleSheet("background: #0a0a0a;")
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        from widgets.mpv_widget import MpvWidget
+        self._lecteur = MpvWidget(self)
+        v.addWidget(self._lecteur, stretch=1)
+
+        bas = QHBoxLayout()
+        bas.setContentsMargins(12, 8, 12, 10)
+        titre = QLabel(clip.titre)
+        titre.setTextFormat(Qt.TextFormat.PlainText)
+        titre.setFont(_bold_font(_FONT_SEGOE, 11))
+        titre.setStyleSheet(_SS_WHITE)
+        bas.addWidget(titre, stretch=1)
+        ouvrir = QPushButton("Ouvrir sur Twitch")
+        ouvrir.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        ouvrir.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(clip.url)))
+        bas.addWidget(ouvrir)
+        v.addLayout(bas)
+
+        self._etat = QLabel("Chargement du clip…")
+        self._etat.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._etat.setStyleSheet(_SS_MUTED + "background: transparent;")
+        v.addWidget(self._etat)
+
+        threading.Thread(target=self._resoudre, daemon=True).start()
+
+    def _resoudre(self) -> None:
+        from core import twitch_clips
+
+        try:
+            url = _run_coro(twitch_clips.url_de_lecture(self._clip.slug))
+        except Exception:                                  # noqa: BLE001
+            logger.exception("Clips : lecture impossible")
+            url = ""
+        QTimer.singleShot(0, lambda: self._lire(url))
+
+    def _lire(self, url: str) -> None:
+        if not url:
+            self._etat.setText(
+                "Ce clip ne se laisse pas lire ici — « Ouvrir sur Twitch ».")
+            return
+        self._etat.hide()
+        self._lecteur.play(url)
+
+    def closeEvent(self, event) -> None:                   # type: ignore[override]
+        # Sans cela, mpv continue de lire une fenêtre fermée : on entend le
+        # clip sans plus rien voir.
+        try:
+            self._lecteur.stop()
+        except Exception:                                  # noqa: BLE001
+            logger.debug("Clips : arrêt du lecteur")
+        super().closeEvent(event)
+
+
 class _StatsTab(QWidget):
     """Onglet Stats — chiffres clés, courbes, et un seul classement lisible.
 
@@ -6984,13 +7312,15 @@ class PanelWindow(QMainWindow):
         self._streamers_tab: _StreamersTab
 
         self._accueil_refresh_pending: bool = False
+        self._lecteurs: list = []          # fenêtres de clips ouvertes
         self._splash: _SplashOverlay | None = None
         self._first_data_received: bool = False
 
         self._build()
 
         # Palette de commandes (Ctrl+K) — superposée au widget central.
-        names = ["Accueil", "Programme", "Stats", "Goals", "Streamers", "Mixer"]
+        names = ["Accueil", "Programme", "Stats", "Goals", "Clips",
+                 "Streamers", "Mixer"]
         if self._show_grid_tab:
             names.append("Grille")
         self._palette = _CommandPalette(self.centralWidget(), names)
@@ -7003,6 +7333,20 @@ class PanelWindow(QMainWindow):
             self._move_to_screen(screen)
             self._splash = _SplashOverlay(self)
             self._splash.show()
+
+    def _ouvrir_le_clip(self, clip) -> None:
+        """Ouvre le clip dans sa propre fenêtre.
+
+        Gardée dans une liste : sans référence, Python la ramasserait et la
+        fenêtre se refermerait aussitôt. Elle s'en retire d'elle-même à la
+        fermeture, sinon elles s'accumuleraient toute la soirée.
+        """
+        lecteur = _LecteurClip(clip, self)
+        self._lecteurs.append(lecteur)
+        lecteur.finished.connect(
+            lambda _r, w=lecteur: self._lecteurs.remove(w)
+            if w in self._lecteurs else None)
+        lecteur.show()
 
     def _on_palette_action(self, cle: str) -> None:
         """Exécute une action choisie dans la palette."""
@@ -7164,7 +7508,8 @@ class PanelWindow(QMainWindow):
         bl.setContentsMargins(16, 0, 16, 0)
         bl.setSpacing(0)
 
-        names = ["Accueil", "Programme", "Stats", "Goals", "Streamers", "Mixer"]
+        names = ["Accueil", "Programme", "Stats", "Goals", "Clips",
+                 "Streamers", "Mixer"]
         if self._show_grid_tab:
             names.append("Grille")
         for n in names:
@@ -7204,6 +7549,13 @@ class PanelWindow(QMainWindow):
 
         self._goals_tab = _GoalsTab()
         self._stack.addWidget(self._goals_tab)
+
+        # L'ordre de la pile suit celui des boutons : une page insérée d'un
+        # seul côté décale toutes les suivantes, et chaque onglet ouvre alors
+        # celui de son voisin.
+        self._clips_tab = _ClipsTab()
+        self._clips_tab.clip_choisi.connect(self._ouvrir_le_clip)
+        self._stack.addWidget(self._clips_tab)
 
         self._streamers_tab = _StreamersTab()
         self._streamers_tab.grid_selection_changed.connect(self.grid_selection_changed)

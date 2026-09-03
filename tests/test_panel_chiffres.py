@@ -2396,3 +2396,128 @@ def test_le_switch_rejoue_le_dernier_historique(stats, comparaison_active):
     avant = _charge(stats)["ld"]
     stats._toute_la_course.setChecked(True)      # le signal suffit
     assert _charge(stats)["ld"] != avant
+
+
+# ── Onglet Clips ────────────────────────────────────────────────────────────
+
+def _clip(slug="a", titre="Un moment", vues=100, cree=300.0, duree=30.0,
+          login="ponce", chaine="Ponce"):
+    from core.twitch_clips import Clip
+
+    return Clip(slug=slug, titre=titre, vues=vues, cree_le=cree,
+                duree_s=duree, login=login, chaine=chaine, auteur="",
+                vignette="")
+
+
+@pytest.fixture
+def clips(qtbot):
+    """L'onglet garni à la main, sans réseau."""
+    def monter(*liste):
+        onglet = panel._ClipsTab()
+        qtbot.addWidget(onglet)
+        onglet._clips = list(liste)
+        onglet._remplir_les_chaines()
+        onglet._reafficher()
+        return onglet
+    return monter
+
+
+def _lignes_de(onglet):
+    return onglet.findChildren(panel._LigneClip)
+
+
+def test_l_onglet_liste_les_clips(clips):
+    onglet = clips(_clip("a"), _clip("b", vues=50))
+    assert len(_lignes_de(onglet)) == 2
+    assert "2 clips" in onglet._compte.text()
+    assert "7 derniers jours" in onglet._compte.text()
+
+
+def test_le_filtre_par_chaine_ne_propose_que_les_chaines_clippees(clips):
+    """Trois cents participants dont la plupart n'ont rien : une liste où les
+    entrées ne rendent rien ne se parcourt pas."""
+    onglet = clips(_clip("a", login="ponce", chaine="Ponce"),
+                   _clip("b", login="ponce", chaine="Ponce"),
+                   _clip("c", login="zerator", chaine="ZeratoR"))
+    libelles = [onglet._chaine.itemText(i) for i in range(onglet._chaine.count())]
+    assert libelles[0].startswith("Toutes les chaînes (2)")
+    # La plus clippée d'abord, avec son compte.
+    assert "Ponce" in libelles[1] and "(2)" in libelles[1]
+    assert "ZeratoR" in libelles[2]
+
+
+def test_le_filtre_par_chaine_restreint_la_liste(clips):
+    onglet = clips(_clip("a", login="ponce"), _clip("b", login="ponce"),
+                   _clip("c", login="zerator", chaine="ZeratoR"))
+    onglet._chaine.setCurrentIndex(onglet._chaine.findData("zerator"))
+    assert len(_lignes_de(onglet)) == 1
+
+
+def test_le_filtre_est_retenu_apres_un_rafraichissement(clips):
+    """Rafraîchir ne doit pas ramener d'autorité sur « toutes les chaînes »."""
+    onglet = clips(_clip("a", login="ponce"), _clip("b", login="zerator",
+                                                    chaine="ZeratoR"))
+    onglet._chaine.setCurrentIndex(onglet._chaine.findData("zerator"))
+    onglet._recevoir([_clip("c", login="ponce"),
+                      _clip("d", login="zerator", chaine="ZeratoR")])
+    assert onglet._chaine.currentData() == "zerator"
+
+
+def test_le_tri_reordonne_sans_recharger(clips):
+    """Les quatre tris se font sur la liste déjà chargée : la redemander pour
+    la retrier serait une requête pour rien."""
+    onglet = clips(_clip("vieux", vues=90, cree=100.0),
+                   _clip("neuf", vues=10, cree=900.0))
+    assert _lignes_de(onglet)[0]._clip.slug == "vieux"
+    onglet._tri.setCurrentIndex(
+        [onglet._tri.itemData(i) for i in range(onglet._tri.count())].index("recents"))
+    assert _lignes_de(onglet)[0]._clip.slug == "neuf"
+
+
+def test_cliquer_un_clip_le_signale(clips, qtbot):
+    onglet = clips(_clip("a"))
+    with qtbot.waitSignal(onglet.clip_choisi) as attrape:
+        _lignes_de(onglet)[0].clique.emit(_lignes_de(onglet)[0]._clip)
+    assert attrape.args[0].slug == "a"
+
+
+def test_une_chaine_sans_clip_le_dit(clips):
+    """Le message change avec le filtre : « aucun clip » tout court laisserait
+    croire que le chargement a échoué."""
+    onglet = clips(_clip("a", login="ponce"))
+    onglet._clips.append(_clip("b", login="zerator", chaine="ZeratoR"))
+    onglet._remplir_les_chaines()
+    onglet._chaine.setCurrentIndex(onglet._chaine.findData("zerator"))
+    onglet._clips = [_clip("a", login="ponce")]
+    onglet._reafficher()
+    # `isVisible` serait faux sur un onglet jamais affiché : c'est le masquage
+    # explicite qu'on vérifie, pas la présence à l'écran.
+    assert not onglet._vide.isHidden()
+    assert "cette chaîne" in onglet._vide.text()
+
+
+def test_deux_rafraichissements_ne_se_chevauchent_pas(clips, monkeypatch):
+    """La plus lente des deux requêtes écrasait la plus récente."""
+    onglet = clips()
+    lances = []
+    monkeypatch.setattr(panel.threading, "Thread",
+                        lambda *a, **k: type("T", (), {
+                            "start": lambda _s: lances.append(1)})())
+    onglet.rafraichir()
+    onglet.rafraichir()
+    assert len(lances) == 1
+
+
+@pytest.mark.parametrize("secondes,attendu", [
+    (0, "0:00"), (9, "0:09"), (59, "0:59"), (65, "1:05"), (125, "2:05"),
+])
+def test_la_duree_se_lit_en_minutes(secondes, attendu):
+    assert panel._duree_courte(secondes) == attendu
+
+
+@pytest.mark.parametrize("ecart,attendu", [
+    (120, "il y a 2 min"), (7200, "il y a 2 h"), (172800, "il y a 2 j"),
+])
+def test_la_fraicheur_prime_sur_la_date(ecart, attendu):
+    """La date exacte d'un clip n'apprend rien ; sa fraîcheur si."""
+    assert panel._il_y_a(1000.0, maintenant=1000.0 + ecart) == attendu
