@@ -135,16 +135,35 @@ def test_format_euros_arrondit_et_espace_insecable():
     ("lan", "LAN"),
     ("remote_ankama", "Ankama"),
     ("remote_villa", "Villa"),
+    ("remote_zbase", "ZBase"),
     ("remote", "Online"),
     ("", ""),
 ])
 def test_lieux_connus(brut, attendu):
+    """Les cinq lieux relevés sur /participations en 2026.
+
+    ZBase manquait : ses quatre streamers tombaient dans le repli, qui les
+    affichait « Zbase » et remplissait le journal à chaque relève.
+    """
     assert _location_label(brut) == attendu
 
 
 def test_lieu_inconnu_reste_lisible():
     """Un site apparu en cours d'édition ne doit pas disparaître de l'affichage."""
     assert _location_label("remote_nouveau_site") == "Nouveau Site"
+
+
+def test_un_lieu_inconnu_ne_se_signale_qu_une_fois(caplog):
+    """Quatre streamers sur un site, une relève toutes les trente secondes :
+    la même ligne revenait onze mille fois par jour."""
+    from core import api_client
+
+    api_client._lieux_signales.discard("remote_bruyant")
+    with caplog.at_level("INFO", logger="core.api_client"):
+        for _ in range(5):
+            _location_label("remote_bruyant")
+    assert sum("remote_bruyant" in m for m in caplog.messages) == 1
+    api_client._lieux_signales.discard("remote_bruyant")
 
 
 # ── dates ────────────────────────────────────────────────────────────────────

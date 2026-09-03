@@ -78,7 +78,7 @@ class StreamerInfo:
     display: str
     online: bool
     game: str
-    location: str          # "LAN" | "Ankama" | "Villa" | "Online" | ""
+    location: str          # "LAN" | "Online" | un site satellite | ""
     viewers: int
     donation: float
     donation_formatted: str
@@ -96,7 +96,7 @@ class Participation:
     participation_id: str
     twitch_login: str
     display: str
-    location: str          # "LAN" | "Ankama" | "Villa" | "Online" | ""
+    location: str          # "LAN" | "Online" | un site satellite | ""
     live: bool
     game: str
     viewers: int
@@ -229,14 +229,26 @@ def _safe_login(raw: Any) -> str:
     return login
 
 
-# L'API distingue quatre lieux. Les écraser en « LAN / Online » perdait
-# l'information des sites satellites, que le panel ne pouvait donc plus filtrer.
+# Les lieux de l'édition, relevés sur /participations. Les écraser en
+# « LAN / Online » perdait les sites satellites, que le panel ne pouvait donc
+# plus filtrer.
+#
+# La liste change d'une année à l'autre : ZBase est apparue en 2026, aux côtés
+# d'Ankama et de la Villa. C'est pourquoi un lieu inconnu reste AFFICHÉ, tiré
+# de sa clé, plutôt qu'ignoré — une édition qui ouvre un site de plus ne doit
+# pas rendre ses streamers invisibles en attendant une mise à jour.
 _LOCATION_LABELS = {
     "lan":           "LAN",
     "remote_ankama": "Ankama",
     "remote_villa":  "Villa",
+    "remote_zbase":  "ZBase",
     "remote":        "Online",
 }
+
+#: Lieux inconnus déjà signalés. Le journal en portait une ligne par streamer
+#: ET par relève — quatre streamers à ZBase, toutes les trente secondes, font
+#: onze mille lignes par jour pour une seule chose à dire.
+_lieux_signales: set[str] = set()
 
 
 def _location_label(raw_loc: str) -> str:
@@ -247,7 +259,9 @@ def _location_label(raw_loc: str) -> str:
     if known:
         return known
     # Un nouveau site apparu en cours d'édition reste lisible plutôt qu'ignoré.
-    logger.info("Lieu de participation inconnu : %r", raw_loc[:40])
+    if raw_loc not in _lieux_signales:
+        _lieux_signales.add(raw_loc)
+        logger.info("Lieu de participation inconnu : %r", raw_loc[:40])
     return raw_loc.replace("remote_", "").replace("_", " ").title()
 
 
