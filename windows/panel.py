@@ -1797,8 +1797,13 @@ class _AccueilGoalsWidget(QWidget):
         # Le seuil à 90 % laissait la colonne vide l'essentiel du temps, sur
         # 40 % de la largeur. On montre les plus proches quel que soit leur
         # avancement : c'est ce qu'on veut voir en direct.
+        # `atteint` et non `accomplished` : un objectif dont la somme est
+        # réunie n'est plus PROCHE. Trié sur -pct, il se classait premier et
+        # ne bougeait plus — la première ligne affichait « 100% » en
+        # permanence, sans montant restant, pendant que les vrais prochains
+        # objectifs attendaient derrière.
         pending = sorted(
-            [g for g in goals if not g.accomplished],
+            [g for g in goals if not g.atteint],
             key=lambda g: -g.pct,
         )
         to_show = pending[:self._MAX_SHOWN]
@@ -3678,7 +3683,7 @@ class _EnteteStreamer(QFrame):
         from widgets.bigscreen_widget import load_avatar_into_label as _load_av
         _load_av(self._avatar, s.twitch_login, s.display, 44, s.profile_url)
         self._cagnotte.setText(_fmt_euros(s.donation))
-        faits = sum(1 for g in goals if g.accomplished)
+        faits = sum(1 for g in goals if _objectif_atteint(g, s.donation))
         total = len(goals)
         self._sous_titre.setText(self._compte_objectifs(faits, total))
         self._barre.set_part(faits / total if total else 0.0)
@@ -3885,7 +3890,10 @@ class _GoalsTab(QWidget):
             if s is None or (portee is not None and login not in portee):
                 continue
             for g in goals:
-                if g.accomplished or g.amount <= 0:
+                # Financé = arrivé. Sans cette condition, un objectif dépassé
+                # depuis longtemps trônait en tête à 100 % et repoussait ceux
+                # qu'on aurait pu accompagner.
+                if _objectif_atteint(g, s.donation) or g.amount <= 0:
                     continue
                 lignes.append((_part_objectif(s.donation, g.amount), s, g))
         if not lignes:
@@ -5847,7 +5855,7 @@ def _sens_tendance_euros(delta: float | None) -> str:
     return "hausse" if delta >= 1.0 else "stable"
 
 
-def _objectif_atteint(but: object) -> bool:
+def _objectif_atteint(but: object, cagnotte: float | None = None) -> bool:
     """Un objectif de dons est-il tombé.
 
     `DonationGoal` — ce que `DataManager` met dans le cache — expose
@@ -5857,11 +5865,22 @@ def _objectif_atteint(but: object) -> bool:
 
     `done` reste accepté en second : CLAUDE.md documente la compatibilité
     historique « accomplished ?? done » des données communautaires.
+
+    Le drapeau ne suffit pas. Le streamer le coche quand il veut, et parfois
+    jamais : une chaîne à seize mille euros annonçait « 0 objectif atteint sur
+    17 » pendant que chacune des dix-sept barres affichait 100,0 %. La
+    cagnotte, quand on la connaît, tranche donc aussi — un objectif dont la
+    cible est dépassée est atteint, coché ou non.
     """
     atteint = getattr(but, "accomplished", None)
     if atteint is None:
         atteint = getattr(but, "done", False)
-    return bool(atteint)
+    if bool(atteint):
+        return True
+    if cagnotte is None:
+        return False
+    cible = float(getattr(but, "amount", 0.0) or 0.0)
+    return cible > 0 and cagnotte >= cible
 
 
 def _duree_de(s: StreamerInfo) -> float:
@@ -5887,7 +5906,7 @@ def _part_objectifs(cache: dict, s: StreamerInfo) -> float:
     buts = cache.get(s.twitch_login) or []
     if not buts:
         return -1.0
-    return sum(1 for b in buts if _objectif_atteint(b)) / len(buts)
+    return sum(1 for b in buts if _objectif_atteint(b, s.donation)) / len(buts)
 
 
 #: Rang de chaque colonne du classement. Nommés : six index nus dans le

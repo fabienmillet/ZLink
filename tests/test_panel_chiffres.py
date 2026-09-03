@@ -2273,3 +2273,30 @@ def test_un_objectif_a_quelques_euros_ne_s_annonce_pas_termine():
     """Il affichait « 100% » et paraissait bloqué ; il manquait quatre euros."""
     texte = panel._distance_objectif(_prochain(1000.0, 99.6))
     assert "99%" in texte and "4 €" in texte
+
+
+def test_un_objectif_finance_sort_des_prochains_objectifs(qtbot):
+    """Trié sur -pct, il se classait premier et n'en sortait jamais."""
+    w = panel._AccueilGoalsWidget()
+    qtbot.addWidget(w)
+    w.update_goals([
+        _prochain(100.0, 100.0),      # financé : arrivé, pas « prochain »
+        _prochain(1000.0, 94.0),
+        _prochain(1000.0, 91.0),
+    ])
+    lignes = w.findChildren(panel._AccueilGoalItem)
+    assert len(lignes) == 2
+    assert all("100%" not in t for ligne in lignes for t in _textes(ligne))
+
+
+def test_le_compte_d_objectifs_suit_la_cagnotte(qtbot):
+    """« 0 atteint sur 17 » alors que chaque barre affichait 100,0 %."""
+    class _But:
+        def __init__(self, montant):
+            self.name = "objectif"
+            self.amount = montant
+            self.accomplished = False
+
+    buts = [_But(m) for m in (101.0, 306.0, 500.0, 20_000.0)]
+    faits = sum(1 for b in buts if panel._objectif_atteint(b, 16_140.0))
+    assert faits == 3

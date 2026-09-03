@@ -1096,12 +1096,18 @@ def goal(login: str, pct: float) -> GoalWithStreamer:
 
 @pytest.mark.parametrize("pourcentages,retenus", [
     ([50.0, 89.9], 0),                       # trop loin du but
-    ([90.0, 95.0, 100.0], 3),                # bornes incluses
+    ([90.0, 95.0], 2),                       # borne basse incluse
+    ([90.0, 95.0, 100.0], 2),                # 100 % n'est plus « proche »
     ([100.1, 120.0], 0),                     # déjà dépassés
     ([91.0, 92.0, 93.0, 94.0, 95.0], 4),     # plafonné à _MAX_GOALS
 ])
 def test_seuls_les_objectifs_proches_sont_montres(qtbot, cache, envois,
                                                   pourcentages, retenus):
+    """Un objectif dont la somme est réunie n'est pas « proche », il est arrivé.
+
+    Il se classait premier — tri sur -pct — et n'en sortait jamais : la carte
+    montrait « 100% » en tête pendant que les vrais prochains attendaient.
+    """
     carte = bs._GoalsCard()
     qtbot.addWidget(carte)
     carte.update_goals([goal(f"s{i}", p) for i, p in enumerate(pourcentages)])

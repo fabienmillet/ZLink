@@ -400,3 +400,26 @@ def test_cent_pour_cent_est_reserve_a_ce_qui_est_atteint(cible, pct, attendu):
 
 def test_un_objectif_reellement_atteint_affiche_bien_cent():
     assert _objectif(500.0, 100.0).pourcent_affiche == 100
+
+
+# ── « atteint » : la somme y est, cochée ou non ─────────────────────────────
+
+def test_un_objectif_finance_est_atteint_meme_sans_coche():
+    """Une chaîne à 16 140 € annonçait « 0 objectif atteint sur 17 ».
+
+    `accomplished` dit que le streamer a FAIT le défi, et il le coche quand il
+    veut — parfois jamais. Les dix-sept cibles étaient pourtant dépassées.
+    """
+    assert _objectif(1000.0, 100.0).atteint
+
+
+def test_un_objectif_coche_est_atteint_meme_de_loin():
+    """L'inverse vaut aussi : le streamer peut l'accomplir avant la somme."""
+    from core.api_client import GoalWithStreamer
+
+    g = GoalWithStreamer("a", "A", "n", 1000.0, accomplished=True, pct=12.0)
+    assert g.atteint
+
+
+def test_un_objectif_a_quelques_euros_n_est_pas_atteint():
+    assert not _objectif(1000.0, 99.6).atteint

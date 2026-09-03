@@ -187,6 +187,23 @@ class GoalWithStreamer:
             return 100
         return min(99, int(self.pct))
 
+    @property
+    def atteint(self) -> bool:
+        """La somme est-elle réunie — que le streamer l'ait coché ou non.
+
+        `accomplished` dit que le streamer a FAIT le défi, et il le coche quand
+        il veut : une chaîne à seize mille euros affichait ses dix-sept
+        objectifs comme « 0 atteint sur 17 », alors que chacune de leurs cibles
+        était dépassée depuis longtemps.
+
+        Ce sont deux états distincts et les deux servent : celui-ci pour savoir
+        si la cagnotte y est, `accomplished` pour savoir s'il reste quelque
+        chose à faire. Un objectif financé n'est plus PROCHE — il est arrivé,
+        et n'a rien à faire dans une liste de prochains objectifs, où il se
+        classait premier et ne bougeait plus.
+        """
+        return self.accomplished or self.reste <= 0
+
 
 # ---------------------------------------------------------------------------
 # Helpers

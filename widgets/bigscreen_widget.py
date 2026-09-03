@@ -1299,7 +1299,10 @@ class _GoalsCard(QFrame):
             if item.widget():
                 item.widget().deleteLater()
 
-        shown = [g for g in goals if 90.0 <= g.pct <= 100.0][: self._MAX_GOALS]
+        # `atteint` exclut ceux dont la somme est déjà réunie : ils affichaient
+        # « 100% » en tête de liste sans jamais en sortir.
+        shown = [g for g in goals
+                 if g.pct >= 90.0 and not g.atteint][: self._MAX_GOALS]
         if not shown:
             self.hide()
             return
