@@ -528,3 +528,21 @@ def test_un_watcher_qui_refuse_de_demarrer_est_oublie(grille_avec_watcher):
     fenetre = grille_avec_watcher("{}", classe=_Cassee)
     assert fenetre._hype_watcher is None
     fenetre.refresh_hype_cells()   # ne doit rien lever
+
+
+def test_la_fenetre_ne_fait_plus_clignoter_elle_meme(fenetre, monkeypatch):
+    """Elle relaie, elle ne décide pas.
+
+    Le clignotement se faisait ici, avant tout contrôle : la cellule s'allumait
+    pour n'importe quel raid, y compris venu d'une chaîne étrangère au ZEvent,
+    quand la bannière et le fil d'événements ne retenaient que ceux entre
+    participants. La fenêtre ne connaît pas cette liste ; main.py, si.
+    """
+    from core import alerts
+    monkeypatch.setattr(alerts, "enabled", lambda famille: True)
+    _peupler(fenetre, ["cible"])
+    pulses: list[tuple] = []
+    monkeypatch.setattr(fenetre.grid, "pulse_cell",
+                        lambda *a, **k: pulses.append(a))
+    fenetre._on_raid("source", "cible", 4200)
+    assert pulses == []

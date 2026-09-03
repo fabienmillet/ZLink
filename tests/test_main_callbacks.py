@@ -567,3 +567,74 @@ def test_hors_mode_un_ecran_il_n_y_a_pas_de_coordinateur(monkeypatch):
     """À deux ou trois écrans, chaque vue a son moniteur : rien à coordonner."""
     resultat = _creer_en_mode(monkeypatch, main.DisplayMode.DUAL)
     assert resultat[3] is None
+
+
+# ── raids : un seul filtre pour la cellule, la bannière et le fil ───────────
+
+class _GrilleRaid(QObject):
+    """Une grille dont on observe les clignotements."""
+
+    raid_detected = pyqtSignal(str, str, int)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pulses: list[tuple] = []
+        self.grid = self
+
+    def pulse_cell(self, login, couleur="", secondes=0.0) -> None:
+        self.pulses.append((login, couleur))
+
+
+class _PleinEcranRaid(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.bannieres: list[tuple] = []
+
+    def show_raid(self, source, cible, viewers) -> None:
+        self.bannieres.append((source, cible, viewers))
+
+
+class _DonneesRaid:
+    def __init__(self, *participants) -> None:
+        self._p = {p.lower() for p in participants}
+
+    def participant_logins(self):
+        return self._p
+
+
+@pytest.fixture
+def raids_branches():
+    """`_brancher_raids` câblé sur des doublures."""
+    def brancher(*participants):
+        pieces = {"grille": _GrilleRaid(), "plein": _PleinEcranRaid(),
+                  "donnees": _DonneesRaid(*participants)}
+        main._brancher_raids(pieces["grille"], None, pieces["plein"],
+                             pieces["donnees"])
+        return pieces
+    return brancher
+
+
+def test_un_raid_venu_du_zevent_fait_clignoter_la_cellule(raids_branches):
+    p = raids_branches("zerator", "ponce")
+    p["grille"].raid_detected.emit("zerator", "ponce", 4200)
+    assert [c[0] for c in p["grille"].pulses] == ["ponce"]
+    assert p["plein"].bannieres == [("zerator", "ponce", 4200)]
+
+
+def test_un_raid_venu_d_ailleurs_ne_fait_rien_clignoter(raids_branches):
+    """Un ami, un petit streamer de passage : rien à voir avec l'événement.
+
+    La bannière et le fil l'écartaient déjà ; la cellule, non — elle
+    s'allumait pour des raids que rien d'autre n'annonçait.
+    """
+    p = raids_branches("zerator", "ponce")
+    p["grille"].raid_detected.emit("inconnu", "ponce", 4)
+    assert p["grille"].pulses == []
+    assert p["plein"].bannieres == []
+
+
+def test_la_cellule_et_la_banniere_partagent_leur_couleur(raids_branches):
+    """Un même événement ne change pas de teinte selon l'écran regardé."""
+    p = raids_branches("zerator", "ponce")
+    p["grille"].raid_detected.emit("zerator", "ponce", 4200)
+    assert p["grille"].pulses[0][1] == main._COULEUR_RAID

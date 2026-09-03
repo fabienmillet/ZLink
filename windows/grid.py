@@ -210,11 +210,20 @@ class GridWindow(QMainWindow):
         self.hype_alert.emit(login, label, score, color, excerpt)
 
     def _on_raid(self, source: str, cible: str, viewers: int) -> None:
-        """Un raid arrive sur une cellule : la faire réagir et prévenir."""
+        """Un raid arrive sur une cellule : prévenir, sans rien décider.
+
+        Le clignotement se faisait ICI, avant tout contrôle — et la cellule
+        s'allumait donc pour n'importe quel raid, y compris venu d'une chaîne
+        étrangère au ZEvent, quand la bannière et le fil d'événements ne
+        retenaient que ceux entre participants. Deux filtres pour un même
+        événement, dont un seul existait.
+
+        La fenêtre ne connaît pas la liste des participants ; main.py, si. On
+        relaie donc, et c'est là-bas que tout se décide — clignotement compris.
+        """
         from core import alerts
         if not alerts.enabled("raid"):
             return
-        self.grid.pulse_cell(cible, "#a855f7", 8.0)
         self.raid_detected.emit(source, cible, viewers)
 
     def set_clip_config(self, cfg: dict) -> None:

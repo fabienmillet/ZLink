@@ -473,6 +473,11 @@ def _brancher_grille_streams(
     grid.grid.replay_requested.connect(fullscreen.start_replay)
 
 
+#: Violet du raid. La même teinte que la bannière du plein écran : un même
+#: événement ne doit pas changer de couleur selon l'écran qu'on regarde.
+_COULEUR_RAID = "#a855f7"
+
+
 def _brancher_raids(grid, panel, fullscreen, data_manager) -> None:
     """Annonce des raids entre participants du ZEvent."""
     if grid is None:
@@ -488,6 +493,10 @@ def _brancher_raids(grid, panel, fullscreen, data_manager) -> None:
         if source.lower() not in data_manager.participant_logins():
             logger.debug("Raid ignoré : %s n'est pas un participant", source)
             return
+        # Le clignotement de la cellule PASSE PAR ICI, comme la bannière et le
+        # fil : posé dans la fenêtre de grille, il précédait ce filtre et
+        # s'allumait pour des raids que rien d'autre n'annonçait.
+        grid.grid.pulse_cell(cible, _COULEUR_RAID, 8.0)
         fullscreen.show_raid(source, cible, viewers)
         if panel is not None:
             panel.add_feed_event(
