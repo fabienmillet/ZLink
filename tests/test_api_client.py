@@ -360,3 +360,24 @@ def test_le_reste_ne_souffre_pas_du_flottant():
     somme affichée et l'objectif ne tombe pas.
     """
     assert _objectif(100.0, 93.0).reste == 7.0
+
+
+# ── Le pourcentage affiché ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("cible,pct,attendu", [
+    (1000.0, 99.6, 99),     # arrondi, il disait « 100% » — 4 € manquaient
+    (5000.0, 99.95, 99),    # 2,50 € manquaient
+    (300.0, 99.5, 99),      # 1,50 € manquait
+    (100.0, 93.0, 93),
+])
+def test_cent_pour_cent_est_reserve_a_ce_qui_est_atteint(cible, pct, attendu):
+    """Un pourcentage qui annonce la fin avant la fin est pire qu'imprécis.
+
+    Trois objectifs de suite affichaient « 100% » sans jamais tomber : ils
+    avaient l'air bloqués, et la seule chose qui manquait était le chiffre.
+    """
+    assert _objectif(cible, pct).pourcent_affiche == attendu
+
+
+def test_un_objectif_reellement_atteint_affiche_bien_cent():
+    assert _objectif(500.0, 100.0).pourcent_affiche == 100

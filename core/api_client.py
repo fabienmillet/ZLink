@@ -169,6 +169,24 @@ class GoalWithStreamer:
         # flottant, et une troncature en ferait « 6 € ».
         return max(0.0, round(self.amount_target * (1.0 - self.pct / 100.0), 2))
 
+    @property
+    def pourcent_affiche(self) -> int:
+        """Le pourcentage tel qu'on l'écrit. Jamais 100 tant qu'il manque un euro.
+
+        Il était écrit avec `{pct:.0f}`, qui ARRONDIT : un objectif à 99,6 %
+        s'affichait « 100% » alors qu'il restait quatre euros à réunir. Trois
+        objectifs de suite annonçaient « 100% » sans jamais tomber — ils
+        avaient l'air bloqués, et la seule chose qui manquait était le chiffre
+        exact.
+
+        Cent est donc réservé à ce qui est vraiment atteint ; en dessous, on
+        tronque plutôt que d'arrondir. Un pourcentage qui annonce la fin avant
+        la fin est pire qu'un pourcentage imprécis.
+        """
+        if self.reste <= 0:
+            return 100
+        return min(99, int(self.pct))
+
 
 # ---------------------------------------------------------------------------
 # Helpers

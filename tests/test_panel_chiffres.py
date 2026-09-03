@@ -2267,3 +2267,9 @@ def test_la_distance_n_annonce_jamais_moins_que_le_necessaire():
     l'objectif, sans quoi on donne et il ne se passe rien."""
     assert "7 €" in panel._distance_objectif(_prochain(100.0, 93.0))
     assert "7 €" in panel._distance_objectif(_prochain(1000.0, 99.35))
+
+
+def test_un_objectif_a_quelques_euros_ne_s_annonce_pas_termine():
+    """Il affichait « 100% » et paraissait bloqué ; il manquait quatre euros."""
+    texte = panel._distance_objectif(_prochain(1000.0, 99.6))
+    assert "99%" in texte and "4 €" in texte

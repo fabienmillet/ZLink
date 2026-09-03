@@ -1314,8 +1314,8 @@ class _GoalsCard(QFrame):
 def _distance_objectif(g: "GoalWithStreamer") -> str:
     """« plus que 40 € · 96% », ou le seul pourcentage quand il ne manque rien."""
     if g.reste <= 0:
-        return f"{g.pct:.0f}%"
-    return f"plus que {_fmt_euros_compact(math.ceil(g.reste))} · {g.pct:.0f}%"
+        return f"{g.pourcent_affiche}%"
+    return f"plus que {_fmt_euros_compact(math.ceil(g.reste))} · {g.pourcent_affiche}%"
 
 
 class _GoalRow(QWidget):

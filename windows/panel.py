@@ -1679,8 +1679,8 @@ def _distance_objectif(g: GoalWithStreamer) -> str:
     ne fait que redire ce que la barre montre déjà.
     """
     if g.reste <= 0:
-        return f"{g.pct:.0f}%"
-    return f"plus que {_fmt_euros(math.ceil(g.reste))}  ·  {g.pct:.0f}%"
+        return f"{g.pourcent_affiche}%"
+    return f"plus que {_fmt_euros(math.ceil(g.reste))}  ·  {g.pourcent_affiche}%"
 
 
 class _AccueilGoalItem(QWidget):
@@ -2490,7 +2490,7 @@ class _AccueilTab(QWidget):
             g = max(pending, key=lambda x: x.pct)
             self._banner.set_ambient(
                 "goal", "goal",
-                f"{g.streamer_display} est à {g.pct:.0f} % de son objectif "
+                f"{g.streamer_display} est à {g.pourcent_affiche} % de son objectif "
                 f"« {g.goal_name} »")
         else:
             self._banner.set_ambient("goal", "goal", "")
