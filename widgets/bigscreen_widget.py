@@ -1292,12 +1292,28 @@ class _GoalsCard(QFrame):
 
         self.hide()
 
-    def update_goals(self, goals: "list[GoalWithStreamer]") -> None:
-        # Nettoyer
+    def _vider(self) -> None:
+        """Retire les lignes précédentes. Trois gestes, et l'ordre compte.
+
+        `deleteLater` ne fait que PROGRAMMER la destruction : jusqu'au prochain
+        tour de boucle, la ligne reste enfant de la carte et continue d'être
+        peinte, hors du layout qui vient de la lâcher. Les anciens noms
+        s'affichaient donc par-dessus les nouveaux.
+
+        `hide()` d'abord, ensuite seulement `setParent(None)` : un widget
+        détaché devient une fenêtre de premier niveau, et une fenêtre de
+        premier niveau VISIBLE est une fenêtre à l'écran.
+        """
         while self._content_vl.count():
             item = self._content_vl.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def update_goals(self, goals: "list[GoalWithStreamer]") -> None:
+        self._vider()
 
         # `atteint` exclut ceux dont la somme est déjà réunie : ils affichaient
         # « 100% » en tête de liste sans jamais en sortir.
@@ -1308,8 +1324,23 @@ class _GoalsCard(QFrame):
             return
 
         for g in shown:
-            self._content_vl.addWidget(_GoalRow(g))
+            ligne = _GoalRow(g)
+            self._content_vl.addWidget(ligne)
+            # MONTRÉE tout de suite. Un widget ajouté à un layout n'est affiché
+            # qu'au prochain passage de la boucle d'événements — et un layout
+            # IGNORE les widgets cachés quand il calcule sa taille. La carte se
+            # mesurait donc sur des lignes qu'elle ne comptait pas encore :
+            # trois d'entre elles tenaient dans 68 pixels au lieu de 329, et
+            # s'écrasaient les unes sur les autres, nom du streamer par-dessus
+            # nom de l'objectif.
+            ligne.show()
 
+        # Puis les deux mises en page, de l'extérieur vers l'intérieur : Qt ne
+        # refait la sienne qu'au traitement d'un événement POSTÉ, et
+        # `adjustSize` appelé dans la foulée lisait encore l'ancienne taille.
+        for mise_en_page in (self.layout(), self._content_vl):
+            if mise_en_page is not None:
+                mise_en_page.activate()
         self.adjustSize()
         self.show()
 

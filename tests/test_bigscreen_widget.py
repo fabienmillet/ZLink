@@ -1544,3 +1544,49 @@ def test_un_historique_absent_ne_fait_rien_tomber(qtbot):
     qtbot.addWidget(ecran)
     ecran.update_history(None)
     assert ecran._cagnotte_card._rythme_lbl.isHidden() is True
+
+
+# ── la carte se remesure quand on la reconstruit ────────────────────────────
+
+def test_la_carte_grandit_quand_on_lui_ajoute_des_lignes(qtbot, cache, envois):
+    """Elle se mesurait sur des lignes qu'elle ne comptait pas encore.
+
+    Un widget ajouté à un layout n'est affiché qu'au prochain passage de la
+    boucle d'événements — et un layout IGNORE les widgets cachés quand il
+    calcule sa taille. La carte gardait donc la hauteur d'une seule ligne pour
+    en afficher trois, qui s'écrasaient les unes sur les autres : nom du
+    streamer par-dessus nom de l'objectif.
+
+    La mesure doit être juste TOUT DE SUITE : `BigScreen.update_goals` replace
+    la carte dans la foulée, en la calant sur le coin bas-droit.
+    """
+    carte = bs._GoalsCard()
+    qtbot.addWidget(carte)
+    carte.update_goals([goal("un", 96.0)])
+    hauteur_une = carte.height()
+
+    carte.update_goals([goal(f"s{i}", 96.0 - i) for i in range(3)])
+    hauteur_trois = carte.height()
+    assert hauteur_trois > hauteur_une, (
+        f"trois lignes tenaient dans {hauteur_trois} px, une seule en "
+        f"prenait {hauteur_une}")
+
+    # Et la mesure synchrone doit être la BONNE : celle que Qt retiendra une
+    # fois la boucle passée.
+    qtbot.wait(50)
+    assert carte.height() == hauteur_trois
+
+
+def test_les_lignes_precedentes_disparaissent_vraiment(qtbot, cache, envois):
+    """`deleteLater` ne fait que PROGRAMMER la destruction.
+
+    Retirée du layout mais toujours enfant de la carte, l'ancienne ligne
+    continuait d'être peinte à sa place d'avant, sous les nouvelles.
+    """
+    carte = bs._GoalsCard()
+    qtbot.addWidget(carte)
+    carte.update_goals([goal(f"vieux{i}", 96.0 - i) for i in range(3)])
+    carte.update_goals([goal("neuf", 95.0)])
+    vivantes = [r for r in carte.findChildren(bs._GoalRow)
+                if r.parent() is not None]
+    assert len(vivantes) == 1
