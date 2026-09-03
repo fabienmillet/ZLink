@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import hashlib
 import os
 import logging
@@ -1670,6 +1671,18 @@ class _AccueilStreamersList(QWidget):
 
 # ── Accueil — goals proches d'atteinte ───────────────────────────────────────
 
+def _distance_objectif(g: GoalWithStreamer) -> str:
+    """« plus que 40 € · 96% », ou le seul pourcentage quand il ne manque rien.
+
+    L'ordre compte : le montant d'abord, le pourcentage ensuite. C'est le
+    montant qu'on lit en diagonale et sur lequel on peut agir ; le pourcentage
+    ne fait que redire ce que la barre montre déjà.
+    """
+    if g.reste <= 0:
+        return f"{g.pct:.0f}%"
+    return f"plus que {_fmt_euros(math.ceil(g.reste))}  ·  {g.pct:.0f}%"
+
+
 class _AccueilGoalItem(QWidget):
     """Item 52px — un goal proche de son seuil."""
 
@@ -1703,7 +1716,11 @@ class _AccueilGoalItem(QWidget):
         if goal_lbl.text() != g.goal_name:
             goal_lbl.setToolTip(_infobulle(g.goal_name))
         row1.addWidget(goal_lbl, stretch=1)
-        pct_lbl = QLabel(f"{g.pct:.0f}%")
+        # Le pourcentage seul ne dit pas s'il faut dix euros ou mille : ces
+        # objectifs-ci sont tous entre 90 et 100 %, et s'affichaient donc
+        # « 100% » les uns sous les autres, indiscernables. Ce qui les sépare,
+        # et ce sur quoi on peut agir, c'est ce qu'il reste à réunir.
+        pct_lbl = QLabel(_distance_objectif(g))
         pct_lbl.setFont(QFont(_FONT_SEGOE, 11))
         pct_lbl.setStyleSheet(_SS_VERT_NU)
         pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)

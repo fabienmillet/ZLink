@@ -152,6 +152,23 @@ class GoalWithStreamer:
     accomplished: bool
     pct: float   # min(100, streamer.donation / amount_target * 100)
 
+    @property
+    def reste(self) -> float:
+        """Ce qu'il manque encore pour que l'objectif tombe.
+
+        Déduit du pourcentage plutôt que porté par un champ de plus : `pct`
+        vaut `donation / amount_target * 100`, la cagnotte s'en retrouve donc
+        exactement. Un champ supplémentaire serait un second endroit où la
+        même vérité pourrait diverger, et il faudrait le renseigner sur chacun
+        des sites de construction — l'API, la maquette, et chaque test.
+
+        Un pourcentage plafonné à 100 rend zéro, ce qui est la bonne réponse :
+        l'objectif est atteint, il ne manque rien.
+        """
+        # Arrondi au centime : `100 × (1 − 93/100)` vaut 6,999999999999995 en
+        # flottant, et une troncature en ferait « 6 € ».
+        return max(0.0, round(self.amount_target * (1.0 - self.pct / 100.0), 2))
+
 
 # ---------------------------------------------------------------------------
 # Helpers

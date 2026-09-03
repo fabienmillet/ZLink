@@ -1125,7 +1125,19 @@ def test_une_ligne_d_objectif_affiche_son_avancement(qtbot, cache, envois):
     textes = [w.text() for w in ligne.findChildren(QLabel)]
     assert "zerator" in textes
     assert "objectif de zerator" in textes
-    assert "93%" in textes
+    # Le pourcentage ET ce qu'il reste : entre 90 et 100 %, c'est le montant
+    # qui distingue deux objectifs, le pourcentage les fait tous se ressembler.
+    distance = next(t for t in textes if "%" in t)
+    assert "93%" in distance
+    assert "7 €" in distance
+
+
+def test_un_objectif_deja_atteint_n_annonce_pas_de_reste(qtbot, cache, envois):
+    """« plus que 0 € » se lirait comme une somme encore à réunir."""
+    ligne = bs._GoalRow(goal("zerator", 100.0))
+    qtbot.addWidget(ligne)
+    textes = [w.text() for w in ligne.findChildren(QLabel)]
+    assert "100%" in textes
 
 
 def test_le_nom_d_objectif_est_du_texte_brut(qtbot, cache, envois):

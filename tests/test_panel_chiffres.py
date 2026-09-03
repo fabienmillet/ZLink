@@ -1914,15 +1914,16 @@ def test_la_coupe_prefere_lacher_un_mot_entier():
 
 def test_un_objectif_coupe_porte_son_texte_entier_en_infobulle(qtbot):
     """Sans l'infobulle, la coupe n'apprend rien de plus que rien du tout."""
-    class _G:
-        streamer_display = "Un streamer au nom interminable"
-        goal_name = "Je repeins tout le décor du studio en rose fluo"
-        pct = 42.0
-        streamer_login = "x"
-        amount = 100.0
-        accomplished = False
+    # Le vrai type, et non une doublure à la main : celle qui vivait ici
+    # portait « amount » quand le dataclass dit « amount_target », et n'a donc
+    # jamais vérifié que l'item sait lire un objectif réel.
+    objectif = panel.GoalWithStreamer(
+        streamer_login="x",
+        streamer_display="Un streamer au nom interminable",
+        goal_name="Je repeins tout le décor du studio en rose fluo",
+        amount_target=100.0, accomplished=False, pct=42.0)
 
-    item = panel._AccueilGoalItem(_G())
+    item = panel._AccueilGoalItem(objectif)
     qtbot.addWidget(item)
     bulles = [w.toolTip() for w in item.findChildren(QLabel) if w.toolTip()]
     assert any("interminable" in b for b in bulles)
@@ -2228,3 +2229,41 @@ def test_changer_de_portee_reconstruit_bien_la_liste(goals, _sans_portee):
 
 def test_les_quatre_portees_sont_proposees(goals):
     assert list(goals._boutons_vue) == ["streamer", "tous", "grille", "favoris"]
+
+
+# ── « Prochains objectifs » : la distance, pas seulement le pourcentage ─────
+
+def _prochain(cible: float, pct: float) -> panel.GoalWithStreamer:
+    return panel.GoalWithStreamer("a", "Alpha", "objectif", cible, False, pct)
+
+
+def test_un_objectif_proche_annonce_ce_qu_il_reste_a_reunir():
+    """Ces objectifs sont tous entre 90 et 100 % : affichés « 100% » les uns
+    sous les autres, ils étaient indiscernables. Ce qui les sépare — et ce sur
+    quoi on peut agir — c'est le montant qui manque."""
+    texte = panel._distance_objectif(_prochain(1000.0, 96.0))
+    assert "40" in texte and "€" in texte and "96%" in texte
+
+
+def test_le_montant_precede_le_pourcentage():
+    """C'est lui qu'on lit en diagonale ; la barre redit déjà le pourcentage."""
+    texte = panel._distance_objectif(_prochain(1000.0, 96.0))
+    assert texte.index("€") < texte.index("%")
+
+
+def test_un_objectif_atteint_n_annonce_pas_un_reste_nul():
+    """« plus que 0 € » se lit comme une somme à réunir."""
+    assert panel._distance_objectif(_prochain(500.0, 100.0)) == "100%"
+
+
+def test_la_ligne_affiche_bien_la_distance(qtbot):
+    item = panel._AccueilGoalItem(_prochain(1000.0, 96.0))
+    qtbot.addWidget(item)
+    assert any("plus que" in t for t in _textes(item))
+
+
+def test_la_distance_n_annonce_jamais_moins_que_le_necessaire():
+    """Arrondie au supérieur : la somme affichée doit suffire à faire tomber
+    l'objectif, sans quoi on donne et il ne se passe rien."""
+    assert "7 €" in panel._distance_objectif(_prochain(100.0, 93.0))
+    assert "7 €" in panel._distance_objectif(_prochain(1000.0, 99.35))

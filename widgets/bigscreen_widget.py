@@ -1311,6 +1311,13 @@ class _GoalsCard(QFrame):
         self.show()
 
 
+def _distance_objectif(g: "GoalWithStreamer") -> str:
+    """« plus que 40 € · 96% », ou le seul pourcentage quand il ne manque rien."""
+    if g.reste <= 0:
+        return f"{g.pct:.0f}%"
+    return f"plus que {_fmt_euros_compact(math.ceil(g.reste))} · {g.pct:.0f}%"
+
+
 class _GoalRow(QWidget):
     def __init__(self, g: "GoalWithStreamer", parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1372,7 +1379,9 @@ class _GoalRow(QWidget):
         bar.setFixedHeight(6)
         bar.set_pct(g.pct)
         bar_row.addWidget(bar, stretch=1)
-        pct_lbl = QLabel(f"{g.pct:.0f}%")
+        # Comme dans le panel : entre 90 et 100 %, c'est le montant restant qui
+        # distingue deux objectifs, pas le pourcentage.
+        pct_lbl = QLabel(_distance_objectif(g))
         pct_lbl.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
         pct_lbl.setStyleSheet(_TEXTE_VERT_SANS_BORDURE)
         pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)

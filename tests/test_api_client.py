@@ -316,3 +316,47 @@ def test_classer_entree_range_selon_le_role():
     _classer_entree({"streamer_id": "c"}, hosts, parts, {}, {}, {})
     assert hosts == ["a"]
     assert parts == ["b", "c"]
+
+
+# ── Ce qu'il reste à réunir pour qu'un objectif tombe ───────────────────────
+
+def _objectif(cible: float, pct: float) -> "GoalWithStreamer":
+    from core.api_client import GoalWithStreamer
+
+    return GoalWithStreamer(streamer_login="a", streamer_display="A",
+                            goal_name="n", amount_target=cible,
+                            accomplished=False, pct=pct)
+
+
+@pytest.mark.parametrize("cible,pct,attendu", [
+    (1000.0, 96.0, 40.0),
+    (200.0, 90.0, 20.0),
+    (800.0, 99.0, 8.0),
+])
+def test_le_reste_se_deduit_du_pourcentage(cible, pct, attendu):
+    """`pct` vaut donation / cible × 100 : la cagnotte s'en retrouve exactement.
+
+    Un champ de plus serait un second endroit où la même vérité pourrait
+    diverger, et il faudrait le renseigner sur chaque site de construction —
+    l'API, la maquette, et chaque test.
+    """
+    assert _objectif(cible, pct).reste == pytest.approx(attendu)
+
+
+def test_un_objectif_atteint_ne_manque_de_rien():
+    """Le pourcentage est plafonné à 100 : zéro est la bonne réponse."""
+    assert _objectif(500.0, 100.0).reste == 0.0
+
+
+def test_le_reste_ne_devient_jamais_negatif():
+    """Une cagnotte au-delà de la cible ne doit pas rendre « −40 € »."""
+    assert _objectif(500.0, 108.0).reste == 0.0
+
+
+def test_le_reste_ne_souffre_pas_du_flottant():
+    """« 100 × (1 − 93/100) » vaut 6,999999999999995 : tronqué, il dirait 6 €.
+
+    Annoncer moins que le nécessaire est le pire des arrondis : on donne la
+    somme affichée et l'objectif ne tombe pas.
+    """
+    assert _objectif(100.0, 93.0).reste == 7.0
