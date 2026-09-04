@@ -5769,22 +5769,23 @@ class _BarreDeCellule(QStyledItemDelegate):
                          self._couleur)
 
 
-class _CelluleNombre(QTableWidgetItem):
+class _CelluleNombre(QTableWidgetItem):  # NOSONAR — voir __lt__
     """Cellule qui se compare par son nombre, pas par son texte.
 
     « 11.9k » est inférieur à « 617 » dans l'ordre alphabétique.
+
+    Un seul `__lt__`, et c'est voulu : ce n'est pas un ordre partiel qu'il
+    faudrait compléter, mais la redéfinition de `operator<` de Qt. Le tri d'un
+    QTableWidget n'appelle que celui-là, depuis le C++ ; les trois autres
+    comparaisons ne seraient jamais invoquées, et `functools.total_ordering`
+    exigerait un `__eq__` qui changerait l'identité de l'item pour Qt.
     """
 
     def __init__(self, texte: str, valeur: float) -> None:
         super().__init__(texte)
         self.valeur = valeur
 
-    def __lt__(self, autre) -> bool:  # type: ignore[override] # NOSONAR
-        # NOSONAR — pas un ordre total à compléter, mais la redéfinition de
-        # `operator<` de Qt : c'est le seul point d'entrée que le tri d'un
-        # QTableWidget appelle, depuis le C++. Les trois autres comparaisons
-        # ne seraient jamais invoquées, et `total_ordering` exigerait un
-        # `__eq__` qui changerait l'identité de l'item pour Qt.
+    def __lt__(self, autre) -> bool:  # type: ignore[override]
         if isinstance(autre, _CelluleNombre):
             return self.valeur < autre.valeur
         return super().__lt__(autre)
