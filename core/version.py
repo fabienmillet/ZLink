@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 
 # Dépôt interrogé pour les mises à jour.
 GITHUB_OWNER = "fabienmillet"
