@@ -506,11 +506,14 @@ def _boitier_disparu(exc: BaseException) -> bool:
     Débrancher un Stream Deck n'est pas une panne : c'est un geste ordinaire,
     et il ne mérite ni pile d'appels ni acharnement.
     """
+    # Nom en minuscules : ce n'est pas une classe déclarée ici, c'est une
+    # variable qui en tient une — ou rien du tout quand la dépendance
+    # optionnelle est absente de la machine.
     try:
-        from StreamDeck.Transport.Transport import TransportError
+        from StreamDeck.Transport.Transport import TransportError as erreur_transport
     except ImportError:                     # pragma: no cover - dépend de l'install
-        TransportError = ()                 # type: ignore[assignment]
-    if TransportError and isinstance(exc, TransportError):
+        erreur_transport = None
+    if erreur_transport is not None and isinstance(exc, erreur_transport):
         return True
     return _DISPARU_MSG in str(exc).lower()
 

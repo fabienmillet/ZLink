@@ -84,7 +84,7 @@ def install() -> bool:
             _LIB.XSetErrorHandler(
                 ctypes.cast(_HANDLER_REF, ctypes.c_void_p)
             )
-        except Exception as exc:  # noqa: BLE001 — jamais bloquant
+        except Exception as exc:  # jamais bloquant  # noqa: BLE001
             logger.debug("Installation de la garde X11 échouée — %s", exc)
             return False
     return True

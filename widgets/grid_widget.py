@@ -1657,7 +1657,7 @@ class GridWidget(QWidget):
         try:
             path, _obtenue = recuperer(login, REPLAY_SECS, self._clip_dir,
                                        prefixe="clip")
-        except Exception:      # noqa: BLE001 — le repli reste disponible
+        except Exception:  # le repli reste disponible  # noqa: BLE001
             logger.exception("Clip de %s : reprise en pleine qualité impossible",
                              login)
         if not path:

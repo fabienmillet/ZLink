@@ -111,7 +111,7 @@ class RelaisCagnotte:
         try:
             r = await client.get(self.url, headers=self._entetes(),
                                  timeout=_TIMEOUT_S)
-        except Exception as exc:      # noqa: BLE001 — source d'appoint
+        except Exception as exc:  # source d'appoint  # noqa: BLE001
             logger.debug("Relais cagnotte injoignable — %s", exc)
             return self._dernier
 

@@ -398,7 +398,7 @@ class ResourceWatch(QObject):
         while not self._arret.wait(self._periode):
             try:
                 r = self.releve()
-            except Exception:      # noqa: BLE001 — une sonde ne doit rien casser
+            except Exception:  # une sonde ne doit rien casser  # noqa: BLE001
                 logger.exception("Relevé de ressources impossible")
                 continue
             ressource = self._detecteur.observer(r, time.monotonic())

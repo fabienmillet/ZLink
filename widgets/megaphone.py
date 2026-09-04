@@ -137,7 +137,7 @@ class Megaphone(QObject):
                 af=_FILTRE_NIVEAU,
             )
             self._player.play(self._url)
-        except Exception as exc:      # noqa: BLE001 — agrément, jamais fatal
+        except Exception as exc:  # agrément, jamais fatal  # noqa: BLE001
             logger.exception("Mégaphone : ouverture impossible")
             self._player = None
             self.echec.emit(f"Mégaphone indisponible — {exc}")
@@ -156,7 +156,7 @@ class Megaphone(QObject):
         self._annoncer_la_parole(False)
         try:
             lecteur.terminate()
-        except Exception as exc:      # noqa: BLE001 — on l'abandonne de toute façon
+        except Exception as exc:  # on l'abandonne de toute façon  # noqa: BLE001
             logger.debug("Mégaphone : arrêt imparfait — %s", exc)
         logger.info("Mégaphone éteint")
         self.etat_change.emit(False)
@@ -192,7 +192,7 @@ class Megaphone(QObject):
             if not brut or brut == "-inf":
                 return None
             return float(brut)
-        except Exception:      # noqa: BLE001 — indication d'agrément
+        except Exception:  # indication d'agrément  # noqa: BLE001
             return None
 
     def _annoncer_la_parole(self, parle: bool) -> None:
@@ -210,5 +210,5 @@ class Megaphone(QObject):
             return
         try:
             self._player.volume = self._volume
-        except Exception as exc:      # noqa: BLE001 — réglage d'agrément
+        except Exception as exc:  # réglage d'agrément  # noqa: BLE001
             logger.debug("Mégaphone : volume non appliqué — %s", exc)

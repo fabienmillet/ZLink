@@ -187,7 +187,7 @@ def recuperer(login: str, secondes: float,
         logger.info("Replay HD de %s : %.0f s en pleine qualité (%.1f Mo)",
                     login, obtenue, fichier.stat().st_size / 1e6)
         return str(fichier), obtenue
-    except Exception:      # noqa: BLE001 — aucune panne réseau ne doit remonter
+    except Exception:  # aucune panne réseau ne doit remonter  # noqa: BLE001
         logger.exception("Replay HD de %s impossible", login)
         return "", 0.0
 

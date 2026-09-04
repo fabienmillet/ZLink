@@ -92,7 +92,7 @@ def play(nom: str, force: bool = False) -> bool:
     try:
         eff.play()
         return True
-    except Exception as exc:      # noqa: BLE001 — un son n'interrompt rien
+    except Exception as exc:  # un son n'interrompt rien  # noqa: BLE001
         logger.debug("Son %s non joué — %s", nom, exc)
         return False
 

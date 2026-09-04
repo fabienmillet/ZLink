@@ -2913,7 +2913,7 @@ class FullscreenWindow(QMainWindow):
         try:
             meilleur = self._mpv.save_clip(
                 self._replay_secs_demandes(), tempfile.gettempdir())
-        except Exception:      # noqa: BLE001 — on retombe sur la grille
+        except Exception:  # on retombe sur la grille  # noqa: BLE001
             logger.exception("Replay : tampon du plein écran illisible")
             return fourni
         if not meilleur:
@@ -3073,7 +3073,7 @@ class FullscreenWindow(QMainWindow):
             chemin, obtenue = "", 0.0
             try:
                 chemin, obtenue = recuperer(login, secs)
-            except Exception:      # noqa: BLE001 — le repli reste disponible
+            except Exception:  # le repli reste disponible  # noqa: BLE001
                 logger.exception("Replay HD : reprise impossible")
             self._replay_hd_pret.emit(chemin or repli, float(obtenue or secs))
 

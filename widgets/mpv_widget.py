@@ -105,7 +105,7 @@ if not sys.platform.startswith("win"):
 
         _find_library_origine = _ctypes_util.find_library
 
-        def _find_library(nom: str):        # noqa: ANN202 - signature imposée
+        def _find_library(nom: str):  # signature imposée  # noqa: ANN202
             if nom == "mpv":
                 return _LIBMPV_EMBARQUEE
             return _find_library_origine(nom)
@@ -686,7 +686,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             try:
                 self._player.observe_property(
                     "vo-configured", self._on_vo_configured)
-            except Exception as exc:      # noqa: BLE001 — garde-fou d'agrément
+            except Exception as exc:  # garde-fou d'agrément  # noqa: BLE001
                 logger.debug("MpvWidget: vo-configured non observable — %s", exc)
         except Exception:
             logger.exception("MpvWidget: impossible d'initialiser MPV")
@@ -1018,7 +1018,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         try:
             self._player.volume = self._want_volume
             self._player.mute = self._want_muted
-        except Exception as exc:      # noqa: BLE001 — réglage d'agrément
+        except Exception as exc:  # réglage d'agrément  # noqa: BLE001
             logger.debug("MpvWidget: état audio non réappliqué — %s", exc)
 
     def save_clip(self, secs: int = 60, directory: str = "") -> str | None:
@@ -1064,7 +1064,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             self._player.demuxer_max_back_bytes = (
                 _grid_back_bytes(secs) if secs > 0 else 0
             )
-        except Exception as exc:      # noqa: BLE001 — réglage d'agrément
+        except Exception as exc:  # réglage d'agrément  # noqa: BLE001
             logger.debug("MpvWidget: tampon de clip non ajusté — %s", exc)
 
     def set_low_latency(self, on: bool) -> None:
@@ -1084,7 +1084,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             return
         try:
             self._player.demuxer_lavf_o = _LATENCE_BASSE if on else ""
-        except Exception as exc:      # noqa: BLE001 — réglage d'agrément
+        except Exception as exc:  # réglage d'agrément  # noqa: BLE001
             logger.debug("MpvWidget: basse latence non appliquée — %s", exc)
 
     def get_audio_rms_db(self) -> float | None:
@@ -1123,7 +1123,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             return None
         try:
             pos = self._player.time_pos
-        except Exception:      # noqa: BLE001 — lecture en cours de démontage
+        except Exception:  # lecture en cours de démontage  # noqa: BLE001
             return None
         return float(pos) if pos is not None else None
 
@@ -1139,7 +1139,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             return None
         try:
             reste = self._player.time_remaining
-        except Exception:      # noqa: BLE001 — lecture en cours de démontage
+        except Exception:  # lecture en cours de démontage  # noqa: BLE001
             return None
         return float(reste) if reste is not None else None
 

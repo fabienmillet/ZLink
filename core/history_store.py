@@ -477,7 +477,7 @@ class HistoryStore:
             reponse = await client.get(url)
             reponse.raise_for_status()
             return reponse.json()
-        except Exception as exc:  # noqa: BLE001 — toute panne réseau vaut « pas de courbe »
+        except Exception as exc:  # toute panne réseau vaut « pas de courbe »  # noqa: BLE001
             logger.warning("Édition %s : historique indisponible — %s",
                            event_id, exc)
             return None
