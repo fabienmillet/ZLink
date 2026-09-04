@@ -6098,6 +6098,11 @@ class _ClipsTab(QWidget):
     remonte les clips des éditions précédentes.
     """
 
+    #: Cartes dessinées au plus. Trois cents chaînes rendent des milliers de
+    #: clips, et autant de widgets figeraient la fenêtre à chaque tri. Le
+    #: compte annonce ce qui déborde, et le filtre par chaîne y donne accès.
+    _MAX_CARTES = 300
+
     clip_choisi = pyqtSignal(object)     # le Clip à lire
     #: Interne. Un fil de travail ne peut pas toucher aux widgets, et
     #: `QTimer.singleShot` posé DEPUIS ce fil ne part jamais : le timer naît
@@ -6109,6 +6114,7 @@ class _ClipsTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._clips: list = []
+        self._logins: list[str] = []
         self._chargement = False
         self._colonnes = 0
         self._vignettes = _CacheVignettes(self)
@@ -6205,11 +6211,27 @@ class _ClipsTab(QWidget):
         self._bouton.setText("Chargement…")
         threading.Thread(target=self._charger, daemon=True).start()
 
+    def set_streamers(self, streamers: list) -> None:
+        """Les participants dont on ira chercher les clips.
+
+        La catégorie ZEvent ne voit que les clips qui en PORTENT l'étiquette :
+        une chaîne qui bascule sur autre chose entre deux temps forts en sort.
+        Interroger les participants un par un les rattrape tous — six chaînes
+        seules rendent deux cent quarante-neuf clips là où la catégorie
+        entière en donne soixante-dix-huit.
+        """
+        self._logins = [s.twitch_login for s in streamers or []
+                        if getattr(s, "twitch_login", "")]
+
     def _charger(self) -> None:
         from core import twitch_clips
 
         try:
-            clips = _run_coro(twitch_clips.lister())
+            clips = _run_coro(
+                twitch_clips.lister_par_chaines(self._logins) if self._logins
+                # Avant l'arrivée des participants — au tout premier
+                # affichage — la catégorie donne déjà de quoi remplir la page.
+                else twitch_clips.lister())
         except Exception:                                  # noqa: BLE001
             logger.exception("Clips : chargement impossible")
             clips = []
@@ -6261,11 +6283,15 @@ class _ClipsTab(QWidget):
         self._vide.setText(
             "Aucun clip pour cette chaîne." if login and self._clips
             else "Aucun clip pour l'instant.")
+        reste = max(0, len(clips) - self._MAX_CARTES)
         self._compte.setText(
-            f"{len(clips)} clips · 7 derniers jours" if clips else "")
+            (f"{len(clips)} clips · 7 derniers jours"
+             + (f" · {reste} de plus, affinez le filtre" if reste else ""))
+            if clips else "")
         colonnes = self._colonnes_tenables()
         self._colonnes = colonnes
-        for rang, clip in enumerate(clips):
+        montres = clips[:self._MAX_CARTES]
+        for rang, clip in enumerate(montres):
             carte = _CarteClip(clip, self._vignettes)
             carte.clique.connect(self.clip_choisi)
             self._liste.addWidget(carte, rang // colonnes, rang % colonnes)
@@ -7911,6 +7937,7 @@ class PanelWindow(QMainWindow):
         self._last_streamers = streamers
         self._schedule_accueil_refresh()
         self._goals_tab.set_streamers(streamers)
+        self._clips_tab.set_streamers(streamers)
         self._streamers_tab.refresh(streamers, selected_logins or [])
         self._stats_tab.update_streamers(streamers)
         gdoc_display = {s.gdoc_id: s.display for s in streamers if s.gdoc_id}
@@ -7936,6 +7963,7 @@ class PanelWindow(QMainWindow):
         self._last_stats = stats
         self._accueil_tab.refresh(streamers, stats)
         self._goals_tab.set_streamers(streamers)
+        self._clips_tab.set_streamers(streamers)
         self._streamers_tab.refresh(streamers, selected_logins or [])
         self._stats_tab.update_streamers(streamers)
         gdoc_display = {s.gdoc_id: s.display for s in streamers if s.gdoc_id}

@@ -2795,3 +2795,53 @@ def test_le_retour_de_copie_meurt_avec_la_fenetre(lecteur, qtbot):
     fenetre.close()
     qtbot.wait(50)
     assert not fenetre._retour.isActive()
+
+
+def test_l_onglet_interroge_les_participants_quand_il_les_connait(clips,
+                                                                  monkeypatch):
+    """La catégorie ne voit que les clips ÉTIQUETÉS ZEvent : soixante-dix-huit,
+    là où six chaînes seules en rendent deux cent quarante-neuf."""
+    from core import twitch_clips
+
+    onglet = clips()
+    onglet.set_streamers([type("S", (), {"twitch_login": "ponce"})(),
+                          type("S", (), {"twitch_login": "zerator"})()])
+    appels: dict = {}
+
+    def _par_chaines(logins, *a, **k):
+        appels["chaines"] = list(logins)
+        return []                       # une liste de Clips, pas les logins
+
+    monkeypatch.setattr(twitch_clips, "lister_par_chaines", _par_chaines)
+    monkeypatch.setattr(twitch_clips, "lister",
+                        lambda *a, **k: appels.setdefault("categorie", []))
+    monkeypatch.setattr(panel, "_run_coro", lambda coro: coro)
+    onglet._charger()
+    assert appels.get("chaines") == ["ponce", "zerator"]
+    assert "categorie" not in appels
+
+
+def test_sans_participants_l_onglet_retombe_sur_la_categorie(clips, monkeypatch):
+    """Au tout premier affichage, ils ne sont pas encore arrivés."""
+    from core import twitch_clips
+
+    onglet = clips()
+    appels = {}
+    monkeypatch.setattr(twitch_clips, "lister",
+                        lambda *a, **k: appels.setdefault("categorie", []))
+    monkeypatch.setattr(panel, "_run_coro", lambda coro: coro)
+    onglet._charger()
+    assert "categorie" in appels
+
+
+def test_le_nombre_de_cartes_est_borne(clips):
+    """Trois cents chaînes rendent des milliers de clips ; autant de widgets
+    figeraient la fenêtre à chaque tri."""
+    onglet = clips(*[_clip(f"c{i}", vues=i) for i in range(panel._ClipsTab._MAX_CARTES + 40)])
+    assert len(_cartes_de(onglet)) == panel._ClipsTab._MAX_CARTES
+    assert "40 de plus" in onglet._compte.text()
+
+
+def test_sous_le_plafond_rien_n_est_annonce_en_trop(clips):
+    onglet = clips(_clip("a"), _clip("b"))
+    assert "de plus" not in onglet._compte.text()

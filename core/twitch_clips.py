@@ -43,9 +43,17 @@ logger = logging.getLogger(__name__)
 #: Le slug de la catégorie, tel qu'il apparaît dans l'adresse de la page.
 SLUG_CATEGORIE = "zevent"
 
-#: Demandés en une fois. Twitch en rend une part seulement — soixante-dix-huit
-#: pour cent demandés lors du relevé — et refuse les pages suivantes.
+#: Demandés par chaîne. Twitch en rend jusqu'à ce nombre, et refuse les pages
+#: suivantes : le curseur se heurte à un contrôle d'intégrité signé, que seul
+#: le client web sait produire. Une page large est donc tout ce qu'on peut
+#: obtenir — mais une par chaîne, ce qui suffit largement.
 PAR_REQUETE = 100
+
+#: Chaînes par requête. GraphQL accepte autant d'alias qu'on veut dans un même
+#: document ; on borne quand même, pour que l'échec d'un lot n'emporte pas la
+#: liste entière et que la requête reste de taille raisonnable. C'est le
+#: réglage que `core/live_uptime.py` applique déjà aux durées de direct.
+MAX_PAR_LOT = 25
 
 #: Fenêtre retenue. « Sept jours » est ce que demande la page de Twitch, et ce
 #: qui écarte les clips de l'édition précédente.
@@ -164,6 +172,65 @@ async def _demander(requete: str, client: httpx.AsyncClient | None = None) -> di
     if isinstance(charge, dict) and charge.get("errors"):
         logger.warning("Clips : %s", str(charge["errors"])[:160])
     return (charge or {}).get("data") or {}
+
+
+_REQUETE_CHAINE = """u%(rang)d: user(login: "%(login)s") {
+    clips(first: %(nombre)d, criteria: {period: %(periode)s, sort: VIEWS_DESC}) {
+      edges { node {
+        slug title viewCount createdAt durationSeconds
+        broadcaster { login displayName }
+        curator { displayName }
+        thumbnailURL(width: 480, height: 272)
+      } }
+    }
+  }"""
+
+
+def _lot(logins: list[str]) -> str:
+    """Un document GraphQL qui interroge plusieurs chaînes d'un coup."""
+    return "{\n" + "\n".join(
+        _REQUETE_CHAINE % {"rang": rang, "login": login,
+                           "nombre": PAR_REQUETE, "periode": PERIODE}
+        for rang, login in enumerate(logins)) + "\n}"
+
+
+async def lister_par_chaines(logins: list[str],
+                             client: httpx.AsyncClient | None = None
+                             ) -> list[Clip]:
+    """Les clips des chaînes données, sur les sept derniers jours.
+
+    La catégorie ne voit que les clips ÉTIQUETÉS ZEvent : soixante-dix-huit au
+    total, là où six chaînes seules en rendent deux cent quarante-neuf. Un clip
+    n'hérite pas de la catégorie de la chaîne — il porte celle du moment où il
+    a été pris, et une chaîne qui bascule sur autre chose entre deux temps
+    forts sort du décompte.
+
+    Interroger chaîne par chaîne les rattrape tous. En lots, pour ne pas faire
+    trois cents requêtes là où douze suffisent.
+    """
+    propre = client is None
+    client = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    connus: dict[str, Clip] = {}
+    try:
+        for depart in range(0, len(logins), MAX_PAR_LOT):
+            lot = logins[depart:depart + MAX_PAR_LOT]
+            donnees = await _demander(_lot(lot), client)
+            for rang in range(len(lot)):
+                chaine = donnees.get(f"u{rang}") or {}
+                aretes = ((chaine.get("clips") or {}).get("edges")) or []
+                for arete in aretes:
+                    clip = _lire(arete.get("node") or {})
+                    # Dédoublonné : un clip peut remonter par sa chaîne ET par
+                    # la catégorie, et deux cartes pour un même moment se
+                    # remarquent tout de suite.
+                    if clip is not None:
+                        connus[clip.slug] = clip
+    finally:
+        if propre:
+            await client.aclose()
+    logger.info("Clips : %d sur %d chaînes, en %d requête(s)", len(connus),
+                len(logins), -(-len(logins) // MAX_PAR_LOT))
+    return sorted(connus.values(), key=lambda c: -c.vues)
 
 
 async def lister(client: httpx.AsyncClient | None = None) -> list[Clip]:

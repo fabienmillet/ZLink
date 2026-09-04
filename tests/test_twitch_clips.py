@@ -158,3 +158,59 @@ def test_une_lecture_impossible_rend_une_adresse_vide(reponse, charge):
     """L'onglet propose alors d'ouvrir sur Twitch, plutôt que de rester muet."""
     reponse(charge)
     assert asyncio.run(tc.url_de_lecture("abc")) == ""
+
+
+# ── par chaîne : ce que la catégorie ne voit pas ────────────────────────────
+
+def test_les_chaines_sont_interrogees_par_lots(reponse):
+    """Trois cents chaînes en douze requêtes, pas trois cents.
+
+    C'est le réglage que `core/live_uptime.py` applique déjà : GraphQL accepte
+    autant d'alias qu'on veut dans un même document.
+    """
+    vues = reponse({})
+    logins = [f"c{i}" for i in range(60)]
+    asyncio.run(tc.lister_par_chaines(logins))
+    assert len(vues) == 3                      # 60 / 25, arrondi au supérieur
+    assert vues[0].count("user(login:") == tc.MAX_PAR_LOT
+
+
+def test_les_clips_de_toutes_les_chaines_reviennent(reponse):
+    reponse({"u0": {"clips": {"edges": [{"node": _noeud(slug="a")}]}},
+             "u1": {"clips": {"edges": [{"node": _noeud(slug="b")}]}}})
+    clips = asyncio.run(tc.lister_par_chaines(["x", "y"]))
+    assert {c.slug for c in clips} == {"a", "b"}
+
+
+def test_un_meme_clip_n_apparait_qu_une_fois(reponse):
+    """Il peut remonter par sa chaîne ET par la catégorie : deux cartes pour
+    un même moment se remarquent tout de suite."""
+    reponse({"u0": {"clips": {"edges": [{"node": _noeud(slug="a")}]}},
+             "u1": {"clips": {"edges": [{"node": _noeud(slug="a")}]}}})
+    assert len(asyncio.run(tc.lister_par_chaines(["x", "y"]))) == 1
+
+
+def test_les_plus_vus_arrivent_en_tete(reponse):
+    reponse({"u0": {"clips": {"edges": [
+        {"node": _noeud(slug="petit", vues=5)},
+        {"node": _noeud(slug="gros", vues=900)}]}}})
+    assert [c.slug for c in asyncio.run(tc.lister_par_chaines(["x"]))] == [
+        "gros", "petit"]
+
+
+def test_une_chaine_sans_compte_ne_casse_pas_le_lot(reponse):
+    """Un login disparu rend `null` : le lot entier ne doit pas s'effondrer."""
+    reponse({"u0": None, "u1": {"clips": {"edges": [{"node": _noeud("b")}]}}})
+    assert [c.slug for c in asyncio.run(tc.lister_par_chaines(["x", "y"]))] == ["b"]
+
+
+def test_sans_chaine_aucune_requete_ne_part(reponse):
+    vues = reponse({})
+    assert asyncio.run(tc.lister_par_chaines([])) == []
+    assert vues == []
+
+
+def test_la_fenetre_de_sept_jours_vaut_aussi_par_chaine(reponse):
+    vues = reponse({})
+    asyncio.run(tc.lister_par_chaines(["x"]))
+    assert "LAST_WEEK" in vues[0]
