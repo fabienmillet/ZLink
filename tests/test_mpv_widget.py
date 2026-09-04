@@ -1261,3 +1261,23 @@ def test_un_desabonnement_refuse_est_absorbe(widget_inerte):
     widget_inerte._observe_time_pos()
     widget_inerte._unobserve_time_pos()      # ne doit pas lever
     assert widget_inerte._time_pos_cb is None
+
+
+def test_position_n_est_definie_qu_une_fois():
+    """Une seconde définition, plus haut dans la classe, était silencieusement
+    écrasée par la première.
+
+    Le lecteur de clips recevait donc None là où la version du haut promettait
+    un flottant — « unsupported operand type(s) for *: NoneType and int »,
+    cinq fois par seconde, à chaque battement du transport.
+    """
+    import ast
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parent.parent
+              / "widgets" / "mpv_widget.py").read_text(encoding="utf-8")
+    classe = next(n for n in ast.parse(source).body
+                  if isinstance(n, ast.ClassDef) and n.name == "MpvWidget")
+    noms = [n.name for n in classe.body if isinstance(n, ast.FunctionDef)]
+    doublons = {n for n in noms if noms.count(n) > 1}
+    assert not doublons, f"méthodes définies deux fois : {sorted(doublons)}"

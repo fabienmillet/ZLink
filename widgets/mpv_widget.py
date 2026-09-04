@@ -815,9 +815,10 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
     # l'émission, soit des heures : une barre de progression bâtie dessus
     # afficherait 99 % dès la première image.
 
-    def position(self) -> float:
-        """Où en est la lecture, en secondes. Zéro si on ne sait pas."""
-        return self._propriete("time-pos")
+    # `position()` existe déjà plus bas, et rend None quand mpv ne sait pas
+    # encore : on ne la redéfinit pas ici. Une seconde définition, plus haut
+    # dans la classe, était silencieusement écrasée par la première — le
+    # lecteur de clips recevait donc None là où il attendait un flottant.
 
     def duree(self) -> float:
         """Durée du média, en secondes. Zéro tant qu'elle n'est pas connue."""

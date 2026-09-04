@@ -6284,8 +6284,11 @@ class _ClipsTab(QWidget):
             "Aucun clip pour cette chaîne." if login and self._clips
             else "Aucun clip pour l'instant.")
         reste = max(0, len(clips) - self._MAX_CARTES)
+        # « 7 derniers jours » était faux depuis qu'on interroge les chaînes :
+        # ce qu'on garde commence à l'ouverture de la cagnotte, pas une semaine
+        # plus tôt.
         self._compte.setText(
-            (f"{len(clips)} clips · 7 derniers jours"
+            (f"{len(clips)} clips · depuis l'ouverture"
              + (f" · {reste} de plus, affinez le filtre" if reste else ""))
             if clips else "")
         colonnes = self._colonnes_tenables()
@@ -6447,7 +6450,9 @@ class _LecteurClip(QDialog):
         if self._lecteur is None:
             return
         duree = self._lecteur.duree()
-        position = self._lecteur.position()
+        # `position()` rend None tant que mpv n'a pas démarré : entre le
+        # `play()` et la première image, il ne sait pas encore où il en est.
+        position = self._lecteur.position() or 0.0
         if duree > 0 and self._barre.maximum() != int(duree * 10):
             self._barre.setRange(0, int(duree * 10))
         if not self._tenu:
@@ -6502,7 +6507,8 @@ class _LecteurClip(QDialog):
         if touche in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             if self._lecteur is not None:
                 pas = 5.0 if touche == Qt.Key.Key_Right else -5.0
-                self._lecteur.chercher(max(0.0, self._lecteur.position() + pas))
+                depuis = self._lecteur.position() or 0.0
+                self._lecteur.chercher(max(0.0, depuis + pas))
             return
         super().keyPressEvent(event)
 

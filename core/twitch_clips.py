@@ -55,9 +55,27 @@ PAR_REQUETE = 100
 #: réglage que `core/live_uptime.py` applique déjà aux durées de direct.
 MAX_PAR_LOT = 25
 
-#: Fenêtre retenue. « Sept jours » est ce que demande la page de Twitch, et ce
-#: qui écarte les clips de l'édition précédente.
+#: Fenêtre demandée à Twitch. C'est la plus fine qu'il propose au-dessus de la
+#: journée, et elle écarte déjà les éditions précédentes.
 PERIODE = "LAST_WEEK"
+
+
+def depuis_quand() -> float:
+    """L'instant avant lequel un clip n'a rien à voir avec l'événement.
+
+    Interroger les participants chaîne par chaîne rattrape tous leurs clips, y
+    compris ceux de leurs streams ordinaires : sur quatre chaînes du plateau,
+    cent cinquante-six clips précédaient l'ouverture de la cagnotte contre un
+    seul après — du VALORANT, du PUBG, rien du ZEvent.
+
+    Sept jours ne suffisent donc pas à trancher, et la catégorie du clip non
+    plus : pendant l'événement les participants jouent à tout, et un clip garde
+    la catégorie du moment où il a été pris. C'est la DATE qui sépare — depuis
+    l'ouverture de la cagnotte, ce qu'un participant clippe est du ZEvent.
+    """
+    from core.history_store import OUVERTURE_CAGNOTTE
+
+    return OUVERTURE_CAGNOTTE
 
 _TIMEOUT = httpx.Timeout(15.0)
 
@@ -211,6 +229,8 @@ async def lister_par_chaines(logins: list[str],
     propre = client is None
     client = client or httpx.AsyncClient(timeout=_TIMEOUT)
     connus: dict[str, Clip] = {}
+    plancher = depuis_quand()
+    ecartes = 0
     try:
         for depart in range(0, len(logins), MAX_PAR_LOT):
             lot = logins[depart:depart + MAX_PAR_LOT]
@@ -220,16 +240,23 @@ async def lister_par_chaines(logins: list[str],
                 aretes = ((chaine.get("clips") or {}).get("edges")) or []
                 for arete in aretes:
                     clip = _lire(arete.get("node") or {})
+                    if clip is None:
+                        continue
+                    # Le stream ordinaire d'un participant n'est pas le ZEvent.
+                    if clip.cree_le < plancher:
+                        ecartes += 1
+                        continue
                     # Dédoublonné : un clip peut remonter par sa chaîne ET par
                     # la catégorie, et deux cartes pour un même moment se
                     # remarquent tout de suite.
-                    if clip is not None:
-                        connus[clip.slug] = clip
+                    connus[clip.slug] = clip
     finally:
         if propre:
             await client.aclose()
-    logger.info("Clips : %d sur %d chaînes, en %d requête(s)", len(connus),
-                len(logins), -(-len(logins) // MAX_PAR_LOT))
+    logger.info(
+        "Clips : %d retenus sur %d chaînes en %d requête(s), %d écartés "
+        "comme antérieurs à l'événement",
+        len(connus), len(logins), -(-len(logins) // MAX_PAR_LOT), ecartes)
     return sorted(connus.values(), key=lambda c: -c.vues)
 
 
@@ -241,8 +268,10 @@ async def lister(client: httpx.AsyncClient | None = None) -> list[Clip]:
         client)
     jeu = donnees.get("game") or {}
     aretes = ((jeu.get("clips") or {}).get("edges")) or []
-    clips = [c for c in (_lire(a.get("node") or {}) for a in aretes) if c]
-    logger.info("Clips : %d chargés sur la catégorie %s", len(clips),
+    plancher = depuis_quand()
+    clips = [c for c in (_lire(a.get("node") or {}) for a in aretes)
+             if c and c.cree_le >= plancher]
+    logger.info("Clips : %d retenus sur la catégorie %s", len(clips),
                 SLUG_CATEGORIE)
     return clips
 

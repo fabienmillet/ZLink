@@ -2430,7 +2430,7 @@ def test_l_onglet_liste_les_clips(clips):
     onglet = clips(_clip("a"), _clip("b", vues=50))
     assert len(_cartes_de(onglet)) == 2
     assert "2 clips" in onglet._compte.text()
-    assert "7 derniers jours" in onglet._compte.text()
+    assert "depuis l'ouverture" in onglet._compte.text()
 
 
 def test_le_filtre_par_chaine_ne_propose_que_les_chaines_clippees(clips):

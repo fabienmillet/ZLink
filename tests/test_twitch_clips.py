@@ -78,9 +78,10 @@ def test_un_clip_sans_slug_est_ecarte(reponse):
     assert [c.slug for c in asyncio.run(tc.lister())] == ["ok"]
 
 
-def test_une_date_illisible_ne_casse_rien(reponse):
-    reponse({"game": {"clips": {"edges": [{"node": _noeud(cree="jamais")}]}}})
-    assert asyncio.run(tc.lister())[0].cree_le == 0.0
+def test_une_date_illisible_vaut_zero(reponse):
+    """Elle ne fait donc jamais partie de l'événement : mieux vaut un clip de
+    moins qu'un clip d'une autre semaine au milieu de ceux de la nuit."""
+    assert tc._lire(_noeud(cree="jamais")).cree_le == 0.0
 
 
 def test_une_source_muette_rend_une_liste_vide(reponse):
@@ -214,3 +215,65 @@ def test_la_fenetre_de_sept_jours_vaut_aussi_par_chaine(reponse):
     vues = reponse({})
     asyncio.run(tc.lister_par_chaines(["x"]))
     assert "LAST_WEEK" in vues[0]
+
+
+# ── ce qui n'a rien à voir avec l'événement ─────────────────────────────────
+
+@pytest.fixture
+def ouverture(monkeypatch):
+    """Fixe l'instant d'ouverture, sans dépendre du calendrier réel."""
+    monkeypatch.setattr(tc, "depuis_quand", lambda: 1000.0)
+    return 1000.0
+
+
+def _iso(ts: float) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace(
+        "+00:00", "Z")
+
+
+def test_un_clip_anterieur_a_l_evenement_est_ecarte(reponse, ouverture):
+    """Interroger les chaînes rattrape aussi leurs streams ordinaires.
+
+    Mesuré sur quatre chaînes du plateau : cent cinquante-six clips
+    précédaient l'ouverture contre un seul après — du VALORANT, du PUBG, rien
+    du ZEvent. Sept jours ne suffisent pas à trancher, et la catégorie du clip
+    non plus : pendant l'événement les participants jouent à tout.
+    """
+    reponse({"u0": {"clips": {"edges": [
+        {"node": _noeud(slug="avant", cree=_iso(ouverture - 3600))},
+        {"node": _noeud(slug="apres", cree=_iso(ouverture + 3600))}]}}})
+    clips = asyncio.run(tc.lister_par_chaines(["x"]))
+    assert [c.slug for c in clips] == ["apres"]
+
+
+def test_l_instant_d_ouverture_est_retenu(reponse, ouverture):
+    """La borne est inclusive : un clip pris à l'ouverture en fait partie."""
+    reponse({"u0": {"clips": {"edges": [
+        {"node": _noeud(slug="pile", cree=_iso(ouverture))}]}}})
+    assert [c.slug for c in asyncio.run(tc.lister_par_chaines(["x"]))] == ["pile"]
+
+
+def test_la_categorie_est_filtree_de_la_meme_facon(reponse, ouverture):
+    """Les deux chemins doivent retenir la même chose, sans quoi rafraîchir
+    changerait la liste selon l'ordre d'arrivée des participants."""
+    reponse({"game": {"clips": {"edges": [
+        {"node": _noeud(slug="avant", cree=_iso(ouverture - 60))},
+        {"node": _noeud(slug="apres", cree=_iso(ouverture + 60))}]}}})
+    assert [c.slug for c in asyncio.run(tc.lister())] == ["apres"]
+
+
+def test_une_date_illisible_ne_passe_pas_le_filtre(reponse, ouverture):
+    """Elle vaut zéro, donc antérieure à tout : mieux vaut un clip de moins
+    qu'un clip d'une autre semaine au milieu de ceux de la nuit."""
+    reponse({"u0": {"clips": {"edges": [
+        {"node": _noeud(slug="flou", cree="jamais")}]}}})
+    assert asyncio.run(tc.lister_par_chaines(["x"])) == []
+
+
+def test_l_ouverture_vient_de_l_historique():
+    """Une seule date fait autorité, celle qui ouvre déjà les courbes."""
+    from core.history_store import OUVERTURE_CAGNOTTE
+
+    assert tc.depuis_quand() == OUVERTURE_CAGNOTTE
