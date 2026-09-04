@@ -149,8 +149,20 @@ def test_un_gros_don_est_marque(qtbot):
     petite = panel._LigneDon(_don(montant=2))
     qtbot.addWidget(grosse)
     qtbot.addWidget(petite)
-    assert "#00ff87" in grosse.styleSheet()
-    assert "#00ff87" not in petite.styleSheet()
+    assert "border-left" in grosse.styleSheet()
+    assert "border-left" not in petite.styleSheet()
+
+
+def test_le_style_de_la_ligne_ne_deborde_pas_sur_ses_etiquettes(qtbot):
+    """Une règle nue s'applique à toute la descendance : le liseré vert se
+    répétait sur chaque étiquette au lieu de border la carte."""
+    ligne = panel._LigneDon(_don(montant=500, commentaire="coucou"))
+    qtbot.addWidget(ligne)
+    feuille = ligne.styleSheet()
+    assert feuille.startswith("QFrame#ligneDon {"), "sélecteur non ciblé"
+    from PyQt6.QtWidgets import QLabel
+    for etiquette in ligne.findChildren(QLabel):
+        assert "border" not in etiquette.styleSheet()
 
 
 def test_le_commentaire_est_affiche_quand_il_y_en_a_un(qtbot):

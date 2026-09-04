@@ -6650,6 +6650,10 @@ class _LecteurClip(QDialog):
         super().closeEvent(event)
 
 
+#: Place réservée au montant dans une ligne de don. Assez pour « 10 000 € »,
+#: le plus large qu'on verra passer sans que la colonne saute.
+_LARGEUR_MONTANT_DON = 76
+
 #: Durée du fondu d'arrivée d'un don. Assez pour que l'œil accroche la
 #: nouvelle ligne, assez court pour que dix dons en une seconde ne se
 #: transforment pas en dix fondus superposés.
@@ -6673,11 +6677,15 @@ class _LigneDon(QFrame):
         self.montant = montant
         self.streamer = str(don.get("streamer") or "")
         marquant = montant >= self._SEUIL_MARQUANT
+        # Sélecteur CIBLÉ, comme QFrame#streamCell ailleurs dans le projet.
+        # Une règle nue posée sur un widget s'applique aussi à toute sa
+        # descendance : le liseré vert se répétait sur CHAQUE étiquette de la
+        # ligne — montant, donateur, commentaire — au lieu de border la carte.
+        self.setObjectName("ligneDon")
         self.setStyleSheet(
-            "background: #111111; border: none; border-radius: 6px;"
-            if not marquant else
-            "background: #111111; border: none; border-left: 3px solid #00ff87;"
+            "QFrame#ligneDon { background: #111111; border: none;"
             " border-radius: 6px;"
+            + (" border-left: 3px solid #00ff87; }" if marquant else " }")
         )
 
         v = QVBoxLayout(self)
@@ -6689,9 +6697,17 @@ class _LigneDon(QFrame):
         haut.setSpacing(8)
 
         somme = QLabel(_fmt_euros(montant))
-        somme.setFont(QFont(_FONT_SEGOE, 12 if marquant else 11, QFont.Weight.Bold))
+        somme.setFont(QFont(_FONT_MONO, 12 if marquant else 11, QFont.Weight.Bold))
         somme.setStyleSheet(f"color: {'#00ff87' if marquant else '#ffffff'};"
                             " background: transparent;")
+        # Largeur réservée et alignement à droite : sans eux, « 5 € » et
+        # « 100 € » n'occupent pas la même place et les donateurs partent en
+        # escalier. Une colonne de montants se compare d'un coup d'œil, une
+        # suite de montants décalés ne se compare pas du tout. Fonte à
+        # chasse fixe pour la même raison — c'est un nombre, pas un mot.
+        somme.setAlignment(Qt.AlignmentFlag.AlignRight
+                           | Qt.AlignmentFlag.AlignVCenter)
+        somme.setMinimumWidth(_LARGEUR_MONTANT_DON)
         haut.addWidget(somme)
 
         qui = QLabel(str(don.get("donor") or "Anonyme"))
@@ -6721,7 +6737,14 @@ class _LigneDon(QFrame):
             mot.setFont(QFont(_FONT_SEGOE, 10))
             mot.setStyleSheet(_SS_GRIS_CLAIR_NU)
             mot.setWordWrap(True)
-            v.addWidget(mot)
+            # Décalé sous le DONATEUR, pas sous le montant : le commentaire
+            # lui appartient, et la colonne des sommes doit rester une colonne
+            # de sommes. Le retrait vaut la place du montant plus l'espace qui
+            # le sépare du nom.
+            bas = QHBoxLayout()
+            bas.setContentsMargins(_LARGEUR_MONTANT_DON + 8, 0, 0, 0)
+            bas.addWidget(mot)
+            v.addLayout(bas)
 
 
 def _montant_du_don(don: dict) -> float:
