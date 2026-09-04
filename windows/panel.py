@@ -6098,10 +6098,11 @@ class _ClipsTab(QWidget):
     remonte les clips des éditions précédentes.
     """
 
-    #: Cartes dessinées au plus. Trois cents chaînes rendent des milliers de
-    #: clips, et autant de widgets figeraient la fenêtre à chaque tri. Le
-    #: compte annonce ce qui déborde, et le filtre par chaîne y donne accès.
-    _MAX_CARTES = 300
+    #: Clips par page. Trois cents chaînes en rendent des milliers : les poser
+    #: tous d'un coup ferait autant de widgets, et la fenêtre se figerait à
+    #: chaque tri. Soixante, c'est une quinzaine de rangs — de quoi faire
+    #: défiler sans se perdre, et tout reste atteignable.
+    _PAR_PAGE = 60
 
     clip_choisi = pyqtSignal(object)     # le Clip à lire
     #: Interne. Un fil de travail ne peut pas toucher aux widgets, et
@@ -6117,6 +6118,7 @@ class _ClipsTab(QWidget):
         self._logins: list[str] = []
         self._chargement = False
         self._colonnes = 0
+        self._page = 0
         self._vignettes = _CacheVignettes(self)
         self._charges.connect(self._recevoir)
         self._build()
@@ -6147,14 +6149,14 @@ class _ClipsTab(QWidget):
         self._chaine = QComboBox()
         self._chaine.setFixedHeight(28)
         self._chaine.setMinimumWidth(180)
-        self._chaine.currentIndexChanged.connect(self._reafficher)
+        self._chaine.currentIndexChanged.connect(self._depuis_le_debut)
         entete.addWidget(self._chaine)
 
         self._tri = QComboBox()
         self._tri.setFixedHeight(28)
         for cle, libelle in twitch_clips.TRIS.items():
             self._tri.addItem(libelle, cle)
-        self._tri.currentIndexChanged.connect(self._reafficher)
+        self._tri.currentIndexChanged.connect(self._depuis_le_debut)
         entete.addWidget(self._tri)
 
         self._bouton = QPushButton("Rafraîchir")
@@ -6185,6 +6187,28 @@ class _ClipsTab(QWidget):
         self._vide.setFont(QFont(_FONT_SEGOE, 12))
         self._vide.setStyleSheet(_SS_GRIS_EFFACE)
         v.addWidget(self._vide)
+
+        pages = QHBoxLayout()
+        pages.setContentsMargins(0, 4, 0, 0)
+        pages.setSpacing(10)
+        pages.addStretch(1)
+        self._precedent = QPushButton("‹  Précédent")
+        self._precedent.setFixedHeight(28)
+        self._precedent.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._precedent.clicked.connect(lambda: self._aller_a(self._page - 1))
+        pages.addWidget(self._precedent)
+        self._page_lbl = QLabel("")
+        self._page_lbl.setFont(QFont(_FONT_MONO, 10))
+        self._page_lbl.setStyleSheet(_SS_MUTED)
+        pages.addWidget(self._page_lbl)
+        self._suivant = QPushButton("Suivant  ›")
+        self._suivant.setFixedHeight(28)
+        self._suivant.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._suivant.clicked.connect(lambda: self._aller_a(self._page + 1))
+        pages.addWidget(self._suivant)
+        pages.addStretch(1)
+        self._barre_pages = pages
+        v.addLayout(pages)
 
     # -- chargement -----------------------------------------------------------
 
@@ -6245,6 +6269,7 @@ class _ClipsTab(QWidget):
         if clips:
             self._clips = clips
             self._remplir_les_chaines()
+            self._page = 0
         self._reafficher()
 
     def _remplir_les_chaines(self) -> None:
@@ -6283,22 +6308,56 @@ class _ClipsTab(QWidget):
         self._vide.setText(
             "Aucun clip pour cette chaîne." if login and self._clips
             else "Aucun clip pour l'instant.")
-        reste = max(0, len(clips) - self._MAX_CARTES)
         # « 7 derniers jours » était faux depuis qu'on interroge les chaînes :
         # ce qu'on garde commence à l'ouverture de la cagnotte, pas une semaine
         # plus tôt.
         self._compte.setText(
-            (f"{len(clips)} clips · depuis l'ouverture"
-             + (f" · {reste} de plus, affinez le filtre" if reste else ""))
-            if clips else "")
+            f"{len(clips)} clips · depuis l'ouverture" if clips else "")
         colonnes = self._colonnes_tenables()
         self._colonnes = colonnes
-        montres = clips[:self._MAX_CARTES]
-        for rang, clip in enumerate(montres):
+        pages = max(1, -(-len(clips) // self._PAR_PAGE))
+        # Filtrer peut raccourcir la liste sous la page où l'on était : sans ce
+        # recadrage, on tombait sur une page vide sans comprendre pourquoi.
+        self._page = max(0, min(self._page, pages - 1))
+        debut = self._page * self._PAR_PAGE
+        for rang, clip in enumerate(clips[debut:debut + self._PAR_PAGE]):
             carte = _CarteClip(clip, self._vignettes)
             carte.clique.connect(self.clip_choisi)
             self._liste.addWidget(carte, rang // colonnes, rang % colonnes)
             carte.show()
+        self._peindre_les_pages(pages, len(clips))
+
+    def _peindre_les_pages(self, pages: int, total: int) -> None:
+        """Les commandes de page, effacées quand une seule suffit.
+
+        Deux boutons grisés sous une page unique n'apprennent rien et donnent
+        l'impression qu'il manque quelque chose.
+        """
+        assez = pages > 1
+        for widget in (self._precedent, self._suivant, self._page_lbl):
+            widget.setVisible(assez)
+        if not assez:
+            return
+        self._precedent.setEnabled(self._page > 0)
+        self._suivant.setEnabled(self._page < pages - 1)
+        premier = self._page * self._PAR_PAGE + 1
+        dernier = min(total, (self._page + 1) * self._PAR_PAGE)
+        self._page_lbl.setText(
+            f"{premier}–{dernier} sur {total}   ·   page {self._page + 1}/{pages}")
+
+    def _aller_a(self, page: int) -> None:
+        """Change de page et REMONTE : on lit une page depuis son début."""
+        if page == self._page:
+            return
+        self._page = max(0, page)
+        self._reafficher()
+        self._zone.verticalScrollBar().setValue(0)
+
+    def _depuis_le_debut(self) -> None:
+        """Un tri ou un filtre change la liste : la page où l'on était n'a
+        plus de sens, et la page 4 d'une liste de trente serait vide."""
+        self._page = 0
+        self._reafficher()
 
     def _colonnes_tenables(self) -> int:
         """Combien de cartes tiennent en largeur. Au moins une.

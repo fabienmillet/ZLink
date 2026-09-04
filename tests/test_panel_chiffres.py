@@ -2834,14 +2834,63 @@ def test_sans_participants_l_onglet_retombe_sur_la_categorie(clips, monkeypatch)
     assert "categorie" in appels
 
 
-def test_le_nombre_de_cartes_est_borne(clips):
+# ── les pages ───────────────────────────────────────────────────────────────
+
+_PAR_PAGE = panel._ClipsTab._PAR_PAGE
+
+
+def test_une_page_ne_dessine_que_sa_part(clips):
     """Trois cents chaînes rendent des milliers de clips ; autant de widgets
     figeraient la fenêtre à chaque tri."""
-    onglet = clips(*[_clip(f"c{i}", vues=i) for i in range(panel._ClipsTab._MAX_CARTES + 40)])
-    assert len(_cartes_de(onglet)) == panel._ClipsTab._MAX_CARTES
-    assert "40 de plus" in onglet._compte.text()
+    onglet = clips(*[_clip(f"c{i}", vues=i) for i in range(_PAR_PAGE + 20)])
+    assert len(_cartes_de(onglet)) == _PAR_PAGE
+    assert onglet._page_lbl.text().endswith("page 1/2")
 
 
-def test_sous_le_plafond_rien_n_est_annonce_en_trop(clips):
+def test_la_page_suivante_montre_la_suite(clips):
+    onglet = clips(*[_clip(f"c{i}", vues=1000 - i) for i in range(_PAR_PAGE + 5)])
+    premiers = [c._clip.slug for c in _cartes_de(onglet)]
+    onglet._aller_a(1)
+    suivants = [c._clip.slug for c in _cartes_de(onglet)]
+    assert len(suivants) == 5
+    assert not set(premiers) & set(suivants)
+
+
+def test_une_seule_page_n_affiche_aucune_commande(clips):
+    """Deux boutons grisés sous une page unique donnent l'impression qu'il
+    manque quelque chose."""
     onglet = clips(_clip("a"), _clip("b"))
+    assert onglet._precedent.isHidden() and onglet._suivant.isHidden()
+    assert onglet._page_lbl.isHidden()
+
+
+def test_les_bouts_de_liste_desactivent_leur_bouton(clips):
+    onglet = clips(*[_clip(f"c{i}") for i in range(_PAR_PAGE + 1)])
+    assert not onglet._precedent.isEnabled() and onglet._suivant.isEnabled()
+    onglet._aller_a(1)
+    assert onglet._precedent.isEnabled() and not onglet._suivant.isEnabled()
+
+
+def test_changer_de_tri_ramene_a_la_premiere_page(clips):
+    """La page 4 d'une liste que le filtre vient de raccourcir serait vide."""
+    onglet = clips(*[_clip(f"c{i}", vues=i) for i in range(_PAR_PAGE + 5)])
+    onglet._aller_a(1)
+    onglet._tri.setCurrentIndex(1)
+    assert onglet._page == 0
+
+
+def test_un_filtre_qui_raccourcit_recadre_la_page(clips):
+    """Sans ce recadrage, on tombait sur une page vide sans comprendre."""
+    onglet = clips(*[_clip(f"c{i}", login="ponce") for i in range(_PAR_PAGE + 5)],
+                   _clip("seul", login="zerator", chaine="ZeratoR"))
+    onglet._aller_a(1)
+    onglet._page = 1                       # comme si le filtre n'avait pas résolu
+    onglet._chaine.setCurrentIndex(onglet._chaine.findData("zerator"))
+    assert onglet._page == 0
+    assert len(_cartes_de(onglet)) == 1
+
+
+def test_le_compte_annonce_toujours_le_total(clips):
+    onglet = clips(*[_clip(f"c{i}") for i in range(_PAR_PAGE + 12)])
+    assert f"{_PAR_PAGE + 12} clips" in onglet._compte.text()
     assert "de plus" not in onglet._compte.text()
