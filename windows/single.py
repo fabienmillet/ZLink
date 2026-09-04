@@ -24,7 +24,8 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
+from PyQt6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation,
+                          Qt, QTimer)
 from PyQt6.QtGui import (QColor, QCursor, QFont, QKeySequence, QPainter,
                          QPainterPath, QScreen, QShortcut)
 from PyQt6.QtWidgets import (
@@ -123,7 +124,24 @@ def enregistrer_epingle(epingle: bool) -> None:
 # ---------------------------------------------------------------------------
 
 class _NavPill(QWidget):
-    """Barre centrée en haut : épinglée elle reste, décrochée elle s'escamote."""
+    """Barre centrée en haut : épinglée elle reste, décrochée elle s'escamote.
+
+    **Un widget ENFANT, jamais une fenêtre.** Elle était top-level avec un
+    drapeau « toujours au-dessus », ce qui la place au-dessus de tout au
+    niveau du COMPOSITEUR — pas seulement au-dessus des fenêtres de ZLink.
+    Sous Wayland et XWayland, elle s'échappait de l'application : visible
+    par-dessus les autres programmes, et inatteignable depuis ZLink, dont
+    l'empilement n'est pas garanti. Signalé sur Steam Deck.
+
+    Enfant de la fenêtre affichée, elle ne peut plus sortir de l'application,
+    et `raise_()` entre frères et sœurs est fiable partout. Le masquage la
+    glisse au-dessus du bord haut : un enfant est découpé par son parent, elle
+    disparaît donc au lieu de déborder.
+
+    Corollaire : la garde qui l'escamotait quand une autre application passait
+    devant n'a plus d'objet, et elle est retirée. C'est elle qui, sous
+    gamescope, la faisait disparaître pour de bon.
+    """
 
     def __init__(
         self,
@@ -131,22 +149,30 @@ class _NavPill(QWidget):
         on_switch: Callable[[int], None],
         on_close: Callable[[], None],
         pinned: bool | None = None,
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
         self._pinned = charger_epingle() if pinned is None else bool(pinned)
-        g = screen.geometry()
-        self._center_x  = g.x() + (g.width() - _NAV_W) // 2
-        self._shown_y   = g.y()            # position visible : collée au bord haut
-        self._hidden_y  = g.y() - _NAV_H  # position cachée : juste au-dessus
-        self._screen_rect = g
+        self._screen_rect = screen.geometry()
+        # Coordonnées relatives au PARENT. Les trois fenêtres occupent l'écran
+        # entier, donc les valeurs coïncident avec celles d'avant — mais elles
+        # ne peuvent plus dériver si une fenêtre cesse d'être plein écran.
+        self._center_x = max(0, (self._screen_rect.width() - _NAV_W) // 2)
+        self._shown_y  = 0          # visible : collée au bord haut du parent
+        self._hidden_y = -_NAV_H    # cachée : glissée au-dessus, donc découpée
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool   # pas d'icône dans la barre des tâches
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # FENÊTRE NATIVE, comme le lecteur mpv qu'elle doit surmonter. Sans
+        # cela elle disparaissait purement et simplement : `MpvWidget` pose
+        # `WA_NativeWindow` — il le faut pour `--wid` — et une fenêtre native
+        # est composée par le serveur graphique, donc dessinée AU-DESSUS de
+        # tout widget Qt frère, quel que soit `raise_()`. La pilule, devenue
+        # un simple enfant, passait dessous. Native elle aussi, les deux
+        # s'empilent enfin selon le même ordre, que `raise_()` gouverne.
+        #
+        # `WA_DontCreateNativeAncestors` évite de rendre natifs tous ses
+        # parents au passage : c'est la paire exacte qu'utilise mpv_widget.
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
         self.setFixedSize(_NAV_W, _NAV_H)
         self.move(self._center_x, self._depart_y())
 
@@ -195,12 +221,40 @@ class _NavPill(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._slide_up)
 
-        self.show()  # crée le handle natif
-        # Associer la fenêtre à l'écran cible AVANT de la déplacer
-        handle = self.windowHandle()
-        if handle is not None:
-            handle.setScreen(screen)
+        # Ni `show()` ni association d'écran : sans fenêtre native à créer,
+        # c'est `attacher()` qui la fait apparaître dans la vue courante.
         self.move(self._center_x, self._depart_y())
+
+    def attacher(self, fenetre: QWidget) -> None:
+        """Passe la barre dans la fenêtre affichée, à sa place et devant.
+
+        `setParent` masque toujours le widget : le `show()` qui suit n'est pas
+        une précaution mais une obligation.
+        """
+        if self.parent() is not fenetre:
+            self.setParent(fenetre)
+            # Le passage en plein écran redispose la fenêtre APRÈS
+            # l'attachement, et une redisposition peut remettre le lecteur
+            # devant. On se relève à chaque fois plutôt qu'une seule.
+            fenetre.installEventFilter(self)
+        self._recadrer(fenetre)
+        self.show()
+        self.raise_()
+
+    def eventFilter(self, objet, evenement):  # type: ignore[override]
+        """Se replace et repasse devant quand la fenêtre change de taille."""
+        if evenement.type() == QEvent.Type.Resize and objet is self.parent():
+            self._recadrer(objet)
+            self.raise_()
+        return super().eventFilter(objet, evenement)
+
+    def _recadrer(self, fenetre: QWidget) -> None:
+        """Recentre la barre sur la largeur réelle du parent."""
+        largeur = fenetre.width() or self._screen_rect.width()
+        self._center_x = max(0, (largeur - _NAV_W) // 2)
+        self.move(self._center_x,
+                  self.y() if self.y() in (self._shown_y, self._hidden_y)
+                  else self._depart_y())
 
     # ── dessin (fond arrondi uniquement en bas) ───────────────────────────────
 
@@ -208,6 +262,12 @@ class _NavPill(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self.rect()
+        # Le rectangle ENTIER d'abord, au noir de la page. Une fenêtre native
+        # ne laisse rien transparaître de ce qu'il y a derrière : les pixels
+        # hors des coins arrondis resteraient indéfinis, et la barre se
+        # découperait sur un fond aléatoire. On les peint donc nous-mêmes de
+        # la couleur qu'ils auraient eue.
+        p.fillRect(r, QColor("#0a0a0a"))
         radius = 10
         path = QPainterPath()
         path.moveTo(r.left(), r.top())
@@ -282,12 +342,7 @@ class _NavPill(QWidget):
             self._hide_timer.start(_HIDE_DELAY_MS)
 
     def hide_now(self) -> None:
-        """Retire la barre SANS attendre, épingle ou pas.
-
-        La barre est au-dessus de toutes les fenêtres : la laisser épinglée
-        par-dessus une AUTRE application ferait un bandeau flottant que
-        personne n'a demandé. Elle revient dès que ZLink reprend la main.
-        """
+        """Retire la barre SANS attendre, épingle ou pas."""
         self._hide_timer.stop()
         if self.y() != self._hidden_y:
             self._slide_up()
@@ -375,7 +430,9 @@ class SingleModeShell:
             else:
                 win.hide()
         self._pill.set_active(idx)
-        self._pill.raise_()
+        # La barre SUIT la vue : elle est enfant de la fenêtre affichée, et
+        # celle qu'on quitte vient d'être masquée avec tout ce qu'elle porte.
+        self._pill.attacher([self.panel, self.fullscreen, self.grid][idx])
 
     def _poser_le_rappel_de_la_barre(self) -> None:
         """F1 fait revenir la barre et l'y laisse, depuis n'importe quelle page.
@@ -406,36 +463,14 @@ class SingleModeShell:
             self._pill.reveal()
             self._pill.raise_()
 
-    @staticmethod
-    def _zlink_au_premier_plan() -> bool:
-        """ZLink a-t-il la main ? Deux avis plutôt qu'un, et le doute lui profite.
-
-        `activeWindow()` seul rendait `None` en permanence sous gamescope, le
-        compositeur de SteamOS : la barre de navigation y était donc masquée
-        DÉFINITIVEMENT dès le lancement, et comme elle est topmost, elle
-        continuait de flotter par-dessus les autres applications. Signalé sur
-        Steam Deck, avec les deux symptômes à la fois.
-
-        `applicationState` répond à la même question par un autre chemin. Tant
-        que l'un des deux dit que ZLink est devant, on le croit : au pire la
-        barre reste un instant de trop, au pire de l'autre côté elle devient
-        introuvable — et il n'y a pas de symétrie entre ces deux torts.
-        """
-        if QApplication.activeWindow() is not None:
-            return True
-        instance = QApplication.instance()
-        if instance is None:
-            return False
-        return instance.applicationState() == Qt.ApplicationState.ApplicationActive
-
     # ── détection zone de déclenchement ──────────────────────────────────────
 
     def _check_cursor(self) -> None:
-        # Ne pas interférer si une autre application est au premier plan. Même
-        # épinglée : la barre est topmost, elle flotterait par-dessus.
-        if not self._zlink_au_premier_plan():
-            self._pill.hide_now()
-            return
+        # Plus de garde de premier plan ici. Elle existait parce que la barre
+        # était topmost et flottait par-dessus les autres applications ; elle
+        # est maintenant ENFANT de la fenêtre affichée et ne peut plus en
+        # sortir. C'est cette garde qui, sous gamescope — où `activeWindow()`
+        # rend toujours None — l'escamotait définitivement.
         pos = QCursor.pos()
         g = self._screen_rect
         in_hotzone = (

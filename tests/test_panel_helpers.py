@@ -1133,3 +1133,54 @@ def test_une_serie_vide_ne_compare_rien():
     from core.history_store import comparaison_possible
 
     assert comparaison_possible([]) is False
+
+
+# ── surimpressions : dans l'application, jamais par-dessus les autres ────────
+
+def test_le_toast_de_rappel_est_un_enfant_et_non_une_fenetre(qtbot):
+    """Il était top-level avec WindowStaysOnTopHint : sous Wayland, un rappel
+    s'affichait par-dessus l'application de quelqu'un d'autre."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QWidget
+
+    page = QWidget()
+    qtbot.addWidget(page)
+    toast = panel._ReminderToast("« Rush final » dans 5 min", page)
+    assert toast.parent() is page
+    assert toast.isWindow() is False
+    assert not (toast.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+
+
+def test_le_toast_reste_dans_le_cadre_de_son_parent(qtbot):
+    """Les coordonnées sont celles du PARENT. Les convertir en global posait
+    le toast hors de la zone visible dès que le parent n'occupait pas
+    l'écran entier."""
+    from PyQt6.QtWidgets import QWidget
+
+    page = QWidget()
+    qtbot.addWidget(page)
+    page.resize(1000, 600)
+    toast = panel._ReminderToast("rappel", page)
+    toast.show_near(page)
+    assert 0 <= toast.x() and toast.x() + toast.width() <= page.width()
+    assert 0 <= toast.y() and toast.y() + toast.height() <= page.height()
+
+
+def test_aucune_surimpression_ne_reste_topmost():
+    """Un widget topmost est topmost pour le COMPOSITEUR, pas seulement pour
+    ZLink : il sort de l'application. Le rapport Steam Deck portait sur deux
+    d'entre eux, la barre de navigation et ce toast."""
+    import pathlib
+
+    racine = pathlib.Path(__file__).parent.parent
+    coupables = []
+    for dossier in ("core", "widgets", "windows"):
+        for chemin in (racine / dossier).rglob("*.py"):
+            for num, ligne in enumerate(
+                    chemin.read_text(encoding="utf-8").split("\n"), 1):
+                # Le drapeau QUALIFIÉ, pas le mot : les docstrings qui
+                # expliquent pourquoi on ne s'en sert plus le citent, et les
+                # compter reviendrait à punir l'explication.
+                if "Qt.WindowType.WindowStaysOnTopHint" in ligne:
+                    coupables.append(f"{chemin.name}:{num}")
+    assert coupables == [], f"surimpressions topmost : {coupables}"

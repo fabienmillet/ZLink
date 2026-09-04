@@ -2876,20 +2876,22 @@ class _FlowLayout(QHBoxLayout):
 # ── Toast de rappel ────────────────────────────────────────────────────────
 
 class _ReminderToast(QWidget):
-    """Toast flottant « Rappel : Nom événement commence dans X min »."""
+    """Toast « Rappel : Nom événement commence dans X min », posé DANS la page.
+
+    Il était top-level avec `WindowStaysOnTopHint`, donc au-dessus de tout au
+    niveau du compositeur — pas seulement de ZLink. Sous Wayland, un rappel
+    s'affichait par-dessus l'application de quelqu'un d'autre, exactement
+    comme la barre de navigation du mode un écran.
+
+    Enfant de son parent, il ne peut plus en sortir. Il n'a plus besoin de
+    `WA_ShowWithoutActivating` non plus : un widget qui n'est pas une fenêtre
+    ne ramène pas l'application au premier plan, et c'est ce que cet attribut
+    servait à empêcher.
+    """
 
     def __init__(self, message: str, parent: QWidget) -> None:
         super().__init__(parent)
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        # Un rappel s'affiche PENDANT qu'on fait autre chose : sans cet
-        # attribut, la fenêtre flottante active l'application, et ZLink
-        # revenait au premier plan à chaque toast — insupportable en mode
-        # mock, où ils tombent en rafale.
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -2943,10 +2945,18 @@ class _ReminderToast(QWidget):
         anim.start()
 
     def show_near(self, parent: QWidget) -> None:
+        """En bas à droite du parent, en coordonnées DE CE PARENT.
+
+        Plus de `mapToGlobal` : le toast n'est plus une fenêtre, ses
+        coordonnées sont celles de son parent. Les convertir en global le
+        posait hors de la zone visible dès que le parent n'occupait pas
+        l'écran entier.
+        """
         self.show()
-        pr = parent.rect()
-        pg = parent.mapToGlobal(pr.bottomRight())
-        self.move(pg.x() - self.width() - 16, pg.y() - self.height() - 16)
+        self.raise_()
+        coin = parent.rect().bottomRight()
+        self.move(max(0, coin.x() - self.width() - 16),
+                  max(0, coin.y() - self.height() - 16))
 
 
 # ── Onglet Programme ───────────────────────────────────────────────────────

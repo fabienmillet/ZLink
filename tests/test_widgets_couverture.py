@@ -1246,6 +1246,7 @@ def test_le_mode_un_ecran_monte_les_trois_vues_et_demarre_sur_le_direct(
             self.actif: int | None = None
             self.on_switch = on_switch
             self.on_close = on_close
+            self.parent_courant = None
             pilules.append(self)
 
         def set_active(self, idx):
@@ -1253,6 +1254,11 @@ def test_le_mode_un_ecran_monte_les_trois_vues_et_demarre_sur_le_direct(
 
         def raise_(self):
             pass
+
+        def attacher(self, fenetre):
+            # La barre est un ENFANT de la vue affichée depuis qu'elle a cessé
+            # d'être une fenêtre topmost : elle est reparentée à chaque bascule.
+            self.parent_courant = fenetre
 
     monkeypatch.setattr(single, "_NavPill", _FaussePilule)
 
@@ -1286,7 +1292,8 @@ def test_une_fenetre_sans_handle_natif_est_quand_meme_affichee(qapp,
     coquille.fullscreen = _FenetreSansHandle("fullscreen")
     coquille.grid = _FenetreSansHandle("grid")
     coquille._pill = types.SimpleNamespace(
-        set_active=lambda idx: None, raise_=lambda: None)
+        set_active=lambda idx: None, raise_=lambda: None,
+        attacher=lambda fenetre: None)
 
     coquille._switch(single.SingleModeShell._IDX_PANEL)
     assert coquille.panel.visible is True

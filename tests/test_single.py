@@ -76,12 +76,17 @@ class _FaussePilule:
         self.masquages = 0
         self.retraits = 0
         self.premier_plan = 0
+        self.parent_courant = None
         self.epinglee = epinglee
 
     def set_active(self, idx):
         self.actif = idx
 
     def raise_(self):
+        self.premier_plan += 1
+
+    def attacher(self, fenetre):
+        self.parent_courant = fenetre
         self.premier_plan += 1
 
     def reveal(self):
@@ -117,23 +122,6 @@ def coquille(qapp, monkeypatch):
     shell.grid = _FausseFenetre("grid")
     shell._pill = _FaussePilule()
     return shell
-
-
-def _feindre_le_premier_plan(monkeypatch, actif: bool) -> None:
-    """Simule un `activeWindow()` muet, comme sous gamescope.
-
-    C'est le NOM IMPORTÉ par le module qui est remplacé, pas la vraie classe
-    QApplication : y poser des attributs perturbe le démontage de pytest-qt,
-    et les tests passaient seuls mais tombaient en groupe.
-    """
-    from PyQt6.QtCore import Qt
-
-    etat = (Qt.ApplicationState.ApplicationActive if actif
-            else Qt.ApplicationState.ApplicationInactive)
-    monkeypatch.setattr(single, "QApplication", types.SimpleNamespace(
-        activeWindow=lambda: None,
-        instance=lambda: types.SimpleNamespace(applicationState=lambda: etat),
-    ))
 
 
 def _visibles(coquille) -> list[str]:
@@ -255,26 +243,31 @@ def test_le_bord_haut_d_un_autre_ecran_ne_compte_pas(coquille, curseur, dx):
     assert coquille._pill.masquages == 1
 
 
-@pytest.mark.parametrize("epinglee", [False, True])
-def test_pas_de_barre_si_zlink_n_est_pas_au_premier_plan(
-        coquille, curseur, monkeypatch, epinglee):
-    """Une barre qui surgit par-dessus une autre application est une nuisance.
+def test_la_barre_est_enfant_de_la_vue_affichee(coquille):
+    """Elle était top-level avec WindowStaysOnTopHint : au-dessus de tout au
+    niveau du COMPOSITEUR, pas seulement des fenêtres de ZLink. Sous Wayland
+    elle sortait de l'application — visible par-dessus les autres programmes,
+    et inatteignable depuis ZLink, dont l'empilement n'est pas garanti.
 
-    Le curseur est ici exactement dans la zone : seul le premier plan décide.
-    L'épingle ne change rien — la barre est au-dessus de TOUTES les fenêtres,
-    pas seulement de celles de ZLink, et elle reviendra avec lui.
+    Enfant de la fenêtre affichée, elle ne peut plus en sortir, et c'est ce
+    qui rend inutile toute la mécanique de détection de premier plan qui
+    l'escamotait — celle-là même qui, sous gamescope, la faisait disparaître
+    pour de bon.
     """
-    coquille._pill.epinglee = epinglee
-    # Les DEUX signaux de premier plan, pas seulement `activeWindow` : depuis
-    # qu'ils sont consultés tous les deux, ne simuler que l'un laissait l'autre
-    # répondre ce que l'environnement de test voulait bien — ce test passait
-    # seul et tombait en suite complète.
-    _feindre_le_premier_plan(monkeypatch, actif=False)
+    coquille._switch(single.SingleModeShell._IDX_GRID)
+    assert coquille._pill.parent_courant is coquille.grid
+    coquille._switch(single.SingleModeShell._IDX_PANEL)
+    assert coquille._pill.parent_courant is coquille.panel
+
+
+def test_le_curseur_seul_decide_de_la_barre(coquille, curseur):
+    """Plus de garde de premier plan : une barre enfant ne peut pas gêner une
+    autre application, donc rien ne justifie de l'escamoter pour elle."""
     g = coquille._screen_rect
     curseur["p"] = QPoint(g.x() + 10, g.y())
     coquille._check_cursor()
-    assert coquille._pill.revelations == 0
-    assert coquille._pill.retraits == 1
+    assert coquille._pill.revelations == 1
+    assert coquille._pill.retraits == 0
 
 
 def test_la_barre_epinglee_reste_meme_loin_du_bord(coquille, curseur):
@@ -538,27 +531,6 @@ def test_retirer_une_barre_deja_cachee_ne_relance_pas_l_animation(pilule):
 # ── retrouver la barre quand le compositeur ne coopère pas ──────────────────
 
 
-def test_la_barre_survit_a_un_activeWindow_muet(coquille, monkeypatch):
-    """Sous gamescope — le compositeur de SteamOS — `activeWindow()` rend
-    `None` en permanence : la barre était masquée DÉFINITIVEMENT dès le
-    lancement, et comme elle est topmost elle continuait de flotter par-dessus
-    les autres applications. Signalé sur Steam Deck, les deux symptômes à la
-    fois.
-    """
-    _feindre_le_premier_plan(monkeypatch, actif=True)
-    coquille._pill.epinglee = True
-    coquille._check_cursor()
-    assert coquille._pill.retraits == 0, "la barre ne doit pas être escamotée"
-
-
-def test_une_autre_application_devant_escamote_toujours_la_barre(coquille, monkeypatch):
-    """Le comportement d'origine reste : topmost et épinglée, elle ferait
-    sinon un bandeau flottant par-dessus l'application de quelqu'un d'autre."""
-    _feindre_le_premier_plan(monkeypatch, actif=False)
-    coquille._check_cursor()
-    assert coquille._pill.retraits == 1
-
-
 def test_f1_epingle_la_barre_et_la_remet_devant(coquille):
     """Sur un Steam Deck on navigue au pavé : la zone de survol en haut de
     l'écran ne se déclenche jamais, et on restait bloqué sur une page."""
@@ -586,3 +558,29 @@ def test_la_touche_est_posee_sur_les_trois_fenetres(coquille, monkeypatch):
             activated=types.SimpleNamespace(connect=lambda _cb: poses.append(parent))))
     coquille._poser_le_rappel_de_la_barre()
     assert poses == [coquille.panel, coquille.fullscreen, coquille.grid]
+
+
+def test_la_barre_est_une_fenetre_native(qapp):
+    """Le lecteur mpv pose `WA_NativeWindow` — il le faut pour `--wid` — et une
+    fenêtre native est composée par le serveur graphique : elle passe AU-DESSUS
+    de tout widget Qt frère, quel que soit `raise_()`.
+
+    La barre, devenue un simple enfant, passait donc dessous et disparaissait
+    de l'écran. Native elle aussi, les deux s'empilent selon le même ordre.
+    """
+    from PyQt6.QtCore import Qt
+
+    pilule = single._NavPill(qapp.primaryScreen(), lambda i: None,
+                             lambda: None, pinned=True)
+    assert pilule.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+    # Sans cela, tous ses parents deviendraient natifs au passage.
+    assert pilule.testAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+
+
+def test_la_barre_peint_tout_son_rectangle(qapp):
+    """Une fenêtre native ne laisse rien transparaître de ce qu'il y a
+    derrière : les pixels hors des coins arrondis resteraient indéfinis."""
+    import inspect
+
+    source = inspect.getsource(single._NavPill.paintEvent)
+    assert "fillRect" in source, "les coins se découperaient sur un fond aléatoire"
