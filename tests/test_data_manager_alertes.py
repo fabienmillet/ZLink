@@ -22,6 +22,7 @@ from core import alerts as _alerts
 from core.api_client import DonationGoal, GoalWithStreamer, StreamerInfo
 from core.data_manager import (
     _DONATION_ALERT_COOLDOWN_S,
+    _DONATION_ALERTS_PER_HOUR,
     _DONATION_FLOOD_POLLS,
     DataManager,
 )
@@ -284,7 +285,9 @@ def test_l_alerte_porte_le_nom_affichable_ou_le_login(dm):
     recu = _collecte(dm.big_donation)
     dm._emettre_alertes_dons([(5000.0, _streamer(display=""), "don")],
                              par_heure=12, now=T0)
-    assert recu == [("zerator", "zerator", 5000.0, "don")]
+    # Donateur vide : ce chemin-ci part d'un écart de cumul entre deux
+    # sondages, il ne sait pas QUI a donné. Seul le flux temps réel le sait.
+    assert recu == [("zerator", "zerator", 5000.0, "don", "")]
 
 
 # ── _detect_big_donations : le détecteur complet ─────────────────────────────
@@ -608,3 +611,66 @@ def test_appliquer_les_objectifs_publie_le_cache_et_arme_les_detecteurs(dm):
     # Les deux détecteurs ont pris leur relevé de référence.
     assert dm._goals_init_done is True
     assert dm._imminent_init_done is True
+
+
+# ── dons exacts, poussés par le flux ─────────────────────────────────────────
+
+def _don(montant=SEUIL + 500.0, donateur="Nihil0th", chaine="ZeratoR",
+         id_="d1") -> dict:
+    return {"id": id_, "donor": donateur, "amount": montant,
+            "streamer": chaine, "comment": None,
+            "createdAt": "2026-09-04T18:00:00+00:00"}
+
+
+def test_le_flux_annonce_le_donateur(dm):
+    """C'est toute la différence avec le sondage : on sait QUI a donné."""
+    recu = _collecte(dm.big_donation)
+    dm._sur_don_temps_reel(_don())
+    assert recu == [("zerator", "ZeratoR", SEUIL + 500.0, "don", "Nihil0th")]
+
+
+def test_un_petit_don_ne_declenche_rien(dm):
+    """Un ZEvent en distribue des milliers : seuls les gros montent au fil."""
+    recu = _collecte(dm.big_donation)
+    dm._sur_don_temps_reel(_don(montant=SEUIL - 1.0))
+    assert recu == []
+
+
+@pytest.mark.parametrize("charge", [
+    None, "texte", 42, {}, {"amount": "beaucoup"}, {"donor": "x"},
+])
+def test_un_don_illisible_ne_leve_jamais(dm, charge):
+    """La donnée vient d'un navigateur : on ne suppose rien de sa forme."""
+    dm._sur_don_temps_reel(charge)
+
+
+def test_le_plafond_horaire_est_partage_avec_le_sondage(dm):
+    """C'est le même quota d'alertes, quelle que soit la porte d'entrée."""
+    recu = _collecte(dm.big_donation)
+    for i in range(30):
+        dm._sur_don_temps_reel(_don(id_=f"d{i}"))
+    assert len(recu) == _DONATION_ALERTS_PER_HOUR
+
+
+def test_le_sondage_se_tait_quand_le_flux_tient(dm, horloge):
+    """Sans quoi le même don donnerait deux lignes au fil — et la seconde,
+    tirée d'un écart de cumul, serait la moins précise des deux."""
+    class _FluxOuvert:
+        ouvert = True
+        total = None
+
+    dm._flux = _FluxOuvert()
+    recu = _collecte(dm.big_donation)
+    dm._detect_big_donations([_streamer(donation=0.0)])
+    dm._detect_big_donations([_streamer(donation=9000.0)])
+    assert recu == []
+
+
+def test_une_chaine_inconnue_garde_le_nom_annonce(dm):
+    """Mieux vaut une alerte qu'on ne peut pas rattacher qu'une alerte perdue."""
+    login, display = dm._identifier_la_chaine("ChaineJamaisVue")
+    assert (login, display) == ("chainejamaisvue", "ChaineJamaisVue")
+
+
+def test_une_chaine_sans_nom_ne_rend_rien(dm):
+    assert dm._identifier_la_chaine("  ") == ("", "")

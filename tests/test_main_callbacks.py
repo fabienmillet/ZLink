@@ -642,3 +642,49 @@ def test_la_cellule_et_la_banniere_partagent_leur_couleur(raids_branches):
     p = raids_branches("zerator", "ponce")
     p["grille"].raid_detected.emit("zerator", "ponce", 4200)
     assert p["grille"].pulses[0][1] == main._COULEUR_RAID
+
+
+# ── big_donation : tous les branchements encaissent la signature ─────────────
+
+def test_chaque_branchement_de_don_encaisse_les_cinq_arguments(qapp):
+    """PyQt passe autant d'arguments que le callable peut EN PRENDRE, en
+    comptant ceux à valeur par défaut — il ne tronque pas comme on le croirait.
+
+    Un lambda qui capture par `g=grid` voyait donc son `g` écrasé par le
+    donateur quand le signal est passé de quatre à cinq arguments : `g` devenait
+    une chaîne, et `g.grid` levait AttributeError en pleine soirée. Ce test
+    rejoue le vrai câblage de main.py plutôt que d'en supposer la forme.
+    """
+    import inspect
+
+    source = inspect.getsource(main)
+    debut = 0
+    branchements = []
+    while True:
+        debut = source.find("data_manager.big_donation.connect(", debut)
+        if debut < 0:
+            break
+        fin = source.find("\n    )", debut)
+        branchements.append(source[debut:fin if fin > 0 else debut + 400])
+        debut += 1
+    assert branchements, "plus aucun branchement de big_donation dans main.py"
+
+    for extrait in branchements:
+        if "lambda" not in extrait:
+            continue
+        entete = extrait.split("lambda", 1)[1].split(":", 1)[0]
+        params = [p.strip() for p in entete.split(",") if p.strip()]
+        # Ce qui distingue une CAPTURE d'un paramètre de signal à valeur par
+        # défaut, c'est la nature du défaut : `donateur=""` attend le signal,
+        # `g=grid` referme sur un objet du dehors. Seul le second est en péril.
+        for rang, param in enumerate(params):
+            if "=" not in param:
+                continue
+            defaut = param.split("=", 1)[1].strip()
+            littéral = (not defaut or defaut[0] in "\"'0123456789-["
+                        or defaut in ("True", "False", "None"))
+            if littéral:
+                continue
+            assert rang >= 5, (
+                f"la capture « {param} » est en position {rang} : le signal "
+                f"big_donation y écrit son cinquième argument et l'écrasera")

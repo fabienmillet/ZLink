@@ -401,6 +401,9 @@ def _brancher_panel(
     from core import sounds as _sounds
 
     data_manager.global_stats_updated.connect(panel.update_stats)
+    data_manager.don_recu.connect(panel.ajouter_don)
+    data_manager.historique_dons.connect(panel.poser_historique_dons)
+    data_manager.flux_dons_ouvert.connect(panel.signaler_flux_dons)
     data_manager.events_updated.connect(panel.update_events)
     data_manager.history_updated.connect(panel.update_history)
     data_manager.goals_updated.connect(panel.update_goals)
@@ -481,7 +484,11 @@ def _brancher_grille_streams(
     data_manager.big_donation.connect(
         # Un bombardement dure : sa cellule clignote plus longtemps, le
         # temps qu'on ait la chance de la voir.
-        lambda login, _d, _a, nature, g=grid: g.grid.pulse_cell(
+        # `_donateur` est nommé bien qu'inutile ici, et ce n'est pas du zèle :
+        # PyQt passe autant d'arguments que le callable peut en prendre, en
+        # comptant ceux à valeur par défaut. Sans ce paramètre, le donateur
+        # était affecté à `g` — qui devenait une chaîne, et `g.grid` levait.
+        lambda login, _d, _a, nature, _donateur="", g=grid: g.grid.pulse_cell(
             login, "#f5c518", 10.0 if nature == "bombardement" else 6.0)
     )
     # L'audio de la grille vient de cellules qu'on ne regarde pas : le plein
@@ -846,13 +853,9 @@ def _brancher_fil_evenements(panel, grid, data_manager) -> None:
                 .replace(",", "\u202f") + f"« {goal} »")
     )
     data_manager.big_donation.connect(
-        lambda login, display, amount, nature, p=panel:
-            p.add_feed_event(
-                "money", login,
-                (f"Bombardement de dons sur {display} — "
-                 if nature == "bombardement"
-                 else f"{display} vient de recevoir ")
-                + f"{amount:,.0f} €".replace(",", "\u202f"))
+        lambda login, display, amount, nature, donateur="", p=panel:
+            p.add_feed_event("money", login,
+                             _libelle_de_don(display, amount, nature, donateur))
     )
     data_manager.milestone_reached.connect(
         lambda amount, label, p=panel:
@@ -893,6 +896,23 @@ def _brancher_surveillance_ressources(app, fullscreen, panel):
     app.aboutToQuit.connect(veille.stop)
     veille.start()
     return veille
+
+
+def _libelle_de_don(display: str, montant: float, nature: str,
+                    donateur: str = "") -> str:
+    """La ligne du fil d'événements pour un don.
+
+    Trois formes, et c'est la SOURCE qui décide : le flux temps réel connaît le
+    don exact et son donateur, le sondage ne voit qu'un écart de cumul sur
+    trente secondes. Dire « X vient de recevoir » quand on sait que c'est Y qui
+    a donné serait perdre la seule information qu'on regarde vraiment.
+    """
+    somme = f"{montant:,.0f} €".replace(",", "\u202f")
+    if nature == "bombardement":
+        return f"Bombardement de dons sur {display} — {somme}"
+    if donateur:
+        return f"{donateur} a donné {somme} à {display}"
+    return f"{display} vient de recevoir {somme}"
 
 
 def _brancher_journal_session(app, data_manager, fullscreen, grid) -> None:

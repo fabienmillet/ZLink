@@ -1264,7 +1264,7 @@ def fenetre(qtbot, monkeypatch, favoris):
     return w
 
 
-ONGLETS = ["Accueil", "Programme", "Stats", "Goals", "Clips",
+ONGLETS = ["Accueil", "Programme", "Stats", "Goals", "Clips", "Dons",
            "Streamers", "Mixer"]
 
 
@@ -1283,7 +1283,7 @@ def test_l_onglet_grille_n_existe_qu_en_mode_multi_ecrans(qtbot, monkeypatch,
     assert [b.text() for b in w._tab_btns] == ONGLETS
 
 
-@pytest.mark.parametrize("nom,index", list(zip(ONGLETS, range(6))))
+@pytest.mark.parametrize("nom,index", [(n, i) for i, n in enumerate(ONGLETS)])
 def test_chaque_onglet_montre_sa_page(fenetre, nom, index):
     fenetre.switch_to_tab(nom)
     assert fenetre._stack.currentIndex() == index

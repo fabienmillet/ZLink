@@ -25,9 +25,12 @@ qui ouvre le socket. Rien n'est contourné : le challenge est résolu, pas évit
     {"type":"donation","donation":{…}}           à chaque don
     {"type":"amount","amount":880074.03}         la cagnotte
 
-Le `snapshot` est de l'HISTORIQUE — les derniers dons déjà passés. Il est lu
-pour rien d'autre que sa présence : le republier ferait sonner toutes les
-alertes de ZLink d'un coup à chaque reconnexion.
+Le `snapshot` est de l'HISTORIQUE — les derniers dons déjà passés. Il sort par
+`historique_recu`, JAMAIS par `don_recu` : les deux canaux ne sont pas
+interchangeables. Le fil des dons veut cet historique, sans quoi il s'ouvre
+vide ; une alerte le prendrait pour des dons qui viennent d'arriver et sonnerait
+cent fois à chaque reconnexion. Séparer les deux, c'est laisser chaque
+destinataire choisir.
 
 **Le coût.** Un moteur web vivant en permanence, pour un compteur. C'est le
 prix du challenge, et c'est pour cela que ce flux est OPTIONNEL : sans lui, le
@@ -58,11 +61,15 @@ PAGE_URL = "https://zevent.marentdev.eu/"
 #: Le flux, tel que le site l'expose.
 SOCKET_URL = "wss://zevent.marentdev.eu/api/flux/socket"
 
-#: Cadence de vidage de la file JavaScript. Ce n'est PAS la latence du flux :
-#: les messages arrivent quand ils arrivent, ce timer ne fait que les
-#: transporter du navigateur vers Qt. Une demi-seconde est indiscernable du
-#: direct pour un compteur, et ne coûte qu'un `runJavaScript` par tour.
-_VIDAGE_MS = 500
+#: Cadence de vidage de la file JavaScript. C'est bien la latence ajoutée au
+#: flux : les messages arrivent instantanément dans le navigateur, ce timer ne
+#: fait que les transporter vers Qt, et un don attend donc jusqu'à un tour.
+#:
+#: Une demi-seconde suffisait pour un compteur, mais le fil des dons, lui, se
+#: compare à celui du site — qui est poussé. Le retard s'y voyait, par à-coups.
+#: Cent vingt millisecondes se lisent comme du direct, et huit `runJavaScript`
+#: par seconde ne coûtent rien à Chromium.
+_VIDAGE_MS = 120
 
 #: Plafond de la file côté JavaScript. Si Qt cessait de vider — fenêtre gelée,
 #: page rechargée — la file grossirait sans fin dans le navigateur.
@@ -82,7 +89,7 @@ def _js_ouverture(socket_url: str) -> str:
     return """
 (function () {
   if (window.__zlinkFlux) return "deja";
-  var etat = {file: [], total: null, ouvert: false, snapshots: 0};
+  var etat = {file: [], hist: [], total: null, ouvert: false};
   window.__zlinkFlux = etat;
   var sock = null, tentatives = 0;
 
@@ -116,8 +123,11 @@ def _js_ouverture(socket_url: str) -> str:
       } else if (m.type === "donation") {
         if (m.donation) empiler(m.donation);
       } else if (m.type === "snapshot") {
-        // Historique : compté, jamais republié. Voir le module.
-        etat.snapshots += 1;
+        // Historique, mis de côté : voir le module. Écrasé et non concaténé —
+        // une reconnexion renvoie un snapshot qui recouvre le précédent.
+        if (Array.isArray(m.donations)) {
+          etat.hist = m.donations.slice(0, %(file_max)d);
+        }
       }
     };
   }
@@ -134,7 +144,8 @@ _JS_VIDAGE = """
   var e = window.__zlinkFlux;
   if (!e) return "{}";
   return JSON.stringify({
-    ouvert: e.ouvert, total: e.total, dons: e.file.splice(0, %(lot)d)
+    ouvert: e.ouvert, total: e.total, dons: e.file.splice(0, %(lot)d),
+    hist: e.hist.splice(0)
   });
 })();
 """ % {"lot": _LOT_MAX}
@@ -154,8 +165,10 @@ class FluxCagnotte(QObject):
 
     #: Nouvelle cagnotte totale, en euros.
     cagnotte_changee = pyqtSignal(float)
-    #: Un don, tel que le flux l'annonce (dict brut). Jamais ceux du snapshot.
+    #: Un don qui VIENT d'arriver (dict brut). Jamais ceux du snapshot.
     don_recu = pyqtSignal(object)
+    #: Les derniers dons déjà passés, en un lot, à chaque (re)connexion.
+    historique_recu = pyqtSignal(object)
     #: Le socket vient de s'ouvrir (True) ou de tomber (False).
     etat_change = pyqtSignal(bool)
 
@@ -226,30 +239,58 @@ class FluxCagnotte(QObject):
         self._page.runJavaScript(_JS_VIDAGE, self._appliquer)
 
     def _appliquer(self, brut: object) -> None:
-        """Traite le résultat du vidage. Ne lève jamais : c'est un rappel Qt."""
+        """Traite le résultat du vidage. Ne lève jamais : c'est un rappel Qt.
+
+        Quatre étapes nommées plutôt qu'un bloc unique : la donnée vient d'un
+        navigateur, chaque champ demande sa propre méfiance, et les gardes
+        s'empilaient au point de ne plus se lire.
+        """
+        etat = self._decoder(brut)
+        if etat is None:
+            return
+        self._noter_ouverture(bool(etat.get("ouvert")))
+        self._noter_total(etat.get("total"))
+        self._distribuer_les_dons(etat)
+
+    @staticmethod
+    def _decoder(brut: object) -> dict | None:
+        """Le vidage, en dictionnaire. None si ce n'en est pas un d'utilisable."""
         try:
             etat = json.loads(brut) if isinstance(brut, str) else {}
         except ValueError:
-            return
-        if not isinstance(etat, dict) or not etat:
-            return
+            return None
+        return etat if isinstance(etat, dict) and etat else None
 
-        ouvert = bool(etat.get("ouvert"))
-        if ouvert != self._ouvert:
-            self._ouvert = ouvert
-            logger.info("Flux cagnotte : socket %s",
-                        "ouvert" if ouvert else "fermé")
-            self.etat_change.emit(ouvert)
+    def _noter_ouverture(self, ouvert: bool) -> None:
+        """Signale l'ouverture ou la chute du socket, au changement seulement."""
+        if ouvert == self._ouvert:
+            return
+        self._ouvert = ouvert
+        logger.info("Flux cagnotte : socket %s", "ouvert" if ouvert else "fermé")
+        self.etat_change.emit(ouvert)
 
-        total = etat.get("total")
-        if isinstance(total, (int, float)) and total > 0:
-            valeur = float(total)
-            # Émis seulement quand il CHANGE : le flux répète le total à
-            # chaque don, et vingt émissions par seconde repeindraient le
-            # panel pour rien.
-            if valeur != self._total:
-                self._total = valeur
-                self.cagnotte_changee.emit(valeur)
+    def _noter_total(self, total: object) -> None:
+        """Nouvelle cagnotte, si elle est plausible ET différente.
+
+        Le flux répète le total à chaque don : émettre à chaque fois ferait
+        repeindre le panel vingt fois par seconde pour la même valeur.
+
+        `bool` est écarté explicitement — c'est un `int` pour Python, et un
+        `True` passerait pour une cagnotte d'un euro.
+        """
+        if isinstance(total, bool) or not isinstance(total, (int, float)):
+            return
+        valeur = float(total)
+        if valeur <= 0 or valeur == self._total:
+            return
+        self._total = valeur
+        self.cagnotte_changee.emit(valeur)
+
+    def _distribuer_les_dons(self, etat: dict) -> None:
+        """L'historique par son canal, les dons du direct par le leur."""
+        historique = [d for d in (etat.get("hist") or []) if isinstance(d, dict)]
+        if historique:
+            self.historique_recu.emit(historique)
 
         for don in etat.get("dons") or []:
             if isinstance(don, dict):

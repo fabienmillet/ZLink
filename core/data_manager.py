@@ -121,21 +121,31 @@ async def _gather_zevent_gdoc() -> tuple[list[Participation], GlobalStats, list[
     return participations, stats, streamers   # type: ignore[return-value]
 
 
-def _appliquer_relais(stats: GlobalStats, releve) -> None:
-    """Remplace la cagnotte officielle par celle du relais, quand il en a une.
+def _hausser_la_cagnotte(stats: GlobalStats, total: float | None) -> bool:
+    """Porte la cagnotte de `stats` à `total`, si celui-ci est meilleur.
 
-    Le relais compte plus tôt et plus fin : le nombre affiché monte de quelques
-    dizaines de milliers d'euros par rapport à zevent.fr, sans que l'un des deux
-    ait tort. On garde le mieux renseigné.
+    La règle unique des TROIS sources — zevent.fr, le relais HTTP, le flux
+    temps réel. Elles ne comptent pas au même rythme et l'écart atteint
+    quelques dizaines de milliers d'euros, sans qu'aucune ait tort : on garde
+    la mieux renseignée, jamais la plus basse.
 
-    Rien n'est touché si le relais n'a pas répondu, ou s'il rend MOINS que la
-    source officielle : une cagnotte qui recule à l'écran est toujours une
-    erreur de lecture, jamais un fait, et l'officielle a le dernier mot.
+    Une cagnotte qui recule à l'écran est toujours une erreur de lecture,
+    jamais un fait.
     """
-    if releve is None or releve.total <= stats.donation_total:
-        return
-    stats.donation_total = releve.total
-    stats.donation_formatted = _format_euros(releve.total)
+    try:
+        valeur = float(total)          # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    if valeur <= stats.donation_total:
+        return False
+    stats.donation_total = valeur
+    stats.donation_formatted = _format_euros(valeur)
+    return True
+
+
+def _appliquer_relais(stats: GlobalStats, releve) -> None:
+    """Applique le relevé du relais HTTP à la cagnotte du poll."""
+    _hausser_la_cagnotte(stats, releve.total if releve is not None else None)
 
 
 def _apply_participations_to_streamers(
@@ -199,6 +209,9 @@ class DataManager(QObject):
 
     streamers_updated      = pyqtSignal(list)    # list[StreamerInfo]
     global_stats_updated   = pyqtSignal(object)  # GlobalStats
+    don_recu               = pyqtSignal(object)  # un don qui vient d'arriver
+    historique_dons        = pyqtSignal(object)  # lot des derniers dons passés
+    flux_dons_ouvert       = pyqtSignal(bool)    # état du flux temps réel
     events_updated         = pyqtSignal(list)    # list[EventItem] (tous les jours)
     history_updated        = pyqtSignal(object)  # HistoryStore
     goals_updated          = pyqtSignal(list)    # list[GoalWithStreamer]
@@ -209,7 +222,12 @@ class DataManager(QObject):
     milestone_reached      = pyqtSignal(float, str) # (montant, libellé) — palier de cagnotte franchi
     goal_imminent          = pyqtSignal(str, str, str, float, str) # (login, display, objectif, reste €, url de don)
     top_stream_entered     = pyqtSignal(str, str, int, int) # (login, display, viewers, rang) — entrée dans le top
-    big_donation           = pyqtSignal(str, str, float, str) # (login, display, montant, nature) — nature : "don" ou "bombardement"
+    #: (login, display, montant, nature, donateur). `nature` vaut "don" ou
+    #: "bombardement" ; `donateur` n'est renseigné QUE par le flux temps réel,
+    #: seul à connaître qui a donné — le sondage, lui, ne voit qu'un cumul.
+    #: Ajouté EN FIN de signature : PyQt tronque les arguments qu'un slot
+    #: n'accepte pas, les branchements à quatre paramètres restent valides.
+    big_donation           = pyqtSignal(str, str, float, str, str)
 
     # signaux internes pour le cross-thread (worker → main thread)
     _sig_streamers_ready   = pyqtSignal(object, object, list)  # participations, stats, streamers
@@ -243,6 +261,12 @@ class DataManager(QObject):
         # reste inerte, et le relais HTTP de `_gather_zevent_gdoc` suffit.
         self._flux = FluxCagnotte(self)
         self._flux.cagnotte_changee.connect(self._sur_cagnotte_temps_reel)
+        # Relayés tels quels : le panel écoute le concentrateur de données,
+        # il n'a pas à connaître le moteur web qui les apporte.
+        self._flux.don_recu.connect(self.don_recu)
+        self._flux.don_recu.connect(self._sur_don_temps_reel)
+        self._flux.historique_recu.connect(self.historique_dons)
+        self._flux.etat_change.connect(self.flux_dons_ouvert)
 
         self._timer_streamers = QTimer(self)
         self._timer_streamers.setInterval(_STREAMER_POLL_MS)
@@ -316,10 +340,8 @@ class DataManager(QObject):
         Une cagnotte qui recule est toujours une erreur de lecture : on ne
         redescend pas. Le poll, lui, réaligne sur la source officielle.
         """
-        if total <= self._stats.donation_total:
+        if not _hausser_la_cagnotte(self._stats, total):
             return
-        self._stats.donation_total = total
-        self._stats.donation_formatted = _format_euros(total)
         self._detect_milestone(total)
         self.global_stats_updated.emit(self._stats)
 
@@ -489,6 +511,12 @@ class DataManager(QObject):
         self._detect_top_entry(streamers)
 
         self._streamers = streamers
+        # Le poll reconstruit un GlobalStats complet et l'installait tel quel,
+        # ÉCRASANT ce que le flux temps réel avait déjà poussé — plus frais de
+        # trente secondes. Le compteur redescendait à chaque tour de poll, puis
+        # remontait au don suivant : une dent de scie toutes les trente
+        # secondes, et un point d'historique trop bas à chaque relevé.
+        _hausser_la_cagnotte(stats, self._flux.total)
         self._stats = stats
         self._uuid_to_name = {p.streamer_id: p.display for p in self._participations}
         self._uuid_to_name.update({s.gdoc_id: s.display for s in streamers if s.gdoc_id})
@@ -635,6 +663,14 @@ class DataManager(QObject):
         """
         if not _alerts.enabled("donation"):
             return
+        # Le flux temps réel annonce le don EXACT, avec son donateur. Tant
+        # qu'il tient, cette détection-ci ferait doublon — et en moins bien :
+        # elle ne mesure qu'un écart de cumul sur trente secondes, où un gros
+        # don et vingt petits se ressemblent. Elle reprend la main dès que le
+        # flux tombe, ce qui est exactement son rôle.
+        if self._flux.ouvert:
+            self._donations_init_done = True
+            return
         hw = self._donation_alert_config()
         seuil = float(hw.get("threshold", _DONATION_ALERT_EUR))
         cooldown = float(hw.get("cooldown_s", _DONATION_ALERT_COOLDOWN_S))
@@ -711,7 +747,64 @@ class DataManager(QObject):
             logger.info("Dons — %s sur %s : +%.0f €",
                         nature, s.twitch_login, montant)
             self.big_donation.emit(
-                s.twitch_login, s.display or s.twitch_login, montant, nature)
+                s.twitch_login, s.display or s.twitch_login, montant, nature, "")
+
+    def _sur_don_temps_reel(self, don: object) -> None:
+        """Un don EXACT, poussé par le flux : on sait qui, combien, et pour qui.
+
+        C'est ce que le sondage ne pouvait pas dire. Il ne voyait qu'un cumul
+        par chaîne entre deux relevés, d'où son « vient de recevoir » : trente
+        secondes agrègent aussi bien un don de cinq cents euros que vingt de
+        vingt-cinq.
+
+        Le plafond horaire est PARTAGÉ avec la détection par sondage : c'est le
+        même quota d'alertes, quelle que soit la porte par laquelle elles
+        entrent, et les deux ne tournent jamais en même temps de toute façon.
+        """
+        if not isinstance(don, dict) or not _alerts.enabled("donation"):
+            return
+        try:
+            montant = float(don.get("amount") or 0.0)
+        except (TypeError, ValueError):
+            return
+        reglages = self._donation_alert_config()
+        if montant < float(reglages.get("threshold", _DONATION_ALERT_EUR)):
+            return
+
+        now = time.monotonic()
+        par_heure = max(1, int(reglages.get("per_hour", _DONATION_ALERTS_PER_HOUR)))
+        self._donation_alert_times = [
+            t for t in self._donation_alert_times if now - t < 3600.0]
+        if len(self._donation_alert_times) >= par_heure:
+            logger.debug("Don de %.0f € non annoncé : plafond horaire atteint",
+                         montant)
+            return
+        self._donation_alert_times.append(now)
+
+        login, display = self._identifier_la_chaine(str(don.get("streamer") or ""))
+        donateur = str(don.get("donor") or "").strip()
+        logger.info("Don — %s : %.0f € pour %s", donateur or "anonyme",
+                    montant, display or "?")
+        self.big_donation.emit(login, display, montant, "don", donateur)
+
+    def _identifier_la_chaine(self, annonce: str) -> tuple[str, str]:
+        """(login Twitch, nom affiché) pour la chaîne nommée par le flux.
+
+        Le flux annonce un nom d'affichage — « Joueur_du_Grenier » — là où le
+        reste de ZLink travaille sur des logins en minuscules. Sans cette
+        traduction, la cellule à faire clignoter ne serait jamais retrouvée.
+
+        Rend le nom annoncé tel quel si la chaîne est inconnue : mieux vaut
+        une alerte qu'on ne peut pas rattacher qu'une alerte perdue.
+        """
+        vise = annonce.strip()
+        if not vise:
+            return "", ""
+        bas = vise.lower()
+        for s in self._streamers:
+            if s.twitch_login.lower() == bas or (s.display or "").lower() == bas:
+                return s.twitch_login, s.display or s.twitch_login
+        return bas, vise
 
     def _donation_alert_config(self) -> dict:
         """Réglages des alertes de dons, tenus à jour par reload_config."""

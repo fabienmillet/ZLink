@@ -19,7 +19,7 @@ import pytest
 
 from core.api_client import GlobalStats
 from core.cagnotte_marentdev import CagnotteRelais, RelaisCagnotte
-from core.data_manager import _appliquer_relais
+from core.data_manager import _appliquer_relais, _hausser_la_cagnotte
 
 
 # ── doubles ──────────────────────────────────────────────────────────────────
@@ -174,3 +174,28 @@ def test_la_cagnotte_officielle_ne_recule_jamais(releve):
     _appliquer_relais(stats, releve)
     assert stats.donation_total == 835473.0
     assert stats.donation_formatted == "835 473 €"
+
+
+# ── la règle commune aux trois sources ───────────────────────────────────────
+
+def test_la_cagnotte_monte_vers_la_source_la_mieux_renseignee():
+    stats = _stats()
+    assert _hausser_la_cagnotte(stats, 900000.0) is True
+    assert stats.donation_total == 900000.0
+    assert stats.donation_formatted == "900\u202f000 €"
+
+
+@pytest.mark.parametrize("total", [None, 0, -1, 835473.0, 800000.0, "beaucoup"])
+def test_rien_ne_fait_jamais_redescendre_la_cagnotte(total):
+    stats = _stats()
+    assert _hausser_la_cagnotte(stats, total) is False
+    assert stats.donation_total == 835473.0
+
+
+def test_le_poll_n_ecrase_pas_ce_que_le_flux_a_pousse():
+    """La dent de scie : le poll reconstruit un GlobalStats toutes les trente
+    secondes et l'installait tel quel, écrasant la valeur du socket — plus
+    fraîche. Le compteur redescendait, puis remontait au don suivant."""
+    du_poll = _stats(860000.0)            # relais HTTP, vieux de 30 s
+    _hausser_la_cagnotte(du_poll, 889607.65)   # ce que le flux sait déjà
+    assert du_poll.donation_total == 889607.65

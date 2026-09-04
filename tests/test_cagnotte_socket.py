@@ -25,9 +25,10 @@ def flux(qtbot):
     return f
 
 
-def _etat(ouvert=True, total=None, dons=()):
+def _etat(ouvert=True, total=None, dons=(), hist=()):
     """Ce que le vidage JavaScript rend."""
-    return json.dumps({"ouvert": ouvert, "total": total, "dons": list(dons)})
+    return json.dumps({"ouvert": ouvert, "total": total,
+                       "dons": list(dons), "hist": list(hist)})
 
 
 # ── cagnotte ─────────────────────────────────────────────────────────────────
@@ -125,9 +126,31 @@ def test_le_script_est_reentrant():
     assert "if (window.__zlinkFlux) return" in js
 
 
-def test_le_snapshot_n_est_pas_republie():
-    """C'est de l'historique : le rejouer ferait sonner toutes les alertes de
-    ZLink d'un coup à chaque reconnexion."""
+def test_le_snapshot_ne_passe_pas_par_la_file_du_direct():
+    """Le rejouer comme du direct ferait sonner toutes les alertes de ZLink
+    d'un coup à chaque reconnexion. Il part sur `hist`, pas sur `file`."""
     js = _js_ouverture("wss://exemple/flux")
     debut = js.index('m.type === "snapshot"')
     assert "empiler" not in js[debut:]
+    assert "etat.hist" in js[debut:]
+
+
+def test_l_historique_sort_par_son_propre_canal(flux):
+    """Le fil des dons le veut — sans lui l'onglet s'ouvre vide. Une alerte,
+    elle, le prendrait pour des dons qui viennent d'arriver."""
+    passes, directs = [], []
+    flux.historique_recu.connect(passes.append)
+    flux.don_recu.connect(directs.append)
+    flux._appliquer(_etat(hist=[{"donor": "a"}, {"donor": "b"}],
+                          dons=[{"donor": "c"}]))
+    assert passes == [[{"donor": "a"}, {"donor": "b"}]]
+    assert directs == [{"donor": "c"}]
+
+
+def test_un_historique_vide_n_emet_rien(flux):
+    """Chaque vidage rend `hist` : émettre une liste vide deux fois par
+    seconde ferait repeindre le fil pour rien."""
+    vus = []
+    flux.historique_recu.connect(vus.append)
+    flux._appliquer(_etat(hist=[]))
+    assert vus == []

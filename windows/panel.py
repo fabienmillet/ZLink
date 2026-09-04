@@ -14,6 +14,7 @@ import os
 import logging
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 import html as _html
 from pathlib import Path
@@ -300,6 +301,9 @@ _SS_GREEN_SPACED = "color: #00ff87; letter-spacing: 1px;"
 _SS_WHITE_CLEAR  = "color: #ffffff; border: none; background: transparent;"
 _SS_GREEN_CLEAR  = "color: #00ff87; border: none; background: transparent;"
 _SS_GREY_CLEAR   = "color: #555555; border: none; background: transparent;"
+_SS_MUTED_CLEAR  = "color: #888888; border: none; background: transparent;"
+_SS_FAINT_CLEAR  = "color: #444444; border: none; background: transparent;"
+_SS_SOFT_CLEAR   = "color: #cccccc; border: none; background: transparent;"
 _SS_BG_DARK      = "background-color: #0a0a0a;"
 
 #: Feuilles de style répétées, nommées une fois. Le nom dit l'INTENTION :
@@ -318,6 +322,10 @@ _SS_VERT_NU = "color: #00ff87; background: transparent;"
 _SS_GRIS_NU = "color: #555555; background: transparent;"
 #: Gris le plus effacé : présent, mais qui ne réclame rien.
 _SS_GRIS_EFFACE = "color: #444444; background: transparent;"
+#: Blanc franc sur ce qu'il y a derrière — le texte qu'on lit en premier.
+_SS_BLANC_NU = "color: #ffffff; background: transparent;"
+#: Gris clair : lisible sans appeler l'œil. Plus présent que _SS_GRIS_NU.
+_SS_GRIS_CLAIR_NU = "color: #888888; background: transparent;"
 #: Le noir du fond de page, sous les cartes. Il apparaît aussi dans
 #: _SS_SCROLL_NU, où il est écrit en toutes lettres : une feuille de style Qt
 #: n'accepte pas d'interpolation, et la découper pour l'y glisser la rendrait
@@ -939,7 +947,7 @@ class _AccueilPlayerCard(QFrame):
         # Ligne 4 — cagnotte
         self._donation_lbl = QLabel("")
         self._donation_lbl.setFont(QFont(_FONT_MONO, 11))
-        self._donation_lbl.setStyleSheet("color: #888888; border: none; background: transparent;")
+        self._donation_lbl.setStyleSheet(_SS_MUTED_CLEAR)
         root.addWidget(self._donation_lbl)
 
     def set_streamer(
@@ -1744,14 +1752,14 @@ class _AccueilGoalItem(QWidget):
         streamer_lbl = QLabel(_couper_avec_points(g.streamer_display, 16))
         streamer_lbl.setTextFormat(Qt.TextFormat.PlainText)
         streamer_lbl.setFont(_bold_font(_FONT_SEGOE, 11))
-        streamer_lbl.setStyleSheet("color: #ffffff; background: transparent;")
+        streamer_lbl.setStyleSheet(_SS_BLANC_NU)
         if streamer_lbl.text() != g.streamer_display:
             streamer_lbl.setToolTip(_infobulle(g.streamer_display))
         row1.addWidget(streamer_lbl)
         goal_lbl = QLabel(_couper_avec_points(g.goal_name, 30))
         goal_lbl.setTextFormat(Qt.TextFormat.PlainText)
         goal_lbl.setFont(QFont(_FONT_SEGOE, 11))
-        goal_lbl.setStyleSheet("color: #888888; background: transparent;")
+        goal_lbl.setStyleSheet(_SS_GRIS_CLAIR_NU)
         if goal_lbl.text() != g.goal_name:
             goal_lbl.setToolTip(_infobulle(g.goal_name))
         row1.addWidget(goal_lbl, stretch=1)
@@ -3204,8 +3212,7 @@ class _ProgrammeTab(QWidget):
         if not hotes and not parts:
             absent = QLabel("Participants non disponibles")
             absent.setFont(QFont(_FONT_SEGOE, 10))
-            absent.setStyleSheet("color: #444444; background: transparent;"
-                                 " border: none;")
+            absent.setStyleSheet(_SS_FAINT_CLEAR)
             cl.addWidget(absent)
         return card
 
@@ -3252,15 +3259,13 @@ class _ProgrammeTab(QWidget):
         heure = QLabel(_fmt_time_fr(ev.start_local) if ev.start_local else "—")
         heure.setFixedWidth(54)
         heure.setFont(_bold_font(_FONT_SEGOE, 11))
-        heure.setStyleSheet("color: #00ff87; background: transparent;"
-                            " border: none;")
+        heure.setStyleSheet(_SS_GREEN_CLEAR)
         ligne.addWidget(heure)
 
         nom = QLabel(ev.name or "—")
         nom.setTextFormat(Qt.TextFormat.PlainText)
         nom.setFont(_bold_font(_FONT_SEGOE, 13))
-        nom.setStyleSheet("color: #ffffff; background: transparent;"
-                          " border: none;")
+        nom.setStyleSheet(_SS_WHITE_CLEAR)
         nom.setWordWrap(True)
         ligne.addWidget(nom, stretch=1)
 
@@ -3268,8 +3273,7 @@ class _ProgrammeTab(QWidget):
         if duree:
             lbl = QLabel(duree)
             lbl.setFont(QFont(_FONT_SEGOE, 10))
-            lbl.setStyleSheet("color: #888888; background: transparent;"
-                              " border: none;")
+            lbl.setStyleSheet(_SS_MUTED_CLEAR)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight
                              | Qt.AlignmentFlag.AlignVCenter)
             ligne.addWidget(lbl)
@@ -3590,8 +3594,7 @@ class _LigneObjectif(QFrame):
             qui = QLabel(display)
             qui.setTextFormat(Qt.TextFormat.PlainText)
             qui.setFont(_bold_font(_FONT_SEGOE, 11))
-            qui.setStyleSheet("color: #cccccc; background: transparent;"
-                              " border: none;")
+            qui.setStyleSheet(_SS_SOFT_CLEAR)
             h.addWidget(qui)
 
         nom = QLabel(goal.name or "Objectif sans nom")
@@ -6443,7 +6446,7 @@ class _LecteurClip(QDialog):
         self._resolue.connect(self._lire)
         self.setWindowTitle(f"{clip.chaine} — {clip.titre}")
         self.resize(960, 600)
-        self.setStyleSheet("background: #0a0a0a;")
+        self.setStyleSheet(_SS_FOND_PAGE)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -6520,7 +6523,7 @@ class _LecteurClip(QDialog):
 
         self._etat = QLabel("Chargement du clip…")
         self._etat.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._etat.setStyleSheet(_SS_MUTED + "background: transparent;")
+        self._etat.setStyleSheet(_SS_MUTED + _SS_NU)
         v.addWidget(self._etat)
 
         threading.Thread(target=self._resoudre, daemon=True).start()
@@ -6645,6 +6648,485 @@ class _LecteurClip(QDialog):
             lecteur.setParent(None)
             lecteur.deleteLater()
         super().closeEvent(event)
+
+
+#: Durée du fondu d'arrivée d'un don. Assez pour que l'œil accroche la
+#: nouvelle ligne, assez court pour que dix dons en une seconde ne se
+#: transforment pas en dix fondus superposés.
+_DUREE_FONDU_DON_MS = 220
+
+
+class _LigneDon(QFrame):
+    """Un don dans le fil : qui, combien, pour qui, et ce qu'il a écrit."""
+
+    #: Au-delà, la ligne passe en vert et gagne du corps. Le seuil est bas
+    #: exprès : sur onze mille dons, ce sont les cent euros qu'on cherche du
+    #: regard, pas les records — ceux-là, on les a déjà entendus à l'antenne.
+    _SEUIL_MARQUANT = 100.0
+
+    def __init__(self, don: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        montant = _montant_du_don(don)
+        #: Retenus sur la ligne : filtrer se fait en relisant ce qu'elle porte,
+        #: sans tenir une seconde liste parallèle qui finirait par diverger.
+        self.montant = montant
+        self.streamer = str(don.get("streamer") or "")
+        marquant = montant >= self._SEUIL_MARQUANT
+        self.setStyleSheet(
+            "background: #111111; border: none; border-radius: 6px;"
+            if not marquant else
+            "background: #111111; border: none; border-left: 3px solid #00ff87;"
+            " border-radius: 6px;"
+        )
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 7, 10, 7)
+        v.setSpacing(2)
+
+        haut = QHBoxLayout()
+        haut.setContentsMargins(0, 0, 0, 0)
+        haut.setSpacing(8)
+
+        somme = QLabel(_fmt_euros(montant))
+        somme.setFont(QFont(_FONT_SEGOE, 12 if marquant else 11, QFont.Weight.Bold))
+        somme.setStyleSheet(f"color: {'#00ff87' if marquant else '#ffffff'};"
+                            " background: transparent;")
+        haut.addWidget(somme)
+
+        qui = QLabel(str(don.get("donor") or "Anonyme"))
+        qui.setFont(QFont(_FONT_SEGOE, 11))
+        qui.setStyleSheet(_SS_BLANC_NU)
+        # Un pseudo peut faire n'importe quelle longueur : sans élision il
+        # pousse le streamer et l'heure hors de la colonne.
+        qui.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        haut.addWidget(qui, stretch=1)
+
+        pour = str(don.get("streamer") or "")
+        if pour:
+            cible = QLabel(f"→ {pour}")
+            cible.setFont(QFont(_FONT_SEGOE, 10))
+            cible.setStyleSheet(_SS_GRIS_CLAIR_NU)
+            haut.addWidget(cible)
+
+        heure = QLabel(_heure_du_don(don))
+        heure.setFont(QFont(_FONT_SEGOE, 10))
+        heure.setStyleSheet(_SS_GRIS_NU)
+        haut.addWidget(heure)
+        v.addLayout(haut)
+
+        commentaire = str(don.get("comment") or "").strip()
+        if commentaire:
+            mot = QLabel(commentaire)
+            mot.setFont(QFont(_FONT_SEGOE, 10))
+            mot.setStyleSheet(_SS_GRIS_CLAIR_NU)
+            mot.setWordWrap(True)
+            v.addWidget(mot)
+
+
+def _montant_du_don(don: dict) -> float:
+    """Le montant, quoi qu'annonce le flux. 0 quand c'est illisible."""
+    try:
+        return float(don.get("amount") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _heure_du_don(don: dict) -> str:
+    """'16:34' à l'heure locale, ou '' si l'horodatage est absent ou illisible.
+
+    Le flux date en UTC avec un décalage explicite ; l'afficher tel quel
+    montrerait 16 h pour un don de 18 h.
+    """
+    brut = str(don.get("createdAt") or don.get("created_at") or "")
+    if not brut:
+        return ""
+    try:
+        quand = datetime.fromisoformat(brut.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if quand.tzinfo is None:
+        quand = quand.replace(tzinfo=timezone.utc)
+    return quand.astimezone().strftime("%H:%M")
+
+
+class _DonsTab(QWidget):
+    """Onglet Dons — le fil des donations, poussé en direct.
+
+    C'est le seul endroit du panel qui montre l'événement don par don plutôt
+    qu'en agrégat. Le compteur de l'Accueil dit combien ; celui-ci dit qui, et
+    surtout ce que les gens écrivent — c'est ce qu'on lit à l'antenne.
+
+    Alimenté par `FluxCagnotte` : l'historique du snapshot à l'ouverture, puis
+    chaque don à mesure. Rien n'est demandé au réseau ici.
+    """
+
+    #: Lignes gardées. Chacune est un widget avec ses labels ; onze mille dons
+    #: en feraient autant, et la fenêtre se figerait. Deux cents, c'est bien
+    #: plus que ce qu'on remonte à la main pendant un direct.
+    _MAX_LIGNES = 200
+
+    #: Cadence d'égrenage : un don posé tous les tant. Assez lent pour qu'on
+    #: voie chaque ligne arriver, assez rapide pour que le fil ne prenne pas
+    #: de retard sur la réalité tant que le débit reste ordinaire.
+    _EGRENAGE_MS = 70
+
+    #: Retard qu'on accepte de rattraper au rythme d'un don par tour, soit
+    #: une vingtaine de dons. En dessous, le fil s'écrit ligne à ligne ; au
+    #: delà, l'égrenage accélère pour y revenir.
+    #:
+    #: Ce n'est PAS un plafond au-delà duquel on viderait tout : c'est ce
+    #: qu'il y avait, et mesuré, ça ne servait à rien. Le serveur ne pousse
+    #: pas les dons en filet mais par GRAPPES de trente à soixante — relevé
+    #: sur le vrai flux — donc le seuil était franchi à chaque grappe et tout
+    #: retombait d'un bloc, exactement ce qu'on cherchait à éviter.
+    _FENETRE_RATTRAPAGE_MS = 1500
+
+    #: Délai de regroupement des rafraîchissements. Un don coûtait deux
+    #: parcours des deux cents lignes — l'état et la liste des streamers — et
+    #: il en arrive plusieurs par seconde en rafale : le fil saccadait. Ils
+    #: sont désormais faits UNE fois par salve. Assez court pour rester
+    #: imperceptible, assez long pour absorber une rafale entière.
+    _REGROUPEMENT_MS = 60
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(_SS_FOND_PAGE)
+        self._vus: set[str] = set()
+        #: Horodatage du dernier don posé, pour savoir si ça afflue.
+        self._dernier_pose: float = 0.0
+        #: Dons reçus mais pas encore posés. Le flux les livre par paquets —
+        #: tout ce qui s'est accumulé depuis le vidage précédent — et les
+        #: poser d'un bloc les fait APPARAÎTRE d'un bloc : cinq lignes
+        #: surgissent ensemble, puis plus rien. C'est ce qui se voyait, et ce
+        #: n'est pas de la lenteur mais du à-coup. Ils sont donc égrenés.
+        self._en_attente: deque = deque(maxlen=self._MAX_LIGNES)
+        self._build()
+        self._regroupe = QTimer(self)
+        self._regroupe.setSingleShot(True)
+        self._regroupe.setInterval(self._REGROUPEMENT_MS)
+        self._regroupe.timeout.connect(self._rafraichir)
+        self._egrenage = QTimer(self)
+        self._egrenage.setInterval(self._EGRENAGE_MS)
+        self._egrenage.timeout.connect(self._egrener)
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(10)
+
+        entete = QHBoxLayout()
+        entete.setContentsMargins(0, 0, 0, 0)
+        titre = QLabel("Dons")
+        titre.setFont(QFont(_FONT_SEGOE, 16, QFont.Weight.Bold))
+        titre.setStyleSheet(_SS_BLANC_NU)
+        entete.addWidget(titre)
+        entete.addStretch()
+
+        self._etat = QLabel("en attente du flux…")
+        self._etat.setFont(QFont(_FONT_SEGOE, 10))
+        self._etat.setStyleSheet(_SS_GRIS_NU)
+        entete.addWidget(self._etat)
+        root.addLayout(entete)
+        root.addLayout(self._barre_de_filtres())
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("border: none; background: transparent;")
+
+        self._contenu = QWidget()
+        self._contenu.setStyleSheet(_SS_NU)
+        self._liste = QVBoxLayout(self._contenu)
+        self._liste.setContentsMargins(0, 0, 4, 0)
+        self._liste.setSpacing(6)
+        self._liste.addStretch()          # pousse les lignes vers le haut
+        self._scroll.setWidget(self._contenu)
+        root.addWidget(self._scroll, stretch=1)
+
+    # ── filtres ─────────────────────────────────────────────────────────────
+
+    #: Seuils proposés. Des paliers plutôt qu'une saisie libre : en régie on
+    #: cherche « les gros dons », pas « au-dessus de 37 € », et un clic vaut
+    #: mieux qu'un champ à remplir pendant que le fil défile.
+    #:
+    #: L'échelle double puis quintuple, et monte jusqu'à dix mille : un ZEvent
+    #: voit passer des dons à cinq chiffres, et s'arrêter à cinq cents laissait
+    #: la moitié haute sans filtre — c'est pourtant celle qu'on cherche.
+    #:
+    #: Les libellés sont DÉRIVÉS, pas écrits : « ≥ 1 000 € » et « ≥ 1000 € »
+    #: se seraient glissés dans la même liste, et l'espace des milliers est
+    #: déjà l'affaire de `_fmt_euros`.
+    _SEUILS = (0.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0)
+
+    _TOUS = "Tous les streamers"
+
+    def _barre_de_filtres(self) -> QHBoxLayout:
+        """Streamer et montant plancher, appliqués à tout le fil."""
+        barre = QHBoxLayout()
+        barre.setContentsMargins(0, 0, 0, 0)
+        barre.setSpacing(8)
+
+        self._filtre_streamer = QComboBox()
+        self._filtre_streamer.addItem(self._TOUS)
+        self._filtre_streamer.setMinimumWidth(220)
+        self._filtre_streamer.currentIndexChanged.connect(self._appliquer_filtres)
+        barre.addWidget(self._filtre_streamer)
+
+        self._filtre_montant = QComboBox()
+        for seuil in self._SEUILS:
+            # La VALEUR portée par itemData, pas déduite du libellé : changer
+            # « ≥ 50 € » en « 50 € et plus » ne doit rien casser.
+            libelle = ("Tous les montants" if seuil <= 0
+                       else f"≥ {_fmt_euros(seuil)}")
+            self._filtre_montant.addItem(libelle, seuil)
+        self._filtre_montant.currentIndexChanged.connect(self._appliquer_filtres)
+        barre.addWidget(self._filtre_montant)
+
+        barre.addStretch()
+        return barre
+
+    def _lignes(self) -> list:
+        """Les lignes du fil, du plus récent au plus ancien (sans le stretch)."""
+        items = (self._liste.itemAt(i) for i in range(self._liste.count()))
+        widgets = (it.widget() for it in items if it is not None)
+        return [w for w in widgets if isinstance(w, _LigneDon)]
+
+    def _seuil(self) -> float:
+        valeur = self._filtre_montant.currentData()
+        return float(valeur) if isinstance(valeur, (int, float)) else 0.0
+
+    def _streamer_choisi(self) -> str:
+        choix = self._filtre_streamer.currentText()
+        return "" if choix == self._TOUS else choix
+
+    def _retenue(self, ligne) -> bool:
+        """Cette ligne passe-t-elle les deux filtres ?"""
+        if ligne.montant < self._seuil():
+            return False
+        vise = self._streamer_choisi()
+        return not vise or ligne.streamer == vise
+
+    def _appliquer_filtres(self) -> None:
+        """Rejoue les filtres sur TOUT le fil, pas seulement sur les nouveaux.
+
+        Poser un filtre doit cacher ce qui est déjà à l'écran, sinon il ne
+        prendrait effet qu'au don suivant — et sur un seuil élevé, cela peut
+        être dans plusieurs minutes.
+        """
+        for ligne in self._lignes():
+            ligne.setVisible(self._retenue(ligne))
+        self._rafraichir_etat()
+
+    def _rafraichir_streamers(self) -> None:
+        """Tient à jour la liste déroulante des streamers vus dans le fil.
+
+        Reconstruite seulement quand l'ENSEMBLE change : la repeupler à chaque
+        don rouvrirait la liste sous le doigt de qui la parcourt. La sélection
+        est retrouvée par son texte, l'index ne survivant pas à un tri.
+        """
+        vus = {ligne.streamer for ligne in self._lignes() if ligne.streamer}
+        # Le streamer filtré reste proposé même si son dernier don vient de
+        # sortir du fil par élagage. Sans cela la sélection ne se retrouvait
+        # plus, retombait sur « Tous », et le filtre s'annulait tout seul —
+        # on se serait cru devant un fil non filtré.
+        vise = self._streamer_choisi()
+        if vise:
+            vus.add(vise)
+        vus = sorted(vus)
+        actuels = [self._filtre_streamer.itemText(i)
+                   for i in range(1, self._filtre_streamer.count())]
+        if vus == actuels:
+            return
+        choix = self._filtre_streamer.currentText()
+        bloque = self._filtre_streamer.blockSignals(True)
+        try:
+            self._filtre_streamer.clear()
+            self._filtre_streamer.addItem(self._TOUS)
+            self._filtre_streamer.addItems(vus)
+            rang = self._filtre_streamer.findText(choix)
+            self._filtre_streamer.setCurrentIndex(max(0, rang))
+        finally:
+            self._filtre_streamer.blockSignals(bloque)
+
+    # ── alimentation ────────────────────────────────────────────────────────
+
+    def ajouter_don(self, don: object) -> None:
+        """Un don qui vient d'arriver : il prend la file, et sera égrené.
+
+        Il n'est pas posé tout de suite, et c'est le but : le flux les livre
+        par paquets, les poser sur-le-champ les ferait apparaître ensemble.
+        """
+        if not isinstance(don, dict):
+            return
+        self._en_attente.append(don)
+        if not self._egrenage.isActive():
+            # Le premier ne fait pas antichambre : sur un fil calme, attendre
+            # soixante-dix millisecondes pour rien se verrait.
+            self._egrener()
+            self._egrenage.start()
+
+    def _egrener(self) -> None:
+        """Pose le don suivant. Rattrape d'un coup si le retard s'accumule."""
+        if not self._en_attente:
+            self._egrenage.stop()
+            return
+        # UN par tour tant que la file tient dans la fenêtre : c'est le régime
+        # normal, et c'est lui qui donne le fil qui s'écrit ligne à ligne.
+        # Au-delà seulement, on accélère juste ce qu'il faut pour l'y ramener.
+        #
+        # Le débit n'est PAS proportionnel à la file en régime normal : une
+        # règle purement proportionnelle décroît géométriquement — la file
+        # fond vite puis traîne — et une grappe de cinquante mettait six
+        # secondes à s'écouler au lieu de deux.
+        absorbable = max(1, self._FENETRE_RATTRAPAGE_MS // self._EGRENAGE_MS)
+        en_attente = len(self._en_attente)
+        combien = 1 if en_attente <= absorbable else math.ceil(en_attente / absorbable)
+        for _ in range(combien):
+            if not self._en_attente:
+                break
+            self._poser(self._en_attente.popleft(), en_tete=True, anime=True)
+        self._planifier_rafraichissement()
+
+    def poser_historique(self, dons: object) -> None:
+        """Le lot du snapshot, à l'ouverture ou après une reconnexion.
+
+        Le flux le rend du plus récent au plus ancien : on le parcourt à
+        l'endroit en insérant chacun plus bas, sinon l'ordre s'inverserait.
+        """
+        if not isinstance(dons, list):
+            return
+        for don in dons:
+            if isinstance(don, dict):
+                # Sans fondu : ce sont des dons déjà passés, les voir
+                # apparaître un à un ferait croire à cent dons d'un coup.
+                self._poser(don, en_tete=False, anime=False)
+        self._planifier_rafraichissement()
+
+    def signaler_etat(self, ouvert: bool) -> None:
+        """Le socket vient de s'ouvrir ou de tomber."""
+        self._ouvert = ouvert
+        self._rafraichir_etat()
+
+    def _planifier_rafraichissement(self) -> None:
+        """Regroupe les parcours de liste d'une salve de dons en un seul.
+
+        Le timer n'est PAS redémarré s'il tourne déjà, et c'est tout l'enjeu :
+        `start()` sur un timer actif le repousse, et lors d'un afflux — où les
+        dons tombent plus vite que le délai — il aurait été repoussé
+        indéfiniment. Liste des streamers et compteur seraient restés figés
+        pendant toute la vague, c'est-à-dire précisément quand on les regarde.
+
+        Tel quel, c'est un rafraîchissement par fenêtre, quoi qu'il arrive.
+        """
+        if not self._regroupe.isActive():
+            self._regroupe.start()
+
+    def _rafraichir(self) -> None:
+        self._rafraichir_streamers()
+        self._rafraichir_etat()
+
+    def _poser(self, don: dict, en_tete: bool, anime: bool = False) -> None:
+        """Insère la ligne, sauf si ce don est déjà au fil.
+
+        Le dédoublonnage n'est pas un luxe : une reconnexion renvoie un
+        snapshot qui recouvre des dons déjà reçus en direct, et ils
+        apparaîtraient deux fois.
+        """
+        cle = str(don.get("id") or "")
+        if cle:
+            if cle in self._vus:
+                return
+            self._vus.add(cle)
+        # `count() - 1` : le stretch final occupe la dernière position et doit
+        # le rester, sinon les lignes se collent au bas de la page.
+        rang = 0 if en_tete else max(0, self._liste.count() - 1)
+        ligne = _LigneDon(don, self._contenu)
+        # Posée déjà filtrée : l'insérer visible puis la cacher la ferait
+        # clignoter à chaque don écarté par le filtre en cours.
+        retenue = self._retenue(ligne)
+        ligne.setVisible(retenue)
+        self._liste.insertWidget(rang, ligne)
+        if anime and retenue and self._peut_animer():
+            self._faire_apparaitre(ligne)
+        self._elaguer()
+
+    def _peut_animer(self) -> bool:
+        """Y a-t-il de la place pour un fondu, ou est-ce que ça afflue ?
+
+        Les dons arrivent parfois par dizaines à la seconde. Un fondu par don
+        signifierait autant de rendus HORS ÉCRAN simultanés — le fil ralentit
+        là où il devrait aller vite, et l'animation, superposée à elle-même
+        dix fois, ne se lit plus de toute façon.
+
+        Au-delà de la cadence d'un fondu, on pose donc les lignes sèchement :
+        c'est ce que fait aussi l'historique. L'animation est un agrément des
+        moments calmes, pas un dû.
+        """
+        maintenant = time.monotonic()
+        assez_espace = (maintenant - self._dernier_pose) * 1000 >= _DUREE_FONDU_DON_MS
+        self._dernier_pose = maintenant
+        return assez_espace
+
+    @staticmethod
+    def _faire_apparaitre(ligne: QWidget) -> None:
+        """Fondu d'entrée d'une ligne.
+
+        Effet ET animation sont PARENTÉS À LA LIGNE, et c'est la seule chose
+        qui compte ici. Le fil élague en permanence : une ligne peut être
+        détruite en plein fondu, et une animation qui lui survivrait
+        écrirait dans un effet déjà libéré — segfault, pas exception. Parentée,
+        elle est détruite avec sa cible, et Qt l'arrête au passage.
+
+        L'effet est libéré à la fin du fondu : deux cents lignes en portant
+        chacune un forceraient autant de rendus hors écran à chaque repeint,
+        pour une animation terminée depuis longtemps. `deleteLater` et non
+        `setGraphicsEffect(None)` — on est dans le rappel `finished` de
+        l'animation, détruire sa cible sur place la couperait sous elle.
+        """
+        effet = QGraphicsOpacityEffect(ligne)
+        effet.setOpacity(0.0)
+        ligne.setGraphicsEffect(effet)
+        anim = QPropertyAnimation(effet, b"opacity", ligne)
+        anim.setDuration(_DUREE_FONDU_DON_MS)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(effet.deleteLater)
+        anim.start()
+
+    def _elaguer(self) -> None:
+        """Retire les lignes les plus anciennes au-delà du plafond."""
+        while self._liste.count() - 1 > self._MAX_LIGNES:
+            item = self._liste.takeAt(self._liste.count() - 2)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                # Masquer AVANT de détacher : un widget visible dont le parent
+                # passe à None devient une fenêtre de premier niveau, qui
+                # s'ouvre seule au milieu de l'écran. C'est la règle du dépôt,
+                # et test_pas_de_fenetres_parasites la fait respecter.
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _rafraichir_etat(self) -> None:
+        """Le compte porte sur ce qu'on VOIT, pas sur ce qui est en mémoire.
+
+        Annoncer « 200 dons » au-dessus d'une page qui en montre trois, parce
+        qu'un filtre est posé, ferait douter du filtre ou du compteur.
+        """
+        lignes = self._lignes()
+        # `isHidden`, et non `isVisible` : celui-ci est faux pour tout enfant
+        # d'une fenêtre pas encore affichée, ce qui n'a rien à voir avec le
+        # filtre. `isHidden` ne dit que ce qu'on a nous-même masqué.
+        montres = sum(1 for ligne in lignes if not ligne.isHidden())
+        etat = "en direct" if getattr(self, "_ouvert", False) else "flux hors ligne"
+        if montres == len(lignes):
+            self._etat.setText(f"{montres} derniers dons · {etat}")
+        else:
+            self._etat.setText(f"{montres} sur {len(lignes)} dons · {etat}")
 
 
 class _StatsTab(QWidget):
@@ -6833,8 +7315,7 @@ class _StatsTab(QWidget):
         ligne.addWidget(titre)
         self._compte_lbl = QLabel("")
         self._compte_lbl.setFont(QFont(_FONT_SEGOE, 10))
-        self._compte_lbl.setStyleSheet("color: #555555; background: transparent;"
-                                       " border: none;")
+        self._compte_lbl.setStyleSheet(_SS_GREY_CLEAR)
         ligne.addWidget(self._compte_lbl)
         ligne.addStretch()
         self._boutons_filtre: dict[str, QPushButton] = {}
@@ -7721,7 +8202,7 @@ class PanelWindow(QMainWindow):
         self._build()
 
         # Palette de commandes (Ctrl+K) — superposée au widget central.
-        names = ["Accueil", "Programme", "Stats", "Goals", "Clips",
+        names = ["Accueil", "Programme", "Stats", "Goals", "Clips", "Dons",
                  "Streamers", "Mixer"]
         if self._show_grid_tab:
             names.append("Grille")
@@ -7910,7 +8391,7 @@ class PanelWindow(QMainWindow):
         bl.setContentsMargins(16, 0, 16, 0)
         bl.setSpacing(0)
 
-        names = ["Accueil", "Programme", "Stats", "Goals", "Clips",
+        names = ["Accueil", "Programme", "Stats", "Goals", "Clips", "Dons",
                  "Streamers", "Mixer"]
         if self._show_grid_tab:
             names.append("Grille")
@@ -7958,6 +8439,11 @@ class PanelWindow(QMainWindow):
         self._clips_tab = _ClipsTab()
         self._clips_tab.clip_choisi.connect(self._ouvrir_le_clip)
         self._stack.addWidget(self._clips_tab)
+
+        # Inséré ICI, entre Clips et Streamers, exactement comme dans `names` :
+        # la pile et les boutons sont appariés par INDICE (voir switch_to_tab).
+        self._dons_tab = _DonsTab()
+        self._stack.addWidget(self._dons_tab)
 
         self._streamers_tab = _StreamersTab()
         self._streamers_tab.grid_selection_changed.connect(self.grid_selection_changed)
@@ -8231,6 +8717,18 @@ class PanelWindow(QMainWindow):
                 self.hide()
             return
         self._stack.setCurrentIndex(idx)
+
+    def ajouter_don(self, don: object) -> None:
+        """Un don qui vient d'arriver, pour le fil."""
+        self._dons_tab.ajouter_don(don)
+
+    def poser_historique_dons(self, dons: object) -> None:
+        """Les derniers dons déjà passés, à la connexion du flux."""
+        self._dons_tab.poser_historique(dons)
+
+    def signaler_flux_dons(self, ouvert: bool) -> None:
+        """État du flux, affiché en tête de l'onglet."""
+        self._dons_tab.signaler_etat(ouvert)
 
     def switch_to_tab(self, tab_name: str) -> None:
         """Active un onglet par son nom. N'active jamais 'Grille' (déclenche le switch)."""
