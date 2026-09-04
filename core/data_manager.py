@@ -51,12 +51,15 @@ from core.api_client import (
     GoalWithStreamer,
     Participation,
     StreamerInfo,
+    _client,
     _format_euros,
     fetch_donation_goals,
     fetch_events,
     fetch_participations,
     fetch_zevent_data,
 )
+from core.cagnotte_marentdev import RelaisCagnotte
+from core.cagnotte_socket import FluxCagnotte
 from core.history_store import HistoryStore
 
 from core import alerts as _alerts
@@ -101,13 +104,38 @@ _GOALS_POLL_MS   = 300_000   # 5 min
 # Async helpers (run several coroutines in one asyncio.run() call)
 # ---------------------------------------------------------------------------
 
+#: Un seul relais pour toute l'application : il porte l'ETag du dernier rapport,
+#: et c'est ce qui permet au serveur de nous répondre 304 plutôt que de renvoyer
+#: 180 ko toutes les trente secondes.
+_RELAIS_CAGNOTTE = RelaisCagnotte()
+
+
 async def _gather_zevent_gdoc() -> tuple[list[Participation], GlobalStats, list[StreamerInfo]]:
-    """Appels zevent.fr/api/ et participations evenmorestats en parallèle."""
-    participations, (stats, streamers) = await asyncio.gather(
+    """Appels zevent.fr/api/, participations evenmorestats et relais, en parallèle."""
+    participations, (stats, streamers), releve = await asyncio.gather(
         fetch_participations(),
         fetch_zevent_data(),
+        _RELAIS_CAGNOTTE.relever(_client()),
     )
-    return participations, stats, streamers  # type: ignore[return-value]
+    _appliquer_relais(stats, releve)          # type: ignore[arg-type]
+    return participations, stats, streamers   # type: ignore[return-value]
+
+
+def _appliquer_relais(stats: GlobalStats, releve) -> None:
+    """Remplace la cagnotte officielle par celle du relais, quand il en a une.
+
+    Le relais compte plus tôt et plus fin : le nombre affiché monte de quelques
+    dizaines de milliers d'euros par rapport à zevent.fr, sans que l'un des deux
+    ait tort. On garde le mieux renseigné.
+
+    Rien n'est touché si le relais n'a pas répondu, ou s'il rend MOINS que la
+    source officielle : une cagnotte qui recule à l'écran est toujours une
+    erreur de lecture, jamais un fait, et l'officielle a le dernier mot.
+    """
+    if releve is None or releve.total <= stats.donation_total:
+        return
+    stats.donation_total = releve.total
+    stats.donation_formatted = _format_euros(releve.total)
 
 
 def _apply_participations_to_streamers(
@@ -211,6 +239,11 @@ class DataManager(QObject):
         self._polling_events: bool = False
 
 
+        # Cagnotte poussée en direct. Optionnelle : sans PyQt6-WebEngine elle
+        # reste inerte, et le relais HTTP de `_gather_zevent_gdoc` suffit.
+        self._flux = FluxCagnotte(self)
+        self._flux.cagnotte_changee.connect(self._sur_cagnotte_temps_reel)
+
         self._timer_streamers = QTimer(self)
         self._timer_streamers.setInterval(_STREAMER_POLL_MS)
         self._timer_streamers.timeout.connect(self._poll_streamers)
@@ -263,12 +296,32 @@ class DataManager(QObject):
         self._timer_streamers.start()
         self._timer_events.start()
         self._timer_goals.start()
+        self._flux.demarrer()
 
     def stop_polling(self) -> None:
         """Arrête tous les timers de polling (mode mock)."""
         self._timer_streamers.stop()
         self._timer_events.stop()
         self._timer_goals.stop()
+        self._flux.arreter()
+
+    def _sur_cagnotte_temps_reel(self, total: float) -> None:
+        """Cagnotte poussée par le flux, entre deux polls.
+
+        Ne touche QUE l'affichage et les paliers. L'historique reste alimenté
+        par le poll de trente secondes : un point par don ferait quatre mille
+        relevés en une soirée, et la courbe d'une édition de quatre jours n'en
+        garde que 4320 en tout.
+
+        Une cagnotte qui recule est toujours une erreur de lecture : on ne
+        redescend pas. Le poll, lui, réaligne sur la source officielle.
+        """
+        if total <= self._stats.donation_total:
+            return
+        self._stats.donation_total = total
+        self._stats.donation_formatted = _format_euros(total)
+        self._detect_milestone(total)
+        self.global_stats_updated.emit(self._stats)
 
     def _history_worker(self) -> None:
         """Charge l'historique en arrière-plan puis émet le signal.

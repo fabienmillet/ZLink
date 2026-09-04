@@ -43,12 +43,13 @@ class _FauxMpv(QWidget):
     playback_requested = pyqtSignal(str)
 
     def __init__(self, parent=None, grid_mode: bool = False,
-                 clip_buffer_secs: int = 0) -> None:
+                 clip_buffer_secs: int = 0, low_latency: bool = False) -> None:
         super().__init__(parent)
         self.joue: tuple[str, str] | None = None
         self.muet: bool | None = None
         self.volume: int | None = None
         self.tampon = clip_buffer_secs
+        self.basse_latence = low_latency
 
     def play_stream(self, login: str, quality: str) -> None:
         self.joue = (login, quality)
@@ -64,6 +65,9 @@ class _FauxMpv(QWidget):
 
     def set_clip_buffer(self, secs: int) -> None:
         self.tampon = secs
+
+    def set_low_latency(self, on: bool) -> None:
+        self.basse_latence = on
 
     def save_clip(self, secs: int, directory: str) -> str | None:
         return f"{directory}/faux_clip.ts" if directory else None
@@ -1035,6 +1039,20 @@ def test_le_lecteur_cree_sur_une_cellule_epinglee_n_est_pas_muet(cellule):
 def test_le_tampon_de_clip_survit_a_la_creation_du_lecteur(cellule):
     cellule.set_clip_buffer(45)
     assert cellule._ensure_mpv().tampon == 45
+
+
+def test_la_basse_latence_survit_a_la_creation_du_lecteur(cellule):
+    """Le réglage arrive avant la cellule : les vingt-cinq lecteurs naissent tard."""
+    cellule.set_low_latency(True)
+    assert cellule._ensure_mpv().basse_latence is True
+
+
+def test_la_basse_latence_atteint_un_lecteur_deja_la(cellule):
+    """Cocher la case en cours de route ne doit pas attendre un redémarrage."""
+    lecteur = cellule._ensure_mpv()
+    assert lecteur.basse_latence is False
+    cellule.set_low_latency(True)
+    assert lecteur.basse_latence is True
 
 
 def test_vider_une_cellule_arrete_son_lecteur(cellule):

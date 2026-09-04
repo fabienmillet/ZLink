@@ -80,7 +80,7 @@ _URL_EDITION_BASE = (
 EDITION_PRECEDENTE = "019d3f95-bd24-7e5d-861b-1de6243e3169"
 
 #: Éditions superposables, de la plus récente à la plus ancienne. Relevées
-#: sur `api.ppr.evenmorestats.fr/events`, qui les publie toutes.
+#: sur `api.evenmorestats.fr/events`, qui les publie toutes.
 #:
 #: 2021 publie ses relevés À L'ENVERS — du 1er novembre au 29 octobre. Lue
 #: brute, sa courbe s'arrête à 16 135 € pour un total déclaré de 10 064 480 ;
@@ -421,15 +421,17 @@ class HistoryStore:
         now = now_ts if now_ts is not None else time.time()
         if not (_EVENT_START <= now <= _EVENT_END):
             return None
-        # Origine = premier point RELEVÉ de l'édition en cours, pas _EVENT_START :
-        # celui-ci est une frontière de minuit servant à filtrer la fenêtre,
-        # alors que le direct démarre en soirée. Prendre minuit décalait la
-        # comparaison de plus de quinze heures, et faisait sortir de la plage
-        # couverte bien avant la fin. Les deux courbes sont ainsi alignées sur
-        # « l'instant où la cagnotte a commencé à être comptée ».
+        # MÊME origine que le graphe, et c'est tout l'enjeu : `_origine_courante`
+        # cale sur DEBUT_COURSE, une date. Cette méthode partait du premier point
+        # RELEVÉ, qui arrive quand ZLink s'ouvre — donc jusqu'à quarante heures
+        # plus tôt. La référence 2025 était alors lue quarante heures plus loin
+        # sur sa courbe : 7,1 M€ au lieu de 337 k€, et un « -88 % » affiché sous
+        # un graphe où la courbe 2026 passe au-dessus de toutes les autres.
+        #
+        # Deux lectures de la même donnée qui se contredisent à l'écran valent
+        # moins que pas de comparaison du tout : elles ont une seule origine.
         ts_live, _ = self.get_donation_series()
-        origine = ts_live[0] if ts_live else _EVENT_START
-        ref = self.previous_total_at(now - origine)
+        ref = self.previous_total_at(now - self._origine_courante(ts_live))
         if ref is None or ref <= 0 or current_total <= 0:
             return None
         return ref, (current_total - ref) / ref * 100.0

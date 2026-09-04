@@ -67,7 +67,15 @@ def test_streams_valeurs_par_defaut(qtbot):
         "fullscreen_quality": "best",
         "max_active_streams": 20,
         "grid_sort": "viewers",
+        "low_latency": False,
     }
+
+
+def test_la_basse_latence_se_relit(qtbot):
+    """La case doit refléter le fichier, pas repartir décochée à l'ouverture."""
+    page = _page(qtbot, settings._PageStreams, {"low_latency": True})
+    assert page._low_latency.isChecked()
+    assert _collecte(page)["low_latency"] is True
 
 
 #: Les quatre échelles proposées par la fenêtre des réglages.

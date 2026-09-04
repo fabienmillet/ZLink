@@ -423,6 +423,7 @@ class StreamCell(QFrame):
         self._audio_pinned: bool = False
         self._mix_muted: bool = False     # coupure demandée depuis la console
         self._clip_secs: int = 0      # 0 = clips désactivés sur cette cellule
+        self._low_latency: bool = False
         self._pulse_gen: int = 0      # jeton d'annulation des pulsations
         self._attente_image: QTimer | None = None
         # Compté hors de start_stream, qui remet _end_retried à zéro à chaque
@@ -542,7 +543,8 @@ class StreamCell(QFrame):
             # clip_buffer_secs=0 : pas de tampon arrière tant que les clips
             # depuis la grille ne sont pas demandés (voir set_clip_buffer).
             self._mpv = MpvWidget(self._video_stack, grid_mode=True,
-                                  clip_buffer_secs=self._clip_secs)
+                                  clip_buffer_secs=self._clip_secs,
+                                  low_latency=self._low_latency)
             if self._clip_secs:
                 self._mpv.set_clip_buffer(self._clip_secs)
             self._mpv.setSizePolicy(
@@ -580,6 +582,16 @@ class StreamCell(QFrame):
         self._clip_secs = secs
         if self._mpv is not None:
             self._mpv.set_clip_buffer(secs)
+
+    def set_low_latency(self, on: bool) -> None:
+        """Retard minimal sur le direct pour cette cellule.
+
+        Retenu même sans lecteur : les cellules sont créées à la demande, et
+        `_ensure_mpv` passe la valeur au constructeur.
+        """
+        self._low_latency = bool(on)
+        if self._mpv is not None:
+            self._mpv.set_low_latency(self._low_latency)
 
     def save_clip(self, secs: int, directory: str) -> str | None:
         """Écrit les dernières secondes de CETTE cellule. None si indisponible."""
@@ -1153,6 +1165,7 @@ class GridWidget(QWidget):
         # fois est un usage courant en régie.
         self._audio_pinned_logins: set[str] = set()
         self._clip_secs: int = 60
+        self._low_latency: bool = False
         self._clip_dir: str = ""
         self._last_active_count: int = -1
         # Renseigné par main.py : count → qualité (mode adaptatif). Sans lui, la
@@ -1595,6 +1608,14 @@ class GridWidget(QWidget):
             cell.set_clip_buffer(self._clip_secs if enabled else 0)
         logger.info("Clips depuis la grille : %s (%d s)",
                     "activés" if enabled else "désactivés", self._clip_secs)
+
+    def set_low_latency(self, on: bool) -> None:
+        """Applique la basse latence à toutes les cellules, actuelles et à venir."""
+        self._low_latency = bool(on)
+        for cell in self._cells:
+            cell.set_low_latency(self._low_latency)
+        logger.info("Basse latence dans la grille : %s",
+                    "activée" if self._low_latency else "désactivée")
 
     def save_clip(self, login: str) -> bool:
         """Lance la sauvegarde du moment en cours de `login`.

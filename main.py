@@ -324,9 +324,11 @@ def _creer_fenetres(
         panel      = shell.panel
         grid       = shell.grid
         fullscreen.set_clip_config(_startup_config)
+        fullscreen.set_low_latency(_startup_config.get("low_latency", False))
         grid.grid.set_max_streams(_startup_config.get("max_active_streams", 20))
         grid.grid.set_sort_mode(_startup_config.get("grid_sort", "viewers"))
         grid.set_clip_config(_startup_config)
+        grid.set_low_latency(_startup_config.get("low_latency", False))
         panel.stream_selected.connect(
             lambda login: _on_stream_selected(login, fullscreen, data_manager, stream_manager)
         )
@@ -336,6 +338,7 @@ def _creer_fenetres(
     else:
         # ── Mode 2 ou 3 écrans ───────────────────────────────────────────
         fullscreen = FullscreenWindow(screen=fs_assignment.screen, clip_config=_startup_config.get("clips", {}))
+        fullscreen.set_low_latency(_startup_config.get("low_latency", False))
 
         panel_assignment = layout.get_screen(WindowRole.PANEL)
         if panel_assignment is not None:
@@ -354,6 +357,7 @@ def _creer_fenetres(
             grid.grid.set_max_streams(_startup_config.get("max_active_streams", 20))
             grid.grid.set_sort_mode(_startup_config.get("grid_sort", "viewers"))
             grid.set_clip_config(_startup_config)
+            grid.set_low_latency(_startup_config.get("low_latency", False))
             grid.stream_selected.connect(
                 lambda login: _on_stream_selected(login, fullscreen, data_manager, stream_manager)
             )
@@ -363,6 +367,25 @@ def _creer_fenetres(
                 # Mode triple — Echap ferme la fenêtre
                 grid.back_to_panel.connect(grid.close)
     return fullscreen, panel, grid, shell
+
+
+def _convertir_si_demande(_login: str, chemin: str) -> None:
+    """Ré-emballe le clip en MP4 quand les réglages le demandent.
+
+    La configuration est relue à CHAQUE clip, pas mémorisée au démarrage :
+    cocher la case en cours de soirée doit prendre effet sur le clip suivant,
+    et un clip coûte déjà bien plus qu'une lecture de fichier.
+    """
+    if not chemin or not chemin.lower().endswith(".ts"):
+        return
+    from core import config_store
+
+    clips = (config_store.load().get("clips") or {})
+    if not clips.get("convert_mp4"):
+        return
+    from core import conversion_clip
+
+    conversion_clip.convertir_en_arriere_plan(chemin, supprimer_source=True)
 
 
 def _brancher_panel(
@@ -390,6 +413,9 @@ def _brancher_panel(
     panel.settings_changed.connect(data_manager.reload_config)
     panel.settings_changed.connect(stream_manager.reload_config)
     panel.settings_changed.connect(fullscreen.set_clip_config)
+    panel.settings_changed.connect(
+        lambda cfg: fullscreen.set_low_latency(cfg.get("low_latency", False))
+    )
     panel.settings_changed.connect(_alerts.configure)
     panel.settings_changed.connect(_sounds.configure)
     # Un show du programme démarre : proposer d'y aller, sans imposer.
@@ -416,6 +442,7 @@ def _brancher_panel(
                 grid.grid.set_max_streams(cfg.get("max_active_streams", 20)),
                 grid.grid.set_sort_mode(cfg.get("grid_sort", "viewers")),
                 grid.set_clip_config(cfg),
+                grid.set_low_latency(cfg.get("low_latency", False)),
             )
         )
 
@@ -887,10 +914,16 @@ def _brancher_journal_session(app, data_manager, fullscreen, grid) -> None:
     data_manager.global_stats_updated.connect(
         lambda st: _SESSION.observe_stats(
             getattr(st, "donation_total", 0.0), getattr(st, "viewers_total", 0)))
+    # Le plein écran enregistre AUSSI des clips — c'est même le geste le plus
+    # courant en régie, la touche « C ». Ses clips n'étaient branchés nulle
+    # part : ni comptés dans le récapitulatif de fin de soirée, ni convertis.
+    fullscreen.clip_saved.connect(_SESSION.add_clip)
+    fullscreen.clip_saved.connect(_convertir_si_demande)
     if grid is not None:
         grid.hype_alert.connect(
             lambda login, label, score, _c, _e: _SESSION.add_hype(login, label, score))
         grid.grid.clip_saved.connect(_SESSION.add_clip)
+        grid.grid.clip_saved.connect(_convertir_si_demande)
 
     # Le récapitulatif est écrit à la fermeture : os._exit court-circuite tout
     # ce qui suit la boucle Qt, aboutToQuit est le dernier moment utile.

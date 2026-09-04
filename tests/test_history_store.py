@@ -509,35 +509,43 @@ def test_la_comparaison_donne_la_reference_et_l_ecart(horloge, edition_precedent
     store._previous = edition_precedente
     _remplir(store, horloge, [(0, 10_000.0, 10)])
 
-    ref, ecart = store.compare_to_previous(75_000.0, now_ts=DEBUT + 43200.0)
+    ref, ecart = store.compare_to_previous(75_000.0, now_ts=DEBUT_COURSE + 43200.0)
     assert ref == pytest.approx(50_000.0)
     assert ecart == pytest.approx(50.0)
 
 
-def test_l_origine_est_le_premier_releve_pas_minuit(horloge, edition_precedente):
-    """_EVENT_START est une frontière de minuit servant à filtrer la fenêtre,
-    alors que le direct démarre en soirée.
+def test_la_comparaison_cale_sur_la_meme_origine_que_le_graphe(horloge,
+                                                               edition_precedente):
+    """Le graphe aligne les éditions passées sur DEBUT_COURSE ; la comparaison
+    partait, elle, du premier relevé — qui arrive à l'ouverture de ZLink, donc
+    jusqu'à quarante heures plus tôt.
 
-    Prendre minuit comme origine décalait la comparaison de plus de quinze
-    heures et faisait sortir de la plage couverte avant la fin de l'event.
+    On lisait alors la courbe de référence quarante heures plus loin, et le
+    chiffre contredisait le graphe juste au-dessus : « -88 % » sous une courbe
+    2026 qui passe pourtant devant toutes les autres.
     """
     store = HistoryStore()
     store._previous = edition_precedente
-    _remplir(store, horloge, [(0, 10_000.0, 10)])   # premier relevé à DEBUT
+    # Relevés commencés bien avant le coup d'envoi : ils ne doivent rien décaler.
+    _remplir(store, horloge, [(0, 10_000.0, 10)])
 
-    ref, _ = store.compare_to_previous(1.0, now_ts=DEBUT + 43200.0)
+    ref, _ = store.compare_to_previous(1.0, now_ts=DEBUT_COURSE + 43200.0)
     assert ref == pytest.approx(50_000.0)
-    # Depuis minuit, l'écoulé vaudrait 46 800 s → une référence plus haute.
-    assert ref != pytest.approx(46800.0 / 86400.0 * 100_000.0)
 
 
-def test_sans_releve_l_origine_retombe_sur_le_debut_de_l_event(edition_precedente):
-    """Au tout premier tour de boucle, aucune donnée live n'est encore
-    stockée ; il faut quand même une origine plutôt qu'une exception."""
-    store = HistoryStore()
-    store._previous = edition_precedente
-    ref, _ = store.compare_to_previous(1.0, now_ts=_EVENT_START + 43200.0)
-    assert ref == pytest.approx(50_000.0)
+def test_la_reference_ne_depend_pas_des_releves_deja_faits(horloge,
+                                                          edition_precedente):
+    """Au premier tour de boucle il n'y a aucun relevé, plus tard il y en a des
+    milliers. La comparaison doit rendre exactement la même chose."""
+    vide = HistoryStore()
+    vide._previous = edition_precedente
+    rempli = HistoryStore()
+    rempli._previous = edition_precedente
+    _remplir(rempli, horloge, [(0, 10_000.0, 10), (7200, 20_000.0, 20)])
+
+    quand = DEBUT_COURSE + 43200.0
+    assert (vide.compare_to_previous(1.0, now_ts=quand)
+            == rempli.compare_to_previous(1.0, now_ts=quand))
 
 
 @pytest.mark.parametrize("courant,precedent", [
@@ -551,13 +559,13 @@ def test_une_comparaison_sans_base_saine_est_refusee(courant, precedent):
     « -100 % » avant même le coup d'envoi."""
     store = HistoryStore()
     store._previous = precedent
-    assert store.compare_to_previous(courant, now_ts=_EVENT_START + 43200.0) is None
+    assert store.compare_to_previous(courant, now_ts=DEBUT_COURSE + 43200.0) is None
 
 
 def test_pas_de_comparaison_sans_reference_chargee():
     """Si le dépôt tiers est injoignable, on n'affiche pas de comparaison."""
     store = HistoryStore()
-    assert store.compare_to_previous(50_000.0, now_ts=_EVENT_START + 43200.0) is None
+    assert store.compare_to_previous(50_000.0, now_ts=DEBUT_COURSE + 43200.0) is None
 
 
 # ── chargement de l'édition précédente ───────────────────────────────────────

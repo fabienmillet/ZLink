@@ -40,6 +40,7 @@ class FauxLecteur:
         self.volume: int | None = None
         self.mute: bool | None = None
         self.demuxer_max_back_bytes: int | None = None
+        self.demuxer_lavf_o: str | None = None
         self.lu: list[str] = []
         self.commandes: list[tuple] = []
         self.observes: list[tuple[str, object]] = []
@@ -331,6 +332,60 @@ def test_le_filtre_audio_ne_vise_pas_le_plein_ecran(monkeypatch):
     assert "af" not in opts
 
 
+# ── basse latence ────────────────────────────────────────────────────────────
+
+def test_sans_basse_latence_ffmpeg_garde_sa_marge():
+    """Trois segments d'avance, c'est la marge qui absorbe les à-coups réseau."""
+    opts: dict = {}
+    mpv_widget.MpvWidget._appliquer_options_latence(
+        types.SimpleNamespace(_low_latency=False), opts)
+    assert "demuxer_lavf_o" not in opts
+
+
+def test_la_basse_latence_garde_un_segment_de_reserve():
+    """Pas `-1` : le dernier segment est encore en cours d'écriture chez Twitch,
+    et démarrer dessus fait bafouiller le flux."""
+    opts: dict = {}
+    mpv_widget.MpvWidget._appliquer_options_latence(
+        types.SimpleNamespace(_low_latency=True), opts)
+    assert opts["demuxer_lavf_o"] == "live_start_index=-2"
+
+
+def test_la_basse_latence_se_pose_sur_un_lecteur_vivant(widget_inerte):
+    """Cocher la case ne doit pas demander de relancer l'application."""
+    lecteur = FauxLecteur()
+    widget_inerte._player = lecteur
+    widget_inerte.set_low_latency(True)
+    assert lecteur.demuxer_lavf_o == "live_start_index=-2"
+
+
+def test_couper_la_basse_latence_vide_l_option(widget_inerte):
+    """Une option laissée en place rendrait le décochage sans effet."""
+    lecteur = FauxLecteur()
+    widget_inerte._player = lecteur
+    widget_inerte.set_low_latency(True)
+    widget_inerte.set_low_latency(False)
+    assert lecteur.demuxer_lavf_o == ""
+
+
+def test_la_basse_latence_inchangee_ne_touche_a_rien(widget_inerte):
+    """Chaque sauvegarde des réglages rappelle ce point d'entrée."""
+    lecteur = FauxLecteur()
+    widget_inerte._player = lecteur
+    widget_inerte.set_low_latency(False)
+    assert lecteur.demuxer_lavf_o is None
+
+
+def test_un_lecteur_qui_refuse_l_option_ne_fait_pas_tomber_le_reglage(widget_inerte):
+    """Réglage d'agrément : son échec ne doit pas remonter à l'appelant."""
+    class Refus:
+        def __setattr__(self, nom, valeur):
+            raise RuntimeError("propriété inconnue")
+
+    widget_inerte._player = Refus()
+    widget_inerte.set_low_latency(True)
+
+
 # ── options de journal ───────────────────────────────────────────────────────
 
 def test_le_journal_mpv_est_ferme_par_defaut(monkeypatch):
@@ -461,6 +516,7 @@ def test_sans_libmpv_le_widget_est_inerte(widget_inerte):
     widget_inerte.play_stream("zerator")
     widget_inerte.stop()
     widget_inerte.set_clip_buffer(60)
+    widget_inerte.set_low_latency(True)
     widget_inerte._reapply_audio()
     widget_inerte.shutdown()
 
@@ -1175,7 +1231,30 @@ def test_backend_x11(widget_inerte, monkeypatch):
     opts: dict = {}
     assert widget_inerte._appliquer_options_affichage(opts, True) is True
     assert opts["gpu_context"] == "x11egl"
-    assert opts["hwdec"] == "auto-safe"
+    assert opts["hwdec"] == mpv_widget._HWDEC_LINUX
+
+
+def test_sans_cuda_nvdec_n_est_pas_propose(monkeypatch):
+    """Le dlopen raté écrit « Cannot load libcuda.so.1 » HORS du journal mpv :
+    une ligne par cellule, et mpv retenait vaapi de toute façon."""
+    def _refuse(_nom):
+        raise OSError("libcuda.so.1: cannot open shared object file")
+
+    monkeypatch.setattr(mpv_widget.ctypes, "CDLL", _refuse)
+    assert mpv_widget._hwdec_linux() == "vaapi,vaapi-copy,no"
+
+
+def test_avec_cuda_on_laisse_mpv_choisir(monkeypatch):
+    """Sur une machine NVIDIA, écarter nvdec coûterait le décodage matériel."""
+    monkeypatch.setattr(mpv_widget.ctypes, "CDLL", lambda _nom: object())
+    assert mpv_widget._hwdec_linux() == "auto-safe"
+
+
+def test_le_repli_logiciel_ferme_la_liste(monkeypatch):
+    """Sans `no`, une machine sans VA-API du tout n'aurait plus de repli."""
+    monkeypatch.setattr(mpv_widget.ctypes, "CDLL",
+                        lambda _nom: (_ for _ in ()).throw(OSError()))
+    assert mpv_widget._hwdec_linux().split(",")[-1] == "no"
 
 
 def test_backend_wayland_refuse(widget_inerte, monkeypatch, caplog):

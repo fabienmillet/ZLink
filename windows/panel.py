@@ -973,6 +973,9 @@ class _AccueilTimeline(QWidget):
     _CARD_H      = 36
     _LABEL_H     = 14  # hauteur zone heure sous la ligne de base
     _BASELINE_Y  = 58
+    #: Couloirs d'événements superposables. Au-delà de deux, la bande de
+    #: cinquante pixels ne laisse plus de quoi lire un titre.
+    _MAX_COULOIRS = 2
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1039,15 +1042,40 @@ class _AccueilTimeline(QWidget):
         return items
 
     @staticmethod
-    def _repartir_en_couloirs(items: list[list]) -> int:
+    def _est_favori(ev: "EventItem", favoris: set[str]) -> bool:
+        """Un favori participe-t-il à cet événement ?
+
+        `logins` couvre hôtes ET invités : un show où un favori est convié
+        compte autant qu'un show qu'il anime.
+        """
+        if not favoris:
+            return False
+        return any((lg or "").lower() in favoris
+                   for lg in (ev.logins or {}).values())
+
+    @classmethod
+    def _repartir_en_couloirs(cls, items: list[list]) -> int:
         """Affecte un couloir à chaque événement. Rend le nombre de couloirs.
 
-        Premier couloir libre, en balayant par date de début : deux événements
-        qui se chevauchent finissent l'un sous l'autre plutôt que l'un SUR
-        l'autre. Les entrées sont modifiées sur place.
+        Premier couloir libre : deux événements qui se chevauchent finissent
+        l'un sous l'autre plutôt que l'un SUR l'autre. Les entrées sont
+        modifiées sur place.
+
+        DEUX couloirs au plus. Il n'y avait pas de plafond, et une soirée
+        chargée en empilait quatre : la bande fait cinquante pixels de haut,
+        chaque couloir tombait à douze, et plus rien n'était lisible — quatre
+        filets de texte tronqué. Mieux vaut deux événements qu'on lit que
+        quatre qu'on devine.
+
+        Le tri décide donc de ce qui reste, et il place les FAVORIS devant :
+        quand deux shows se chevauchent, celui où joue quelqu'un qu'on suit
+        prend le couloir, et l'autre est écarté plutôt que rétréci. À égalité
+        de faveur, le plus proche dans le temps l'emporte.
         """
-        items.sort(key=lambda it: it[1])
+        favoris = favorites.get()
+        items.sort(key=lambda it: (not cls._est_favori(it[0], favoris), it[1]))
         fins_de_couloir: list[int] = []
+        gardes: list[list] = []
         for it in items:
             debut, largeur = it[3], it[4]
             for i, fin_x in enumerate(fins_de_couloir):
@@ -1056,8 +1084,15 @@ class _AccueilTimeline(QWidget):
                     it[5] = i
                     break
             else:
+                if len(fins_de_couloir) >= cls._MAX_COULOIRS:
+                    continue          # plus de place : cet événement saute
                 fins_de_couloir.append(debut + largeur)
                 it[5] = len(fins_de_couloir) - 1
+            gardes.append(it)
+        # `items` est la liste que l'appelant dessine : elle ne doit contenir
+        # que ce qui a trouvé un couloir, sinon les écartés seraient tracés
+        # par-dessus le couloir 0.
+        items[:] = gardes
         return max(1, len(fins_de_couloir))
 
     def _hit_event(self, mouse_x: int) -> "EventItem | None":

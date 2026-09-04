@@ -236,6 +236,10 @@ class GridWindow(QMainWindow):
                     "activé" if self._auto_clip else "désactivé",
                     self._auto_clip_max)
 
+    def set_low_latency(self, on: bool) -> None:
+        """Relaie le réglage de basse latence aux cellules."""
+        self.grid.set_low_latency(on)
+
     def _maybe_auto_clip(self, login: str) -> None:
         """Enregistre le moment si l'automatisme est demandé.
 

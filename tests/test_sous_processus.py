@@ -30,7 +30,8 @@ from core.sous_processus import sans_fenetre
 RACINE = pathlib.Path(__file__).resolve().parent.parent
 
 #: Fichiers de l'application qui lancent un programme extérieur.
-SOURCES = ["core/replay_hd.py", "core/stream_manager.py", "core/version.py",
+SOURCES = ["core/conversion_clip.py", "core/replay_hd.py",
+           "core/stream_manager.py", "core/version.py",
            "widgets/mpv_widget.py"]
 
 

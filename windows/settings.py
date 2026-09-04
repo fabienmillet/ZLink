@@ -46,6 +46,7 @@ except Exception:  # noqa: BLE001
     qta = None  # type: ignore[assignment]
     _QTA_OK = False
 
+from core import conversion_clip
 from core.version import display_version
 from core import config_store, domotique, streamdeck_install
 from widgets.screen_picker import (
@@ -320,6 +321,18 @@ class _PageStreams(_PageBase):
         f.addRow("Qualité fullscreen :", self._fs_quality)
         self._vl.addLayout(f)
 
+        self._low_latency = QCheckBox("Basse latence — se rapprocher du direct")
+        self._low_latency.setChecked(bool(config.get("low_latency", False)))
+        self._vl.addWidget(self._low_latency)
+        self._vl.addWidget(_hint(
+            "Sans ce réglage, la lecture démarre trois segments avant le bord "
+            "du direct, soit environ six secondes de retard. Cochée, elle en "
+            "récupère deux et garde un segment de réserve — le coussin qui "
+            "absorbe les à-coups du réseau. Sur une connexion irrégulière ou "
+            "une grille chargée, même réduit il peut ne plus suffire. "
+            "Le changement prend effet au prochain démarrage de flux."
+        ))
+
         self._vl.addWidget(_sep())
         self._vl.addWidget(_section_title("Grille"))
 
@@ -364,6 +377,7 @@ class _PageStreams(_PageBase):
         config["fullscreen_quality"] = self._fs_quality.currentText()
         config["max_active_streams"] = self._max_streams.value()
         config["grid_sort"] = self._grid_sort.currentData() or "viewers"
+        config["low_latency"] = self._low_latency.isChecked()
 
 
 class _PageScreens(_PageBase):
@@ -764,6 +778,23 @@ class _PageClips(_PageBase):
             "une minute pèse environ 2,5 Mo par flux."
         ))
 
+        self._convert_mp4 = QCheckBox(
+            "Convertir les clips en MP4 (et supprimer le .ts)")
+        self._convert_mp4.setChecked(bool(config.get("clips", {})
+                                          .get("convert_mp4", False)))
+        self._vl.addWidget(self._convert_mp4)
+        self._vl.addWidget(_hint(
+            "Les clips sont écrits en .ts, le conteneur du flux Twitch : c'est "
+            "le seul qu'on puisse couper en plein milieu, mais il ne se partage "
+            "pas — Discord ne le lit pas en ligne, un téléphone non plus. La "
+            "conversion ré-emballe les mêmes images en MP4, sans ré-encoder ni "
+            "rien perdre, en une fraction de seconde.\n"
+            "Elle demande ffmpeg, qui n'est pas livré avec ZLink. "
+            + ("Il est présent sur cette machine."
+               if conversion_clip.disponible()
+               else "Il est INTROUVABLE ici : la case restera sans effet.")
+        ))
+
         self._auto_clip = QCheckBox(
             "Enregistrer automatiquement quand HypeWatcher signale un moment")
         self._auto_clip.setFont(QFont(_FONT_UI, 12))
@@ -806,6 +837,7 @@ class _PageClips(_PageBase):
         config["clips"]["grid_enabled"] = self._grid_clips.isChecked()
         config["clips"]["auto_on_alert"] = self._auto_clip.isChecked()
         config["clips"]["auto_max_per_hour"] = self._auto_max.value()
+        config["clips"]["convert_mp4"] = self._convert_mp4.isChecked()
 
 
 # ── SettingsPanel ─────────────────────────────────────────────────────────────
@@ -1343,6 +1375,12 @@ class _PageCredits(_PageBase):
             "ZEvent — API officielle",
             "https://zevent.fr",
             "Cagnotte globale, viewers et état des lives.",
+        ))
+        self._vl.addWidget(self._link(
+            "marentdev.eu",
+            "https://zevent.marentdev.eu",
+            "Relais communautaire de la cagnotte en direct. Merci à son "
+            "auteur pour le travail et pour l'avoir rendu public.",
         ))
 
         self._vl.addWidget(_sep())

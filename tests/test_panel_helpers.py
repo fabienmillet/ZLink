@@ -902,6 +902,87 @@ def test_le_rappel_d_un_show_ne_rend_pas_le_texte_enrichi(qtbot):
     assert all(w.textFormat() == Qt.TextFormat.PlainText for w in corps)
 
 
+# ── frise des événements : les couloirs ─────────────────────────────────────
+
+def _evt(nom, debut_x, largeur, logins=()):
+    """Une entrée telle que `_evenements_visibles` la fabrique.
+
+    [ev, début_ts, fin_ts, x, largeur, couloir] — le placement ne regarde que
+    les pixels ; le ts ne sert qu'au tri.
+    """
+    from core.api_client import EventItem
+
+    ev = EventItem(id=nom, name=nom, day="2026-09-03", start_local="21:00",
+                   end_local="22:00", description="",
+                   logins={str(i): lg for i, lg in enumerate(logins)})
+    return [ev, float(debut_x), 0.0, debut_x, largeur, 0]
+
+
+def _placer(monkeypatch, items, favoris=()):
+    """Répartit `items` en couloirs avec un jeu de favoris donné."""
+    monkeypatch.setattr(panel.favorites, "get", lambda: {f.lower() for f in favoris})
+    n = panel._AccueilTimeline._repartir_en_couloirs(items)
+    return n, [it[0].name for it in items]
+
+
+def test_deux_evenements_disjoints_partagent_le_meme_couloir(monkeypatch):
+    """Rien ne se chevauche : rien ne doit descendre d'un cran."""
+    items = [_evt("a", 0, 100), _evt("b", 200, 100)]
+    n, gardes = _placer(monkeypatch, items)
+    assert n == 1
+    assert set(gardes) == {"a", "b"}
+
+
+def test_la_frise_ne_depasse_jamais_deux_couloirs(monkeypatch):
+    """Quatre shows superposés donnaient quatre couloirs de douze pixels :
+    quatre filets de texte tronqué dans une bande de cinquante."""
+    items = [_evt(nom, 0, 500) for nom in ("a", "b", "c", "d")]
+    n, gardes = _placer(monkeypatch, items)
+    assert n == 2
+    assert len(gardes) == 2
+
+
+def test_un_evenement_ecarte_n_est_plus_dessine(monkeypatch):
+    """S'il restait dans la liste, il serait tracé par-dessus le couloir 0."""
+    items = [_evt(nom, 0, 500) for nom in ("a", "b", "c")]
+    _placer(monkeypatch, items)
+    assert len(items) == 2
+    assert all(it[5] < 2 for it in items)
+
+
+def test_un_favori_prend_le_couloir_devant_un_show_plus_precoce(monkeypatch):
+    """C'est tout l'intérêt du plafond : choisir CE qui reste, pas rétrécir."""
+    items = [
+        _evt("tot", 0, 500),
+        _evt("aussi", 10, 500),
+        _evt("favori", 20, 500, logins=("Zerator",)),
+    ]
+    _, gardes = _placer(monkeypatch, items, favoris=("zerator",))
+    assert "favori" in gardes
+    assert len(gardes) == 2
+
+
+def test_le_favori_est_reconnu_quel_que_soit_la_casse(monkeypatch):
+    """Les logins arrivent tels que le show les déclare, la casse varie."""
+    ev = _evt("show", 0, 100, logins=("ZeratoR",))[0]
+    monkeypatch.setattr(panel.favorites, "get", lambda: {"zerator"})
+    assert panel._AccueilTimeline._est_favori(ev, panel.favorites.get())
+
+
+def test_sans_favori_l_ordre_reste_chronologique(monkeypatch):
+    """Aucun favori : le tri ne doit pas se mettre à mélanger la frise."""
+    items = [_evt("tard", 300, 100), _evt("tot", 0, 100)]
+    _placer(monkeypatch, items)
+    assert [it[0].name for it in items] == ["tot", "tard"]
+
+
+def test_un_show_sans_login_n_est_jamais_favori():
+    """Beaucoup de shows n'annoncent aucun login : ils ne doivent pas lever."""
+    ev = _evt("anonyme", 0, 100)[0]
+    assert panel._AccueilTimeline._est_favori(ev, {"zerator"}) is False
+    assert panel._AccueilTimeline._est_favori(ev, set()) is False
+
+
 # ── frise des événements : les graduations horaires ─────────────────────────
 
 def _horodatage(heure: int, minute: int = 0) -> float:

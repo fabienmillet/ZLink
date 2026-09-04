@@ -484,9 +484,13 @@ class _FenetreSignal(QObject):
         self.clips: list = []
         self.max_streams: list[int] = []
         self.tris: list[str] = []
+        self.latences: list[bool] = []
 
     def set_clip_config(self, config):
         self.clips.append(config)
+
+    def set_low_latency(self, on):
+        self.latences.append(on)
 
     def set_max_streams(self, n):
         self.max_streams.append(n)

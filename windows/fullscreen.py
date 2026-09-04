@@ -2163,6 +2163,12 @@ class FullscreenWindow(QMainWindow):
     #: Ctrl+Entrée dans la palette : ajouter la chaîne à la grille. Le plein
     #: écran ne tient pas la sélection, la demande remonte à main.py.
     grid_add_requested = pyqtSignal(str)
+    #: (login, chemin) d'un clip que L'UTILISATEUR vient d'enregistrer.
+    #: Même forme que celui de la grille, et pour la même raison : la fenêtre
+    #: écrit le fichier, elle ne décide pas de ce qu'on en fait ensuite.
+    #: Les `save_clip` du replay, eux, n'émettent rien — ils écrivent des
+    #: tampons de travail dans le dossier temporaire, pas des enregistrements.
+    clip_saved = pyqtSignal(str, str)
 
     def __init__(self, screen: QScreen, show_on_init: bool = True, clip_config: dict | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3480,6 +3486,7 @@ class FullscreenWindow(QMainWindow):
         if path:
             self._clip_btn.setText("✓ Clip sauvé !")
             self.annoncer(f"Clip sauvegardé · {secs} s", "#00ff87")
+            self.clip_saved.emit(self._current_login, path)
         else:
             self._clip_btn.setText("✗ Erreur")
             self.annoncer("Clip impossible à enregistrer", "#ff5f56")
@@ -3558,6 +3565,15 @@ class FullscreenWindow(QMainWindow):
     def set_clip_config(self, cfg: dict) -> None:
         """Met à jour la config clips (appelé depuis main.py sur settings_changed)."""
         self._clip_config = cfg.get("clips", {})
+
+    def set_low_latency(self, on: bool) -> None:
+        """Retard minimal sur le direct (appelé depuis main.py, même chemin).
+
+        Ne vise QUE le lecteur du direct : le lecteur de replay est un VOD,
+        où démarrer au bord de la playlist n'a pas de sens.
+        """
+        if self._mpv is not None:
+            self._mpv.set_low_latency(on)
 
     def _carte_des_touches(self) -> dict:
         """Touche → (action, faut-il rappeler l'overlay ensuite).

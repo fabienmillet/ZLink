@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import pathlib
+import ctypes
 import locale
 import shutil
 import subprocess
@@ -149,6 +150,52 @@ def _find_streamlink() -> str:
 # 15 images/s suffisent pour une vignette et divisent par deux les passes de
 # composition par rapport à la cadence native du flux.
 _GRID_FRAME_INTERVAL = 1.0 / 15.0
+
+
+def _hwdec_linux() -> str:
+    """Priorité de décodage matériel sous Linux.
+
+    `auto-safe` fait essayer nvdec à mpv, donc un `dlopen("libcuda.so.1")` qui
+    échoue sur toute machine AMD ou Intel. Le message « Cannot load
+    libcuda.so.1 » que ffmpeg écrit alors part DIRECTEMENT sur la sortie
+    d'erreur, hors du journal de mpv : vérifié, ni `really-quiet` ni
+    `msg-level=ffmpeg=no` ne l'attrapent. Une ligne par cellule, vingt-cinq
+    cellules, et de nouveau à chaque reprise.
+
+    Et pour rien : sur ces machines mpv retenait `vaapi` de toute façon, ce
+    que la liste ci-dessous demande directement. `no` ferme la liste — sans
+    lui, une machine sans VA-API du tout n'aurait plus de repli logiciel.
+
+    nvdec n'est écarté que quand la bibliothèque est RÉELLEMENT absente : sur
+    une machine NVIDIA, `auto-safe` reste le bon choix, et c'est le même
+    dlopen que ffmpeg qui tranche.
+    """
+    try:
+        ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return "vaapi,vaapi-copy,no"
+    return "auto-safe"
+
+
+#: Résolu une fois : vingt-cinq cellules ne doivent pas rouvrir la question.
+_HWDEC_LINUX = _hwdec_linux() if sys.platform.startswith("linux") else "auto-safe"
+
+#: Option ffmpeg qui rapproche le démarrage du bord du direct. Le démuxeur HLS
+#: s'ouvre par défaut trois segments en arrière (`live_start_index=-3`), soit
+#: six secondes de retard sur les segments Twitch, qui durent deux secondes.
+#:
+#: DEUX, et non un. `-1` démarre sur le dernier segment publié — celui que
+#: Twitch est encore en train d'écrire : essayé, le flux part trop tôt et
+#: bafouille. Le segment gardé en réserve est le coussin qui absorbe les
+#: à-coups du réseau ; il coûte deux secondes et rend les deux autres.
+#:
+#: Ce n'est PAS `--twitch-low-latency`. Ce drapeau ne règle que le lecteur HLS
+#: de streamlink (TwitchHLSStreamReader), et ZLink n'appelle streamlink qu'avec
+#: `--stream-url` : il imprime l'URL de la playlist puis s'arrête, c'est mpv
+#: qui lit le flux. Le drapeau n'aurait donc rien changé. Les segments
+#: `EXT-X-TWITCH-PREFETCH`, eux, restent hors de portée — ffmpeg ignore ces
+#: balises propres à Twitch.
+_LATENCE_BASSE = "live_start_index=-2"
 
 _STREAMLINK = _find_streamlink()
 # Limite de concurrence globale pour streamlink (évite les timeouts quand la grille charge 20 streams d'un coup)
@@ -316,7 +363,9 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
     # la connexion queued ramène le repaint sur le thread GUI.
     _frame_ready = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None, *, grid_mode: bool = False, clip_buffer_secs: int = 90) -> None:
+    def __init__(self, parent: QWidget | None = None, *,
+                 grid_mode: bool = False, clip_buffer_secs: int = 90,
+                 low_latency: bool = False) -> None:
         super().__init__(parent)
 
         _LIVE_PLAYERS.add(self)
@@ -328,6 +377,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         self._render_ctx: object | None = None
         self._min_frame_interval: float = 0.0
         self._last_paint_ts: float = 0.0
+        self._low_latency: bool = bool(low_latency)
 
         if not _MPV_AVAILABLE:
             return
@@ -343,6 +393,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
         if not self._appliquer_options_affichage(mpv_kwargs, grid_mode):
             return
         self._appliquer_options_tampon(mpv_kwargs, grid_mode, clip_buffer_secs)
+        self._appliquer_options_latence(mpv_kwargs)
 
         self._appliquer_options_journal(mpv_kwargs)
 
@@ -471,14 +522,15 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                 self._player = None
                 return False
             # X11 : mpv gère --wid nativement (embed sans composition Qt).
-            # hwdec auto-safe couvre vaapi (AMD/Intel) et nvdec.
+            # hwdec : auto-safe sur machine NVIDIA, VA-API seule ailleurs —
+            # voir _hwdec_linux(), qui existe pour une raison bruyante.
             # gpu-context doit être EXPLICITE : en autodétection, mpv voit
             # WAYLAND_DISPLAY dans l'environnement et choisit son backend
             # Wayland même quand Qt tourne sous XWayland. Il ouvre alors sa
             # propre fenêtre au lieu de se greffer sur le wid X11 — c'est la
             # cause des flux qui s'affichent hors de l'application.
             mpv_kwargs.update(
-                wid=str(wid), hwdec="auto-safe", gpu_api="auto", vo="gpu",
+                wid=str(wid), hwdec=_HWDEC_LINUX, gpu_api="auto", vo="gpu",
                 gpu_context="x11egl",
             )
         else:
@@ -530,6 +582,15 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
                 demuxer_max_bytes="200MiB",
                 demuxer_readahead_secs=_buf,
             )
+
+    def _appliquer_options_latence(self, mpv_kwargs: dict) -> None:
+        """Démarrage au bord du direct, quand la basse latence est demandée.
+
+        Rien à poser dans le cas contraire : l'absence de `demuxer-lavf-o`
+        laisse ffmpeg sur son `live_start_index=-3`, la marge d'origine.
+        """
+        if self._low_latency:
+            mpv_kwargs["demuxer_lavf_o"] = _LATENCE_BASSE
 
     def _appliquer_options_journal(self, mpv_kwargs: dict) -> None:
         """Journal mpv optionnel, activé par ZLINK_MPV_LOG=1."""
@@ -935,6 +996,26 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
             )
         except Exception as exc:      # noqa: BLE001 — réglage d'agrément
             logger.debug("MpvWidget: tampon de clip non ajusté — %s", exc)
+
+    def set_low_latency(self, on: bool) -> None:
+        """Active ou coupe le démarrage au bord du direct.
+
+        Contrairement au tampon de clip, `demuxer-lavf-o` n'est lu qu'à
+        L'OUVERTURE d'un flux : le changement ne touche pas la lecture en
+        cours, il prend effet à la suivante — reprise, changement de chaîne
+        ou de qualité. Les cellules de grille non encore créées, elles,
+        reçoivent la valeur par le constructeur.
+        """
+        on = bool(on)
+        if on == self._low_latency:
+            return
+        self._low_latency = on
+        if self._player is None:
+            return
+        try:
+            self._player.demuxer_lavf_o = _LATENCE_BASSE if on else ""
+        except Exception as exc:      # noqa: BLE001 — réglage d'agrément
+            logger.debug("MpvWidget: basse latence non appliquée — %s", exc)
 
     def get_audio_rms_db(self) -> float | None:
         """Retourne le niveau RMS audio en dBFS lu via le filtre astats.

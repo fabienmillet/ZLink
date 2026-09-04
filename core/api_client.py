@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 ZEVENT_URL = "https://zevent.fr/api/"
 # API communautaire evenmorestats, édition 2026 : l'event-id passe dans le chemin
 # (plus de header "event-id") et tous les montants sont exprimés en centimes.
-GDOC_URL = "https://api.ppr.evenmorestats.fr"
+#
+# L'hôte de préproduction `api.ppr.evenmorestats.fr` a été rangé derrière un 308
+# vers celui-ci. httpx ne suit AUCUNE redirection par défaut : `raise_for_status`
+# levait donc sur le 308 et `fetch_participations` ne rendait plus rien — la
+# liste des streamers retombait sur la seule source zevent.fr, sans objectifs de
+# dons ni identifiants stables entre éditions.
+GDOC_URL = "https://api.evenmorestats.fr"
 GDOC_EVENT_ID = "019f5bd1-fe07-7d78-a326-a02198a9d50f"   # ZEvent 2026 (3 → 7 sept.)
 _TIMEOUT = httpx.Timeout(10.0)
 
@@ -42,7 +48,10 @@ def _client() -> httpx.AsyncClient:
     loop = asyncio.get_running_loop()
     client = _LOOP_CLIENTS.get(loop)
     if client is None or client.is_closed:
-        client = httpx.AsyncClient(timeout=_TIMEOUT)
+        # Les redirections sont suivies : c'est un 308 non suivi qui a coupé
+        # les participations quand l'API a changé d'hôte. Deux API publiques
+        # en lecture seule, dont l'une a déjà déménagé une fois.
+        client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True)
         _LOOP_CLIENTS[loop] = client
     return client
 
