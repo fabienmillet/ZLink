@@ -493,6 +493,28 @@ class Vignettes:
 
 # ── Un boîtier ───────────────────────────────────────────────────────────────
 
+#: Ce que lève la bibliothèque quand l'appareil n'est plus au bout du câble.
+#: Reconnu par le TYPE quand il est importable, et par le message sinon : la
+#: dépendance est optionnelle (Linux seulement) et son arborescence interne
+#: n'est pas une API publique.
+_DISPARU_MSG = "no hid device"
+
+
+def _boitier_disparu(exc: BaseException) -> bool:
+    """L'erreur dit-elle « cet appareil n'est plus là » ?
+
+    Débrancher un Stream Deck n'est pas une panne : c'est un geste ordinaire,
+    et il ne mérite ni pile d'appels ni acharnement.
+    """
+    try:
+        from StreamDeck.Transport.Transport import TransportError
+    except ImportError:                     # pragma: no cover - dépend de l'install
+        TransportError = ()                 # type: ignore[assignment]
+    if TransportError and isinstance(exc, TransportError):
+        return True
+    return _DISPARU_MSG in str(exc).lower()
+
+
 class Boitier:
     """Un Stream Deck ouvert, et ce qu'on a posé dessus.
 
@@ -823,27 +845,64 @@ class PiloteStreamDeck(QObject):
             try:
                 self._peindre_tout()
             except Exception:                             # noqa: BLE001
-                # Le fil doit survivre : un boîtier débranché en plein dessin
-                # ne doit pas éteindre les autres jusqu'au prochain lancement.
+                # Filet de dernier recours : `_peindre_tout` traite déjà chaque
+                # boîtier séparément, mais le fil doit survivre à ce qui
+                # arriverait AUTOUR — construction des vignettes, état courant.
                 logger.exception("Stream Deck : dessin interrompu")
 
     def _peindre_tout(self) -> None:
-        from StreamDeck.ImageHelpers import PILHelper
-
         # Une COPIE de la liste : `arreter()` la vide depuis le fil de Qt, et
         # ne rejoint celui-ci qu'avec un délai — un dessin en cours de
         # téléchargement d'avatar peut le dépasser. Itérer l'originale
         # lèverait alors « list changed size during iteration ».
         for boitier in list(self._boitiers):  # NOSONAR
-            for index, touche in enumerate(boitier.disposition):
-                image, signature = self._touche(boitier, touche)
-                if not boitier.a_change(index, signature):
-                    continue
-                boitier.deck.set_key_image(
-                    index, PILHelper.to_native_key_format(boitier.deck, image))
-            if boitier.molettes and getattr(boitier.deck, "is_touch", None) \
-                    and boitier.deck.is_touch():
-                self._peindre_ecran(boitier)
+            # Chaque boîtier dans son propre essai. La boucle de dessin en
+            # avait déjà un, mais AUTOUR de tous : le premier boîtier
+            # débranché emportait le dessin des suivants, alors que son
+            # commentaire promettait justement le contraire.
+            try:
+                self._peindre_un(boitier)
+            except Exception as exc:                      # noqa: BLE001
+                self._sur_boitier_muet(boitier, exc)
+
+    def _peindre_un(self, boitier: Boitier) -> None:
+        """Écrit toutes les touches d'un boîtier, et son écran s'il en a un."""
+        from StreamDeck.ImageHelpers import PILHelper
+
+        for index, touche in enumerate(boitier.disposition):
+            image, signature = self._touche(boitier, touche)
+            if not boitier.a_change(index, signature):
+                continue
+            boitier.deck.set_key_image(
+                index, PILHelper.to_native_key_format(boitier.deck, image))
+        if boitier.molettes and getattr(boitier.deck, "is_touch", None) \
+                and boitier.deck.is_touch():
+            self._peindre_ecran(boitier)
+
+    def _sur_boitier_muet(self, boitier: Boitier, exc: Exception) -> None:
+        """Retire un boîtier qui ne répond plus, ou signale l'incident.
+
+        Débrancher un Stream Deck lève « No HID device » à chaque écriture. Le
+        boîtier restait dans la liste, et chaque rafraîchissement — il y en a
+        plusieurs par seconde — reversait une pile d'appels complète dans le
+        journal pour un appareil qu'on ne reverra pas de la session.
+
+        On le retire donc, avec UNE ligne. Ce n'est pas une panne : c'est
+        quelqu'un qui a débranché un boîtier, ce qui est son droit.
+
+        Toute autre erreur reste une vraie surprise, et garde sa pile.
+        """
+        if not _boitier_disparu(exc):
+            logger.exception("Stream Deck : dessin impossible sur %s",
+                             boitier.cote, exc_info=exc)
+            return
+        try:
+            self._boitiers.remove(boitier)
+        except ValueError:
+            return          # déjà retiré par `arreter()` entre-temps
+        logger.warning(
+            "Stream Deck %s débranché : retiré. Relancer ZLink pour le "
+            "reprendre.", boitier.cote)
 
     def _touche(self, boitier: Boitier, touche: dict):
         """L'image d'une touche, et la signature qui dit si elle a bougé."""

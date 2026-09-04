@@ -21,6 +21,7 @@ Ce qui est vérifié tient en trois questions :
 
 from __future__ import annotations
 
+import logging
 import pytest
 
 pytest.importorskip("PIL", reason="Pillow absent : le pilote ne dessine pas")
@@ -489,3 +490,66 @@ def test_l_absence_des_dessins_se_dit_une_fois(monkeypatch, caplog):
     assert sum("dessins de touche introuvables" in m
                for m in caplog.messages) == 1
     sd.PiloteStreamDeck._glyphes_verifies = False
+
+
+# ── un boîtier débranché en pleine session ───────────────────────────────────
+
+class _DeckDebranche(FauxDeck):
+    """Un boîtier qu'on vient d'arracher du port USB."""
+
+    def set_key_image(self, index: int, image) -> None:  # noqa: N802 (API)
+        from StreamDeck.Transport.Transport import TransportError
+        raise TransportError("No HID device.")
+
+
+@pytest.mark.parametrize("exc,attendu", [
+    ("transport", True),
+    (OSError("No HID device."), True),
+    (OSError("no hid device"), True),
+    (ValueError("image trop grande"), False),
+    (RuntimeError("autre chose"), False),
+])
+def test_on_reconnait_un_boitier_disparu(exc, attendu):
+    """Le type quand il est importable, le message sinon : la dépendance est
+    optionnelle et son arborescence interne n'est pas une API publique."""
+    if exc == "transport":
+        from StreamDeck.Transport.Transport import TransportError
+        exc = TransportError("No HID device.")
+    assert sd._boitier_disparu(exc) is attendu
+
+
+def test_un_boitier_debranche_est_retire(pilote, caplog):
+    """Il restait dans la liste, et chaque rafraîchissement — plusieurs par
+    seconde — reversait une pile d'appels complète pour un appareil qu'on ne
+    reverra pas de la session."""
+    objet, _ = pilote()
+    objet._boitiers[0] = sd.Boitier(_DeckDebranche(15, 0, 72, 3))
+    with caplog.at_level(logging.WARNING):
+        objet._peindre_tout()
+    assert objet.boitiers == 0
+    assert "débranché" in caplog.text
+    assert "Traceback" not in caplog.text, "un débranchement n'est pas une panne"
+
+
+def test_un_boitier_debranche_n_emporte_pas_les_autres(pilote):
+    """Le commentaire de la boucle le promettait déjà, mais l'essai était
+    AUTOUR de tous les boîtiers : le premier mort emportait les suivants."""
+    objet, vivant = pilote()
+    objet._boitiers.insert(0, sd.Boitier(_DeckDebranche(15, 0, 72, 3)))
+    objet._peindre_tout()
+    assert sorted(vivant.images) == list(range(15))
+    assert objet.boitiers == 1
+
+
+def test_une_vraie_erreur_de_dessin_garde_sa_pile(pilote, caplog):
+    """Elle, c'est une surprise : on veut savoir d'où elle vient."""
+    class _DeckAbsurde(FauxDeck):
+        def set_key_image(self, index, image):   # noqa: N802 (API)
+            raise ValueError("image trop grande")
+
+    objet, _ = pilote()
+    objet._boitiers[0] = sd.Boitier(_DeckAbsurde(15, 0, 72, 3))
+    with caplog.at_level(logging.ERROR):
+        objet._peindre_tout()
+    assert objet.boitiers == 1, "on ne retire que ce qui a disparu"
+    assert "Traceback" in caplog.text

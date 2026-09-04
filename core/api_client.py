@@ -218,18 +218,50 @@ class GoalWithStreamer:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _iso_en_datetime(dt_str: str) -> datetime:
+    """Une ISO datetime en `datetime` AWARE. Lève ValueError si illisible.
+
+    Deux tolérances, écrites une fois pour les trois lectures qui en avaient
+    chacune leur copie :
+
+    - le « Z » terminal, que `fromisoformat` refusait avant Python 3.11 et que
+      l'API emploie ;
+    - une date sans fuseau, qu'on suppose UTC — c'est ce que ce serveur
+      envoie, et deviner autre chose décalerait tout d'une ou deux heures.
+    """
+    dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _to_local_time(dt_str: str) -> str:
     """Convertit une ISO datetime en HH:MM UTC+2. Retourne '' si invalide."""
     if not dt_str:
         return ""
     try:
-        cleaned = dt_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(cleaned)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(_UTC2).strftime("%H:%M")
+        return _iso_en_datetime(dt_str).astimezone(_UTC2).strftime("%H:%M")
     except ValueError:
         return dt_str[:5] if len(dt_str) >= 5 else dt_str
+
+
+def _to_local_day(dt_str: str, defaut: str) -> str:
+    """Le jour où le show COMMENCE (YYYY-MM-DD), à l'heure d'affichage.
+
+    Le jour ne peut pas être celui qu'on a INTERROGÉ, et c'était le bug : on
+    demande les shows jour par jour, mais l'API rend aussi ceux qui débordent
+    sur le jour demandé. « DJ Set Big Edition », samedi 23h00 → dimanche
+    02h30, revenait donc dans la réponse du dimanche — et se retrouvait
+    affiché le dimanche à 23h00, une seconde fois, à une heure où il n'a
+    jamais eu lieu.
+
+    Le repli sur `defaut` couvre une date illisible : mieux vaut le jour
+    interrogé, qui est au pire approximatif, qu'un show sans jour du tout.
+    """
+    if not dt_str:
+        return defaut
+    try:
+        return _iso_en_datetime(dt_str).astimezone(_UTC2).strftime("%Y-%m-%d")
+    except ValueError:
+        return defaut
 
 
 # Un login Twitch valide : 4-25 caractères alphanumériques ou "_". On accepte
@@ -328,11 +360,7 @@ def _to_unix_ts(dt_str: str) -> float:
     if not dt_str:
         return 0.0
     try:
-        cleaned = dt_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(cleaned)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
+        return _iso_en_datetime(dt_str).timestamp()
     except ValueError:
         return 0.0
 
@@ -581,7 +609,7 @@ async def fetch_events(day: str) -> list[EventItem]:
             events.append(EventItem(
                 id=str(ev.get("id") or ""),
                 name=str(ev.get("name") or ev.get("title") or ""),
-                day=day,
+                day=_to_local_day(start_raw, day),
                 start_local=_to_local_time(start_raw),
                 end_local=_to_local_time(end_raw),
                 description=str(ev.get("description") or ""),

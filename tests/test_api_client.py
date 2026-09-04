@@ -12,8 +12,10 @@ teste en priorité.
 
 from __future__ import annotations
 
+import asyncio
 import pytest
 
+from core import api_client
 from core.api_client import (
     _DONATION_HOSTS,
     _classer_entree,
@@ -423,3 +425,60 @@ def test_un_objectif_coche_est_atteint_meme_de_loin():
 
 def test_un_objectif_a_quelques_euros_n_est_pas_atteint():
     assert not _objectif(1000.0, 99.6).atteint
+
+
+# ── le jour d'un show : celui où il COMMENCE ─────────────────────────────────
+
+@pytest.mark.parametrize("debut,attendu", [
+    # 21h00 UTC = 23h00 à Paris : encore le même jour.
+    ("2026-09-05T21:00:00Z", "2026-09-05"),
+    # 23h00 UTC = 01h00 le lendemain à Paris.
+    ("2026-09-05T23:00:00Z", "2026-09-06"),
+    # Un décalage déjà porté par la chaîne est respecté tel quel.
+    ("2026-09-05T23:00:00+02:00", "2026-09-05"),
+])
+def test_le_jour_est_celui_du_debut_a_l_heure_d_affichage(debut, attendu):
+    assert api_client._to_local_day(debut, "1970-01-01") == attendu
+
+
+@pytest.mark.parametrize("brut", ["", "pas une date", "2026-13-45T99:00Z"])
+def test_une_date_illisible_retombe_sur_le_jour_interroge(brut):
+    """Mieux vaut un jour approximatif qu'un show sans jour du tout."""
+    assert api_client._to_local_day(brut, "2026-09-06") == "2026-09-06"
+
+
+def test_un_show_qui_deborde_garde_le_jour_ou_il_commence(monkeypatch):
+    """Le bug signalé : « DJ Set Big Edition », samedi 23h00 → dimanche 02h30,
+    revient dans la réponse du DIMANCHE parce qu'il y déborde. Estampillé au
+    jour interrogé, il s'affichait une seconde fois le dimanche à 23h00 — une
+    heure à laquelle il n'a jamais eu lieu.
+    """
+    charge = [{
+        "id": "dj-set",
+        "name": "DJ Set Big Edition",
+        "schedule": {"start": "2026-09-05T21:00:00Z",
+                     "end": "2026-09-06T00:30:00Z"},
+        "participants": {},
+    }]
+
+    class _Reponse:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            pass
+
+        @staticmethod
+        def json():
+            return charge
+
+    class _Client:
+        @staticmethod
+        async def get(_url, **_kw):
+            return _Reponse()
+
+    monkeypatch.setattr(api_client, "_client", lambda: _Client())
+    # Interrogé pour le DIMANCHE, comme le fait le sondage.
+    evs = asyncio.run(api_client.fetch_events("2026-09-06"))
+    assert [(e.day, e.start_local, e.end_local) for e in evs] == [
+        ("2026-09-05", "23:00", "02:30")]

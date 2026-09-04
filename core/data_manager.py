@@ -902,13 +902,25 @@ class DataManager(QObject):
     def _apply_events(self, results: list) -> None:
         """Applique les résultats events sur le main thread Qt."""
         self._polling_events = False
-        all_events: list[EventItem] = []
-        for day, day_events in zip(_EVENT_DAYS, results):
+        # Dédoublonné par identité : un show qui déborde sur le lendemain est
+        # rendu par l'API dans les DEUX journées interrogées. Tant que son
+        # jour était celui qu'on demandait, les deux copies se distinguaient
+        # — mal, mais elles se distinguaient. Maintenant qu'il porte son vrai
+        # jour de début, ce sont deux fois la même ligne.
+        par_identite: dict[str, EventItem] = {}
+        for jour_demande, day_events in zip(_EVENT_DAYS, results):
             if isinstance(day_events, Exception):
-                logger.error("_poll_events(%s): %s", day, day_events)
+                logger.error("_poll_events(%s): %s", jour_demande, day_events)
                 continue
-            self._events[day] = day_events
-            all_events.extend(day_events)
+            for ev in day_events:
+                par_identite.setdefault(self._event_key(ev), ev)
+
+        all_events = list(par_identite.values())
+        # Regroupés sur le jour où ils COMMENCENT, et non celui qui les a
+        # ramenés : c'est ce que `get_events_for_day` est censé rendre.
+        self._events = {}
+        for ev in all_events:
+            self._events.setdefault(ev.day, []).append(ev)
 
         if all_events:
             self._detect_new_events(all_events)

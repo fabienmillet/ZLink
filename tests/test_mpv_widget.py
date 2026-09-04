@@ -1360,3 +1360,98 @@ def test_position_n_est_definie_qu_une_fois():
     noms = [n.name for n in classe.body if isinstance(n, ast.FunctionDef)]
     doublons = {n for n in noms if noms.count(n) > 1}
     assert not doublons, f"méthodes définies deux fois : {sorted(doublons)}"
+
+
+# ── options refusées par une libmpv plus ancienne ────────────────────────────
+
+def _refus(nom: bytes):
+    """L'exception que python-mpv lève sur une option inconnue.
+
+    La forme est relevée sur le vrai module : les octets sont IMBRIQUÉS dans
+    un tuple avec la poignée et la valeur, pas posés à plat.
+    """
+    # TROIS arguments, pas un tuple unique : c'est la forme que python-mpv
+    # produit réellement, et Python l'affiche comme un tuple à l'écran — de
+    # quoi s'y tromper en la recopiant depuis un message d'erreur.
+    return AttributeError(
+        "mpv option does not exist", -5, (object(), nom, b"no"))
+
+
+@pytest.mark.parametrize("brut,attendu", [
+    (b"load-context-menu", "load_context_menu"),
+    (b"load-select", "load_select"),
+])
+def test_le_nom_de_l_option_refusee_est_retrouve(brut, attendu):
+    assert mpv_widget._nom_de_l_option_refusee(_refus(brut)) == attendu
+
+
+@pytest.mark.parametrize("exc", [
+    AttributeError("autre chose"),
+    AttributeError("mpv option does not exist", -5, (object(),)),
+    ValueError("pas une AttributeError"),
+])
+def test_une_exception_etrangere_ne_donne_aucun_nom(exc):
+    assert mpv_widget._nom_de_l_option_refusee(exc) == ""
+
+
+def test_une_option_inconnue_est_abandonnee_et_le_lecteur_naît(monkeypatch):
+    """SteamOS livre mpv 0.40, où `load-context-menu` n'existe pas encore :
+    python-mpv refusait la construction ENTIÈRE et ZLink ne démarrait pas,
+    pour une option qui ne fait que désactiver un menu inatteignable ici."""
+    essais: list[dict] = []
+
+    class _Fabrique:
+        def MPV(self, **options):                       # noqa: N802 — API mpv
+            essais.append(dict(options))
+            if "load_context_menu" in options:
+                raise _refus(b"load-context-menu")
+            return "lecteur"
+
+    monkeypatch.setattr(mpv_widget, "_mpv_module", _Fabrique())
+    rendu = mpv_widget._instancier_mpv(
+        {"vo": "gpu", "load_context_menu": False, "load_select": False})
+    assert rendu == "lecteur"
+    assert "load_context_menu" not in essais[-1]
+    assert essais[-1]["vo"] == "gpu", "le reste de la configuration est gardé"
+
+
+def test_plusieurs_options_inconnues_sont_abandonnees_une_a_une(monkeypatch):
+    manquantes = {"load_context_menu", "load_select"}
+
+    class _Fabrique:
+        def MPV(self, **options):                       # noqa: N802 — API mpv
+            for nom in options:
+                if nom in manquantes:
+                    raise _refus(nom.replace("_", "-").encode())
+            return "lecteur"
+
+    monkeypatch.setattr(mpv_widget, "_mpv_module", _Fabrique())
+    assert mpv_widget._instancier_mpv(
+        {"vo": "gpu", "load_context_menu": False, "load_select": False}
+    ) == "lecteur"
+
+
+def test_une_erreur_qui_n_est_pas_une_option_inconnue_remonte(monkeypatch):
+    """Abandonner à l'aveugle viderait la configuration option par option."""
+    class _Fabrique:
+        def MPV(self, **_options):                      # noqa: N802 — API mpv
+            raise AttributeError("libmpv est cassée")
+
+    monkeypatch.setattr(mpv_widget, "_mpv_module", _Fabrique())
+    with pytest.raises(AttributeError):
+        mpv_widget._instancier_mpv({"vo": "gpu"})
+
+
+def test_l_abandon_est_borne(monkeypatch):
+    """Une configuration devenue absurde doit finir par se signaler."""
+    class _Fabrique:
+        def MPV(self, **options):                       # noqa: N802 — API mpv
+            if options:
+                nom = next(iter(options))
+                raise _refus(nom.replace("_", "-").encode())
+            return "lecteur"
+
+    monkeypatch.setattr(mpv_widget, "_mpv_module", _Fabrique())
+    trop = {f"opt_{i}": False for i in range(mpv_widget._MAX_OPTIONS_ABANDONNEES + 5)}
+    with pytest.raises(AttributeError):
+        mpv_widget._instancier_mpv(trop)

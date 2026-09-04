@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import pytest
 
+from core import data_manager
 from core.api_client import GlobalStats, Participation, StreamerInfo
 from core.data_manager import (
     DataManager,
@@ -152,3 +153,58 @@ def test_le_pas_suit_l_ordre_de_grandeur(total, pas):
     million, les premières heures n'en produiraient aucune.
     """
     assert DataManager._milestone_step(total) == pas
+
+
+# ── shows qui débordent sur le lendemain ─────────────────────────────────────
+
+def _show(nom, jour, debut, id_=None):
+    from core.api_client import EventItem
+
+    return EventItem(id=id_ or f"{nom}-{jour}", name=nom, day=jour,
+                     start_local=debut, end_local="02:30", description="")
+
+
+def test_un_show_rendu_par_deux_journees_n_est_compte_qu_une_fois(qapp):
+    """L'API rend un show qui déborde dans les DEUX journées interrogées.
+    Tant qu'il portait le jour demandé, les deux copies se distinguaient —
+    mal. Maintenant qu'il porte son vrai jour de début, ce serait deux fois
+    la même ligne dans l'onglet Programme.
+    """
+    dm = data_manager.DataManager()
+    dm.stop_polling()
+    deborde = _show("DJ Set Big Edition", "2026-09-05", "23:00", id_="dj")
+    # Le même objet revient dans la réponse du samedi ET du dimanche.
+    resultats = [[] for _ in data_manager._EVENT_DAYS]
+    resultats[2] = [deborde]
+    resultats[3] = [deborde]
+
+    dm._apply_events(resultats)
+    assert [e.name for e in dm.get_events_for_day("2026-09-05")] == [
+        "DJ Set Big Edition"]
+    assert dm.get_events_for_day("2026-09-06") == []
+
+
+def test_les_shows_sont_ranges_sur_leur_jour_de_debut(qapp):
+    """`get_events_for_day` doit rendre ce que son nom annonce, et non ce que
+    la requête qui les a ramenés annonçait."""
+    dm = data_manager.DataManager()
+    dm.stop_polling()
+    resultats = [[] for _ in data_manager._EVENT_DAYS]
+    # Rendus par la requête du dimanche, mais commencés le samedi.
+    resultats[3] = [_show("Nuit blanche", "2026-09-05", "23:00"),
+                    _show("Matin", "2026-09-06", "08:00")]
+
+    dm._apply_events(resultats)
+    assert [e.name for e in dm.get_events_for_day("2026-09-05")] == ["Nuit blanche"]
+    assert [e.name for e in dm.get_events_for_day("2026-09-06")] == ["Matin"]
+
+
+def test_une_journee_en_erreur_n_emporte_pas_les_autres(qapp, caplog):
+    dm = data_manager.DataManager()
+    dm.stop_polling()
+    resultats = [[] for _ in data_manager._EVENT_DAYS]
+    resultats[2] = OSError("réseau coupé")
+    resultats[3] = [_show("Matin", "2026-09-06", "08:00")]
+
+    dm._apply_events(resultats)
+    assert [e.name for e in dm.get_events_for_day("2026-09-06")] == ["Matin"]

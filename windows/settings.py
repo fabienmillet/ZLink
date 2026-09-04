@@ -1272,6 +1272,7 @@ _RACCOURCIS = [
     ("Partout", [
         ("Ctrl + K", "Ouvrir la recherche : une chaîne, une action"),
         ("Échap", "Fermer ce qui est ouvert — recherche, menu, replay, fenêtre"),
+        ("F1", "Mode un écran : épingler ou décrocher la barre de navigation"),
     ]),
     ("Plein écran", [
         ("1 … 9", "Afficher la chaîne de ce rang dans la grille"),

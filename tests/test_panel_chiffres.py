@@ -2156,10 +2156,16 @@ def test_les_abscisses_portent_l_heure_vraie_des_releves(stats):
 @pytest.fixture
 def _sans_portee(monkeypatch):
     """Grille et favoris pilotés depuis le test, sans toucher au disque."""
-    def poser(grille=(), favoris=()):
-        monkeypatch.setattr(panel, "portee_des_objectifs",
-                            lambda vue: {"grille": set(grille),
-                                         "favoris": set(favoris)}.get(vue))
+    def poser(grille=(), favoris=(), principal=""):
+        # `principal` est reçu même quand le test ne s'en sert pas : la vraie
+        # fonction le prend depuis que le flux principal est une portée.
+        monkeypatch.setattr(
+            panel, "portee_des_objectifs",
+            lambda vue, courant="": {
+                "grille": set(grille),
+                "favoris": set(favoris),
+                "principal": {principal} if principal else set(),
+            }.get(vue))
     return poser
 
 
@@ -2253,8 +2259,12 @@ def test_changer_de_portee_reconstruit_bien_la_liste(goals, _sans_portee):
     assert "ZeratoR" in noms and "Ponce" not in noms
 
 
-def test_les_quatre_portees_sont_proposees(goals):
-    assert list(goals._boutons_vue) == ["streamer", "tous", "grille", "favoris"]
+def test_les_portees_proposees_et_leur_ordre(goals):
+    """« Flux principal » suit « Ce streamer » : ce sont les deux portées qui
+    ne visent qu'une chaîne, l'une choisie à la main, l'autre suivant ce qu'on
+    regarde en grand."""
+    assert list(goals._boutons_vue) == [
+        "streamer", "principal", "tous", "grille", "favoris"]
 
 
 # ── « Prochains objectifs » : la distance, pas seulement le pourcentage ─────
@@ -2894,3 +2904,55 @@ def test_le_compte_annonce_toujours_le_total(clips):
     onglet = clips(*[_clip(f"c{i}") for i in range(_PAR_PAGE + 12)])
     assert f"{_PAR_PAGE + 12} clips" in onglet._compte.text()
     assert "de plus" not in onglet._compte.text()
+
+
+# ── Goals : la portée « flux principal » ────────────────────────────────────
+
+def test_la_portee_principale_ne_garde_que_la_chaine_affichee_en_grand(goals,
+                                                                       _sans_portee):
+    """C'est la demande : voir les objectifs de ce qu'on regarde, sans avoir à
+    le retaper dans le champ streamer."""
+    _sans_portee(principal="ponce")
+    _trois_streamers(goals)
+    goals._changer_vue("principal")
+    noms = _noms_affiches(goals)
+    assert "Ponce" in noms
+    assert "ZeratoR" not in noms and "Domingo" not in noms
+
+
+def test_sans_flux_principal_la_portee_ne_montre_rien(goals, _sans_portee):
+    """Un ensemble VIDE, et non « tout » : sans flux affiché, cette vue n'a
+    rien à montrer — pas tout à montrer."""
+    _sans_portee(principal="")
+    _trois_streamers(goals)
+    goals._changer_vue("principal")
+    noms = _noms_affiches(goals)
+    assert not {"Ponce", "ZeratoR", "Domingo"} & noms
+
+
+@pytest.mark.parametrize("vue,attendu", [
+    ("principal", {"ponce"}),
+    ("tous", None),
+])
+def test_la_portee_est_calculee_pour_le_flux_principal(vue, attendu):
+    """La vraie fonction, pas la doublure des tests voisins."""
+    assert panel.portee_des_objectifs(vue, "Ponce") == attendu
+
+
+def test_le_login_principal_est_compare_en_minuscules():
+    """Le plein écran donne le login tel qu'il l'a reçu ; le cache d'objectifs
+    est indexé en minuscules."""
+    assert panel.portee_des_objectifs("principal", "ZeratoR") == {"zerator"}
+
+
+def test_changer_de_flux_ne_repeint_que_si_la_vue_le_regarde(goals):
+    """Le plein écran change de chaîne souvent : reconstruire une liste qui ne
+    bouge pas est du travail pour rien."""
+    goals._vue = "tous"
+    goals._empreinte = ("marqueur",)
+    goals.set_main_stream("ponce")
+    assert goals._empreinte == ("marqueur",)
+
+    goals._vue = "principal"
+    goals.set_main_stream("domingo")
+    assert goals._empreinte != ("marqueur",)

@@ -1124,6 +1124,10 @@ def main() -> int:
         panel, grid, fullscreen, data_manager, stream_manager,
         selection_store, streamer_cache,
     )
+    # mpv n'est pas un enfant Qt de la fenêtre : sans cet arrêt explicite, le
+    # lecteur du mégaphone et sa connexion survivent à la fermeture.
+    if panel is not None:
+        app.aboutToQuit.connect(panel.fermer_megaphone)
 
     # --- Connexions StreamManager → FullscreenWindow ---
     stream_manager.stream_ready.connect(fullscreen.on_stream_ready)

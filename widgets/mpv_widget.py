@@ -327,6 +327,76 @@ def _horodatage_de_clip() -> str:
     return ts if rang == 0 else f"{ts}-{rang}"
 
 
+#: Nombre d'options inconnues qu'on accepte d'abandonner avant de renoncer.
+#: Assez pour traverser un écart de version ; assez peu pour qu'une
+#: configuration devenue absurde finisse par se signaler plutôt que de se
+#: vider option par option en silence.
+_MAX_OPTIONS_ABANDONNEES = 8
+
+#: python-mpv annonce une option inconnue par un AttributeError. On y cherche
+#: le NOM refusé, pour retirer celle-là et pas une autre.
+_OPTION_INCONNUE = "mpv option does not exist"
+
+
+def _nom_de_l_option_refusee(exc: BaseException) -> str:
+    """Le nom Python de l'option que libmpv vient de refuser, ou ''.
+
+    La forme réelle de l'exception, relevée sur python-mpv :
+
+        ('mpv option does not exist', -5,
+         (<MpvHandle>, b'load-context-menu', b'no'))
+
+    Les octets sont donc IMBRIQUÉS dans un tuple, pas posés à plat dans les
+    arguments — les chercher au premier niveau ne trouvait rien. Il y en a
+    deux, le nom puis la valeur : le premier rencontré est le bon.
+    """
+    args = getattr(exc, "args", ())
+    if not args or _OPTION_INCONNUE not in str(args[0]):
+        return ""
+    for arg in args[1:]:
+        candidats = arg if isinstance(arg, (tuple, list)) else (arg,)
+        for candidat in candidats:
+            if isinstance(candidat, (bytes, bytearray)):
+                # libmpv nomme ses options avec des tirets, les kwargs Python
+                # avec des soulignés : `load-context-menu` → `load_context_menu`.
+                return bytes(candidat).decode("utf-8", "replace").replace("-", "_")
+    return ""
+
+
+def _instancier_mpv(mpv_kwargs: dict):
+    """Construit un lecteur mpv, en abandonnant les options que LUI ignore.
+
+    ZLink est développé contre une libmpv récente, mais tourne aussi sur celle
+    du système : SteamOS livre mpv 0.40, où `load-context-menu` n'existe pas
+    encore. python-mpv refuse alors la construction ENTIÈRE, et l'application
+    ne démarrait pas du tout — pour une option qui ne fait que désactiver un
+    menu contextuel auquel personne n'accède ici.
+
+    Une option inconnue est donc retirée puis la construction retentée. Aucune
+    de celles que ZLink pose n'est vitale : ce sont des désactivations et des
+    réglages de confort, et s'en passer coûte au pire un script Lua chargé
+    pour rien. Ce qui serait vraiment fatal — `wid`, `vo` — existe partout.
+
+    Chaque abandon est journalisé en AVERTISSEMENT : c'est ainsi qu'on
+    apprendra qu'une version cible a divergé, plutôt que de le découvrir sur
+    un comportement inexpliqué.
+    """
+    options = dict(mpv_kwargs)
+    for _ in range(_MAX_OPTIONS_ABANDONNEES):
+        try:
+            return _mpv_module.MPV(**options)  # type: ignore[union-attr]
+        except AttributeError as exc:
+            refusee = _nom_de_l_option_refusee(exc)
+            if not refusee or refusee not in options:
+                raise
+            options.pop(refusee)
+            logger.warning(
+                "mpv ne connaît pas l'option « %s » : abandonnée. "
+                "libmpv est sans doute plus ancienne que celle visée.",
+                refusee)
+    return _mpv_module.MPV(**options)          # type: ignore[union-attr]
+
+
 class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
     """Widget hébergeant une instance python-mpv.
 
@@ -607,7 +677,7 @@ class MpvWidget(_MpvBase):  # type: ignore[misc,valid-type]
     def _creer_lecteur(self, mpv_kwargs: dict) -> None:
         """Instancie MPV et reprend la main sur le gestionnaire d'erreur X."""
         try:
-            self._player = _mpv_module.MPV(**mpv_kwargs)  # type: ignore[union-attr]
+            self._player = _instancier_mpv(mpv_kwargs)
             _x11_guard.install()
             # C'est à la CONFIGURATION DE L'AFFICHAGE que mpv pose son propre
             # gestionnaire d'erreur X — pas à la construction. On le reprend au

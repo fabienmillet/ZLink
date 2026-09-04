@@ -24,6 +24,8 @@ avant que la fixture `qapp` n'existe. Ne pas le déplacer dans une fonction.
 
 from __future__ import annotations
 
+import types
+
 import pytest
 from PyQt6.QtCore import QPoint
 
@@ -94,6 +96,9 @@ class _FaussePilule:
     def is_pinned(self):
         return self.epinglee
 
+    def set_pinned(self, epingle):
+        self.epinglee = bool(epingle)
+
 
 @pytest.fixture
 def coquille(qapp, monkeypatch):
@@ -112,6 +117,23 @@ def coquille(qapp, monkeypatch):
     shell.grid = _FausseFenetre("grid")
     shell._pill = _FaussePilule()
     return shell
+
+
+def _feindre_le_premier_plan(monkeypatch, actif: bool) -> None:
+    """Simule un `activeWindow()` muet, comme sous gamescope.
+
+    C'est le NOM IMPORTÉ par le module qui est remplacé, pas la vraie classe
+    QApplication : y poser des attributs perturbe le démontage de pytest-qt,
+    et les tests passaient seuls mais tombaient en groupe.
+    """
+    from PyQt6.QtCore import Qt
+
+    etat = (Qt.ApplicationState.ApplicationActive if actif
+            else Qt.ApplicationState.ApplicationInactive)
+    monkeypatch.setattr(single, "QApplication", types.SimpleNamespace(
+        activeWindow=lambda: None,
+        instance=lambda: types.SimpleNamespace(applicationState=lambda: etat),
+    ))
 
 
 def _visibles(coquille) -> list[str]:
@@ -243,8 +265,11 @@ def test_pas_de_barre_si_zlink_n_est_pas_au_premier_plan(
     pas seulement de celles de ZLink, et elle reviendra avec lui.
     """
     coquille._pill.epinglee = epinglee
-    monkeypatch.setattr(single.QApplication, "activeWindow",
-                        staticmethod(lambda: None))
+    # Les DEUX signaux de premier plan, pas seulement `activeWindow` : depuis
+    # qu'ils sont consultés tous les deux, ne simuler que l'un laissait l'autre
+    # répondre ce que l'environnement de test voulait bien — ce test passait
+    # seul et tombait en suite complète.
+    _feindre_le_premier_plan(monkeypatch, actif=False)
     g = coquille._screen_rect
     curseur["p"] = QPoint(g.x() + 10, g.y())
     coquille._check_cursor()
@@ -508,3 +533,56 @@ def test_retirer_une_barre_deja_cachee_ne_relance_pas_l_animation(pilule):
     assert pilule.y() == pilule._hidden_y
     pilule.hide_now()
     assert pilule._anim.state() == pilule._anim.State.Stopped
+
+
+# ── retrouver la barre quand le compositeur ne coopère pas ──────────────────
+
+
+def test_la_barre_survit_a_un_activeWindow_muet(coquille, monkeypatch):
+    """Sous gamescope — le compositeur de SteamOS — `activeWindow()` rend
+    `None` en permanence : la barre était masquée DÉFINITIVEMENT dès le
+    lancement, et comme elle est topmost elle continuait de flotter par-dessus
+    les autres applications. Signalé sur Steam Deck, les deux symptômes à la
+    fois.
+    """
+    _feindre_le_premier_plan(monkeypatch, actif=True)
+    coquille._pill.epinglee = True
+    coquille._check_cursor()
+    assert coquille._pill.retraits == 0, "la barre ne doit pas être escamotée"
+
+
+def test_une_autre_application_devant_escamote_toujours_la_barre(coquille, monkeypatch):
+    """Le comportement d'origine reste : topmost et épinglée, elle ferait
+    sinon un bandeau flottant par-dessus l'application de quelqu'un d'autre."""
+    _feindre_le_premier_plan(monkeypatch, actif=False)
+    coquille._check_cursor()
+    assert coquille._pill.retraits == 1
+
+
+def test_f1_epingle_la_barre_et_la_remet_devant(coquille):
+    """Sur un Steam Deck on navigue au pavé : la zone de survol en haut de
+    l'écran ne se déclenche jamais, et on restait bloqué sur une page."""
+    coquille._pill.epinglee = False
+    coquille._basculer_l_epingle()
+    assert coquille._pill.is_pinned() is True
+    assert coquille._pill.revelations == 1
+    assert coquille._pill.premier_plan == 1
+
+
+def test_f1_decroche_ce_qu_elle_a_epingle(coquille):
+    """Une bascule, sinon la barre resterait pour de bon au premier appui."""
+    coquille._pill.epinglee = True
+    coquille._basculer_l_epingle()
+    assert coquille._pill.is_pinned() is False
+
+
+def test_la_touche_est_posee_sur_les_trois_fenetres(coquille, monkeypatch):
+    """Il n'y a pas de fenêtre parente commune aux trois : un raccourci posé
+    sur une seule ne répondrait que depuis celle-là."""
+    poses = []
+    monkeypatch.setattr(
+        single, "QShortcut",
+        lambda seq, parent: types.SimpleNamespace(
+            activated=types.SimpleNamespace(connect=lambda _cb: poses.append(parent))))
+    coquille._poser_le_rappel_de_la_barre()
+    assert poses == [coquille.panel, coquille.fullscreen, coquille.grid]

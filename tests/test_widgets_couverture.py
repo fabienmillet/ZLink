@@ -1168,10 +1168,17 @@ def test_une_grille_sans_handle_natif_ne_leve_pas(qtbot, qapp, monkeypatch):
 # windows/single.py
 # =============================================================================
 
-class _FausseFenetre:
-    """Note les appels que le coordinateur adresse à une fenêtre."""
+class _FausseFenetre(QWidget):
+    """Note les appels que le coordinateur adresse à une fenêtre.
+
+    Un VRAI QWidget, et pas un objet nu : le coordinateur pose désormais un
+    QShortcut sur chacune de ses trois fenêtres, et Qt refuse un parent qui
+    n'est pas un QObject. Une doublure qui ne peut pas recevoir ce que la
+    vraie reçoit ne prouve plus rien.
+    """
 
     def __init__(self, nom: str = "") -> None:
+        super().__init__()
         self.nom = nom
         self.visible = False
         self.ecrans: list = []

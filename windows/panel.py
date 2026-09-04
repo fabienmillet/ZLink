@@ -484,6 +484,7 @@ def _fmt_viewers(n: int) -> str:
 
 
 from core import favorites
+from widgets.megaphone import Megaphone
 from core.ui_theme import MENU_QSS
 from core.win_foreground import ceder_premier_plan, remonter_navigateur
 from core.win_fullscreen import mark_fullscreen
@@ -3744,6 +3745,7 @@ _TITRES_OBJECTIFS = {
     "tous": "LES PLUS PROCHES",
     "grille": "LES PLUS PROCHES · GRILLE",
     "favoris": "LES PLUS PROCHES · FAVORIS",
+    "principal": "OBJECTIFS · FLUX PRINCIPAL",
 }
 
 #: Et ce qu'on dit quand il n'y a rien à montrer. Le message change avec la
@@ -3757,15 +3759,23 @@ _ABSENCE_OBJECTIFS = {
                "Ajoutez-en depuis l'onglet Streamers, ou changez de portée."),
     "favoris": ("Aucun objectif parmi vos favoris.\n"
                 "L'étoile d'une fiche de streamer l'y ajoute."),
+    "principal": ("Aucun objectif sur le flux affiché en grand.\n"
+                  "Cette chaîne n'en a pas déclaré, ou aucun n'est encore "
+                  "connu."),
 }
 
 
-def portee_des_objectifs(vue: str) -> set[str] | None:
+def portee_des_objectifs(vue: str, principal: str = "") -> set[str] | None:
     """Les logins que la vue retient, ou None pour ne rien filtrer.
 
-    Lue à chaque affichage plutôt que gardée : la grille se remplit et les
-    favoris se posent pendant que l'onglet est ouvert, et une liste figée à la
-    construction montrerait l'état d'il y a une heure.
+    Lue à chaque affichage plutôt que gardée : la grille se remplit, les
+    favoris se posent et le flux principal change pendant que l'onglet est
+    ouvert, et une liste figée à la construction montrerait l'état d'il y a
+    une heure.
+
+    « principal » rend un ensemble VIDE quand aucune chaîne n'est affichée en
+    grand, et non None : sans flux principal, la vue n'a rien à montrer — pas
+    tout à montrer.
     """
     if vue == "grille":
         from core.selection_store import SelectionStore
@@ -3773,6 +3783,8 @@ def portee_des_objectifs(vue: str) -> set[str] | None:
         return set(SelectionStore().get_selected())
     if vue == "favoris":
         return set(favorites.get())
+    if vue == "principal":
+        return {principal.lower()} if principal else set()
     return None
 
 
@@ -3796,6 +3808,8 @@ class _GoalsTab(QWidget):
         self._cache: dict[str, list[DonationGoal]] = {}  # login → goals
         self._pending_login: str = ""
         self._vue: str = "streamer"
+        #: Chaîne affichée en plein écran, tenue à jour par le panel.
+        self._principal: str = ""
         #: Empreinte de ce qui est actuellement affiché. Le mock réémet ses
         #: données toutes les trois secondes et l'application toutes les
         #: trente : reconstruire soixante lignes identiques à chaque fois ne
@@ -3872,7 +3886,11 @@ class _GoalsTab(QWidget):
         # participants un soir d'événement. Or ce qu'on pilote, c'est la
         # grille ; et ce qu'on suit, ce sont les favoris. Un objectif à deux
         # euros de tomber chez quelqu'un qu'on n'affiche pas ne se joue pas.
+        # « Flux principal » juste après « Ce streamer » : ce sont les deux
+        # portées qui ne visent qu'UNE chaîne, l'une choisie à la main,
+        # l'autre suivant ce qu'on regarde en grand.
         for cle, libelle in (("streamer", "Ce streamer"),
+                             ("principal", "Flux principal"),
                              ("tous", "Les plus proches"),
                              ("grille", "Grille"),
                              ("favoris", "Favoris")):
@@ -3887,6 +3905,21 @@ class _GoalsTab(QWidget):
         return h
 
     # -- vues -----------------------------------------------------------------
+
+    def set_main_stream(self, login: str) -> None:
+        """Le flux affiché en grand a changé.
+
+        Ne repeint QUE si la vue le regarde : le plein écran change de chaîne
+        souvent, et reconstruire une liste d'objectifs qui ne bouge pas est
+        du travail pour rien.
+        """
+        login = str(login or "")
+        if login == self._principal:
+            return
+        self._principal = login
+        if self._vue == "principal":
+            self._empreinte = ()
+            self._rafraichir()
 
     def _changer_vue(self, cle: str) -> None:
         self._vue = cle
@@ -3924,7 +3957,7 @@ class _GoalsTab(QWidget):
 
         La portée suit le bouton actif — tout, la grille, ou les favoris.
         """
-        portee = portee_des_objectifs(self._vue)
+        portee = portee_des_objectifs(self._vue, self._principal)
         dons = {s.twitch_login: s for s in self._streamers}
         lignes = []
         for login, goals in self._cache.items():
@@ -8306,6 +8339,51 @@ class PanelWindow(QMainWindow):
             self._version_url = url
         self._apply_version_badge()
 
+    def _basculer_megaphone(self, actif: bool) -> None:
+        """Allume ou éteint le mégaphone, et remet le bouton d'aplomb.
+
+        `basculer` rend l'état RÉELLEMENT obtenu : si le flux refuse de
+        s'ouvrir, le bouton se relève au lieu de rester enfoncé sur un
+        silence. Les signaux sont bloqués le temps de le corriger, sinon la
+        correction rappellerait cette méthode.
+        """
+        obtenu = self._megaphone.basculer(actif)
+        if obtenu != actif:
+            bloque = self._megaphone_btn.blockSignals(True)
+            try:
+                self._megaphone_btn.setChecked(obtenu)
+            finally:
+                self._megaphone_btn.blockSignals(bloque)
+
+    def _sur_etat_megaphone(self, allume: bool) -> None:
+        """Montre ou retire l'étiquette selon que le canal est ouvert."""
+        self._megaphone_lbl.setVisible(allume)
+        if allume:
+            self._sur_parole_megaphone(False)
+
+    def _sur_parole_megaphone(self, parle: bool) -> None:
+        """« ça parle » ou « à l'écoute », d'après le niveau mesuré.
+
+        Deux libellés et non un seul affiché par intermittence : une étiquette
+        qui disparaît se lit comme un mégaphone qui s'éteint, alors que le
+        silence est son état normal.
+        """
+        self._megaphone_lbl.setText("● annonce" if parle else "à l'écoute")
+        self._megaphone_lbl.setStyleSheet(
+            _SS_VERT_NU if parle else _SS_GRIS_NU)
+
+    def _sur_echec_megaphone(self, raison: str) -> None:
+        """Dit pourquoi le mégaphone est resté muet, plutôt que rien."""
+        self.add_feed_event("event", "", raison)
+
+    def fermer_megaphone(self) -> None:
+        """Coupe le flux à la fermeture de l'application.
+
+        Sans cela, le lecteur et sa connexion survivent à la fenêtre : mpv
+        n'est pas un enfant Qt, rien ne le détruit avec elle.
+        """
+        self._megaphone.arreter()
+
     def _tick_clock(self) -> None:
         """Rafraîchit l'horloge de l'en-tête."""
         now = datetime.now()
@@ -8378,6 +8456,32 @@ class PanelWindow(QMainWindow):
         self._clock_timer.start()
 
         hl.addSpacing(4)
+
+        # Mégaphone : la voix commune du plateau, qu'on veut par-dessus les
+        # flux qu'on regarde. Posé contre l'horloge parce que c'est le coin
+        # qu'on regarde déjà, et qu'un interrupteur perdu au milieu des
+        # onglets ne se retrouve pas quand une annonce commence.
+        self._megaphone = Megaphone(self)
+        self._megaphone_btn = _mk_header_btn(
+            "mdi6.bullhorn-outline", "\U0001f4e2",
+            "Mégaphone du ZEvent — annonces du plateau", checkable=True)
+        self._megaphone_btn.setEnabled(self._megaphone.disponible)
+        if not self._megaphone.disponible:
+            self._megaphone_btn.setToolTip(
+                "Mégaphone indisponible : libmpv est absent")
+        self._megaphone_btn.toggled.connect(self._basculer_megaphone)
+        self._megaphone.echec.connect(self._sur_echec_megaphone)
+        hl.addWidget(self._megaphone_btn)
+
+        # Le canal est muet la PLUPART du temps : sans cette étiquette, un
+        # mégaphone allumé et un mégaphone en panne se ressemblent — dans les
+        # deux cas on n'entend rien. Elle dit lequel des deux c'est.
+        self._megaphone_lbl = QLabel()
+        self._megaphone_lbl.setFont(_bold_font(_FONT_SEGOE, 9))
+        self._megaphone_lbl.hide()
+        hl.addWidget(self._megaphone_lbl)
+        self._megaphone.etat_change.connect(self._sur_etat_megaphone)
+        self._megaphone.parole.connect(self._sur_parole_megaphone)
 
         settings_btn = _mk_header_btn(
             "mdi6.cog-outline", "\u2699", "Paramètres", checkable=True
@@ -8640,8 +8744,9 @@ class PanelWindow(QMainWindow):
         self._mixer_tab.set_pinned([str(lg) for lg in logins])
 
     def set_main_stream(self, login: str) -> None:
-        """Flux affiché en plein écran : première tranche de la console."""
+        """Flux affiché en plein écran : la console et les objectifs le suivent."""
         self._mixer_tab.set_main_stream(login)
+        self._goals_tab.set_main_stream(login)
 
     def set_main_volume(self, valeur: int) -> None:
         """Volume du plein écran, réglé ailleurs qu'à la console."""

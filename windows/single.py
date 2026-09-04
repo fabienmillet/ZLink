@@ -25,7 +25,8 @@ import logging
 from typing import Callable
 
 from PyQt6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, QTimer
-from PyQt6.QtGui import QColor, QCursor, QFont, QPainter, QPainterPath, QScreen
+from PyQt6.QtGui import (QColor, QCursor, QFont, QKeySequence, QPainter,
+                         QPainterPath, QScreen, QShortcut)
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -345,6 +346,7 @@ class SingleModeShell:
             on_switch=self._switch,
             on_close=QApplication.quit,
         )
+        self._poser_le_rappel_de_la_barre()
 
         # ── Polling curseur toutes les 80 ms ──────────────────────────
         self._poll = QTimer()
@@ -375,12 +377,63 @@ class SingleModeShell:
         self._pill.set_active(idx)
         self._pill.raise_()
 
+    def _poser_le_rappel_de_la_barre(self) -> None:
+        """F1 fait revenir la barre et l'y laisse, depuis n'importe quelle page.
+
+        La barre ne se montrait que par le survol d'une zone en haut de
+        l'écran. Cela suppose un pointeur qu'on promène — vrai sur un bureau,
+        faux sur un Steam Deck, où l'on navigue au pavé et aux boutons. Un
+        utilisateur s'est retrouvé bloqué sur la page plein écran sans aucun
+        moyen d'en sortir.
+
+        La touche ÉPINGLE plutôt qu'elle ne révèle : révéler laisserait la
+        barre repartir deux secondes plus tard, et l'on serait bloqué de
+        nouveau. Une seconde pression la décroche.
+
+        `QShortcut` sur les trois fenêtres, et non un `keyPressEvent` : la
+        frappe arrive d'abord à la fenêtre qui a la main, et il n'y a pas de
+        fenêtre parente commune à ces trois-là.
+        """
+        for fenetre in (self.panel, self.fullscreen, self.grid):
+            raccourci = QShortcut(QKeySequence("F1"), fenetre)
+            raccourci.activated.connect(self._basculer_l_epingle)
+
+    def _basculer_l_epingle(self) -> None:
+        """Épingle ou décroche la barre, et la remet devant si elle revient."""
+        epinglee = not self._pill.is_pinned()
+        self._pill.set_pinned(epinglee)
+        if epinglee:
+            self._pill.reveal()
+            self._pill.raise_()
+
+    @staticmethod
+    def _zlink_au_premier_plan() -> bool:
+        """ZLink a-t-il la main ? Deux avis plutôt qu'un, et le doute lui profite.
+
+        `activeWindow()` seul rendait `None` en permanence sous gamescope, le
+        compositeur de SteamOS : la barre de navigation y était donc masquée
+        DÉFINITIVEMENT dès le lancement, et comme elle est topmost, elle
+        continuait de flotter par-dessus les autres applications. Signalé sur
+        Steam Deck, avec les deux symptômes à la fois.
+
+        `applicationState` répond à la même question par un autre chemin. Tant
+        que l'un des deux dit que ZLink est devant, on le croit : au pire la
+        barre reste un instant de trop, au pire de l'autre côté elle devient
+        introuvable — et il n'y a pas de symétrie entre ces deux torts.
+        """
+        if QApplication.activeWindow() is not None:
+            return True
+        instance = QApplication.instance()
+        if instance is None:
+            return False
+        return instance.applicationState() == Qt.ApplicationState.ApplicationActive
+
     # ── détection zone de déclenchement ──────────────────────────────────────
 
     def _check_cursor(self) -> None:
         # Ne pas interférer si une autre application est au premier plan. Même
         # épinglée : la barre est topmost, elle flotterait par-dessus.
-        if QApplication.activeWindow() is None:
+        if not self._zlink_au_premier_plan():
             self._pill.hide_now()
             return
         pos = QCursor.pos()
