@@ -571,8 +571,11 @@ def _save_reminders(keys: set[str]) -> None:
                        encoding="utf-8")
         os.replace(tmp, _CFG_PATH)
         os.chmod(_CFG_PATH, 0o600)
-    except Exception as exc:
-        logger.error("Sauvegarde des rappels impossible : %s", exc)
+    except Exception:
+        # `exception` et non `error` : la pile dit QUELLE écriture a échoué —
+        # le fichier temporaire, le remplacement ou le changement de droits —
+        # là où le message seul les confond toutes les trois.
+        logger.exception("Sauvegarde des rappels impossible")
 
 
 def _clear_layout(layout) -> None:  # type: ignore[type-arg]
@@ -5776,7 +5779,12 @@ class _CelluleNombre(QTableWidgetItem):
         super().__init__(texte)
         self.valeur = valeur
 
-    def __lt__(self, autre) -> bool:  # type: ignore[override]
+    def __lt__(self, autre) -> bool:  # type: ignore[override] # NOSONAR
+        # NOSONAR — pas un ordre total à compléter, mais la redéfinition de
+        # `operator<` de Qt : c'est le seul point d'entrée que le tri d'un
+        # QTableWidget appelle, depuis le C++. Les trois autres comparaisons
+        # ne seraient jamais invoquées, et `total_ordering` exigerait un
+        # `__eq__` qui changerait l'identité de l'item pour Qt.
         if isinstance(autre, _CelluleNombre):
             return self.valeur < autre.valeur
         return super().__lt__(autre)

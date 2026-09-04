@@ -277,3 +277,24 @@ def test_l_ouverture_vient_de_l_historique():
     from core.history_store import OUVERTURE_CAGNOTTE
 
     assert tc.depuis_quand() == OUVERTURE_CAGNOTTE
+
+
+def test_le_lot_rend_ses_clips_et_son_compte_d_ecartes(ouverture):
+    """La boucle intérieure est sortie de `lister_par_chaines` : trois boucles
+    imbriquées et deux conditions dans une fonction qui gère aussi son client
+    HTTP, on ne voyait plus laquelle faisait quoi."""
+    donnees = {
+        "u0": {"clips": {"edges": [
+            {"node": _noeud(slug="garde", cree=_iso(ouverture + 60))},
+            {"node": _noeud(slug="vieux", cree=_iso(ouverture - 60))}]}},
+        "u1": None,
+        "u2": {"clips": {"edges": [{"node": _noeud(slug="autre",
+                                                   cree=_iso(ouverture + 1))}]}},
+    }
+    retenus, ecartes = tc._clips_du_lot(donnees, 3)
+    assert [c.slug for c in retenus] == ["garde", "autre"]
+    assert ecartes == 1
+
+
+def test_un_lot_vide_ne_rend_rien():
+    assert tc._clips_du_lot({}, 3) == ([], 0)

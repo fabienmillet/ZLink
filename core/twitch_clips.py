@@ -212,6 +212,30 @@ def _lot(logins: list[str]) -> str:
         for rang, login in enumerate(logins)) + "\n}"
 
 
+def _clips_du_lot(donnees: dict, combien: int) -> tuple[list[Clip], int]:
+    """Les clips d'un lot d'alias, et combien ont été écartés.
+
+    Sortie de `lister_par_chaines` pour la garder lisible : trois boucles
+    imbriquées et deux conditions dans une fonction qui gère aussi son client
+    HTTP, on ne voyait plus laquelle faisait quoi.
+    """
+    plancher = depuis_quand()
+    retenus: list[Clip] = []
+    ecartes = 0
+    for rang in range(combien):
+        chaine = donnees.get(f"u{rang}") or {}
+        for arete in ((chaine.get("clips") or {}).get("edges")) or []:
+            clip = _lire(arete.get("node") or {})
+            if clip is None:
+                continue
+            # Le stream ordinaire d'un participant n'est pas le ZEvent.
+            if clip.cree_le < plancher:
+                ecartes += 1
+                continue
+            retenus.append(clip)
+    return retenus, ecartes
+
+
 async def lister_par_chaines(logins: list[str],
                              client: httpx.AsyncClient | None = None
                              ) -> list[Clip]:
@@ -229,27 +253,17 @@ async def lister_par_chaines(logins: list[str],
     propre = client is None
     client = client or httpx.AsyncClient(timeout=_TIMEOUT)
     connus: dict[str, Clip] = {}
-    plancher = depuis_quand()
     ecartes = 0
     try:
         for depart in range(0, len(logins), MAX_PAR_LOT):
             lot = logins[depart:depart + MAX_PAR_LOT]
             donnees = await _demander(_lot(lot), client)
-            for rang in range(len(lot)):
-                chaine = donnees.get(f"u{rang}") or {}
-                aretes = ((chaine.get("clips") or {}).get("edges")) or []
-                for arete in aretes:
-                    clip = _lire(arete.get("node") or {})
-                    if clip is None:
-                        continue
-                    # Le stream ordinaire d'un participant n'est pas le ZEvent.
-                    if clip.cree_le < plancher:
-                        ecartes += 1
-                        continue
-                    # Dédoublonné : un clip peut remonter par sa chaîne ET par
-                    # la catégorie, et deux cartes pour un même moment se
-                    # remarquent tout de suite.
-                    connus[clip.slug] = clip
+            retenus, hors_sujet = _clips_du_lot(donnees, len(lot))
+            ecartes += hors_sujet
+            # Dédoublonné : un clip peut remonter par sa chaîne ET par la
+            # catégorie, et deux cartes pour un même moment se remarquent tout
+            # de suite.
+            connus.update({c.slug: c for c in retenus})
     finally:
         if propre:
             await client.aclose()
