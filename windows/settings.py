@@ -778,6 +778,21 @@ class _PageClips(_PageBase):
             "une minute pèse environ 2,5 Mo par flux."
         ))
 
+        self._decouper = QCheckBox(
+            "Revoir et rogner le clip avant de l'enregistrer")
+        self._decouper.setChecked(bool(config.get("clips", {})
+                                       .get("decouper", True)))
+        self._vl.addWidget(self._decouper)
+        self._vl.addWidget(_hint(
+            "Un clip se prend à chaud : on appuie quand ça se produit, donc "
+            "toujours un peu tard, et le tampon rend les dernières secondes "
+            "en entier. La fenêtre montre ce qui a été gardé et permet d'en "
+            "couper le début et la fin avant de partager.\n"
+            "Le fichier est déjà écrit quand elle s'ouvre : renoncer ne perd "
+            "rien, le clip reste tel qu'il a été pris. La coupe tombe sur "
+            "l'image-clé la plus proche, à environ deux secondes près."
+        ))
+
         self._convert_mp4 = QCheckBox(
             "Convertir les clips en MP4 (et supprimer le .ts)")
         self._convert_mp4.setChecked(bool(config.get("clips", {})
@@ -838,6 +853,7 @@ class _PageClips(_PageBase):
         config["clips"]["auto_on_alert"] = self._auto_clip.isChecked()
         config["clips"]["auto_max_per_hour"] = self._auto_max.value()
         config["clips"]["convert_mp4"] = self._convert_mp4.isChecked()
+        config["clips"]["decouper"] = self._decouper.isChecked()
 
 
 # ── SettingsPanel ─────────────────────────────────────────────────────────────

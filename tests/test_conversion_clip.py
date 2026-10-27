@@ -184,5 +184,10 @@ def test_les_deux_sources_de_clips_sont_branchees():
 
     source = (_p.Path(__file__).parent.parent / "main.py").read_text(encoding="utf-8")
     for emetteur in ("fullscreen.clip_saved", "grid.grid.clip_saved"):
-        assert f"{emetteur}.connect(_convertir_si_demande)" in source, emetteur
+        # Le traitement passe par un lambda, pour porter la fenêtre parente
+        # de la découpe : on vérifie que l'émetteur atteint les DEUX
+        # consommateurs, sans présumer de la forme du branchement.
+        depuis = source.index(f"{emetteur}.connect(")
+        extrait = source[depuis:depuis + 220]
+        assert "_traiter_le_clip" in extrait, f"{emetteur} → traitement"
         assert f"{emetteur}.connect(_SESSION.add_clip)" in source, emetteur

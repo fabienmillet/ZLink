@@ -41,6 +41,14 @@ logger = logging.getLogger(__name__)
 #: bloqué — mieux vaut rendre la main que laisser un processus en plan.
 TIMEOUT_S = 120
 
+#: En dessous, il ne reste plus rien à regarder : on refuse plutôt que
+#: d'écrire un fichier d'un dixième de seconde que personne ne pourra lire.
+_DUREE_MINIMALE_S = 1.0
+
+#: Dit une fois : les deux entrées publiques rendent la même explication.
+_SANS_FFMPEG = ("ffmpeg est introuvable. Il est nécessaire pour convertir un "
+                "clip en MP4 — le .ts reste lisible dans ZLink.")
+
 
 def _ffmpeg() -> str:
     """Chemin du binaire ffmpeg, ou '' s'il n'y en a pas.
@@ -97,14 +105,65 @@ def convertir(source: str | pathlib.Path,
 
     exe = _ffmpeg()
     if not exe:
-        return "", ("ffmpeg est introuvable. Il est nécessaire pour convertir "
-                    "un clip en MP4 — le .ts reste lisible dans ZLink.")
+        return "", _SANS_FFMPEG
 
+    return _remuxer(exe, src, cible)
+
+
+def decouper(source: str | pathlib.Path, debut: float, fin: float,
+             cible: str | pathlib.Path | None = None) -> tuple[str, str]:
+    """Ré-emballe la PORTION [debut, fin] de `source` en MP4.
+
+    Même mécanique que `convertir`, bornée dans le temps : c'est ce qui permet
+    de retirer l'avant et l'après d'un moment gardé sans jamais toucher aux
+    images elles-mêmes.
+
+    **La coupe tombe sur une image-clé.** En copie de flux, ffmpeg ne peut
+    commencer que là où le décodeur peut commencer. Les flux Twitch en posent
+    une toutes les deux secondes environ : le début réel peut donc précéder
+    d'un peu celui demandé. Couper à l'image près supposerait de tout
+    ré-encoder — des minutes de calcul et une perte de qualité pour gagner
+    deux secondes, ce n'est pas le bon échange pour un clip qu'on partage.
+
+    Bloquant, comme `convertir`, et ne lève jamais.
+    """
+    src = pathlib.Path(source)
+    if not src.is_file():
+        return "", f"Fichier introuvable : {src.name}"
+    try:
+        debut, fin = max(0.0, float(debut)), float(fin)
+    except (TypeError, ValueError):
+        return "", "Bornes de découpe illisibles."
+    if fin - debut < _DUREE_MINIMALE_S:
+        return "", (f"Il faut garder au moins {_DUREE_MINIMALE_S:g} seconde "
+                    "de vidéo.")
+
+    exe = _ffmpeg()
+    if not exe:
+        return "", _SANS_FFMPEG
+    return _remuxer(exe, src, cible, debut=debut, fin=fin)
+
+
+def _remuxer(exe: str, src: pathlib.Path,
+             cible: str | pathlib.Path | None,
+             debut: float | None = None,
+             fin: float | None = None) -> tuple[str, str]:
+    """Le ré-emballage proprement dit, entier ou borné."""
     sortie = pathlib.Path(cible) if cible is not None else destination(src)
     try:
         sortie.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return "", f"Dossier de destination inaccessible : {exc}"
+
+    # `-ss` et `-to` AVANT `-i` : ffmpeg saute alors directement dans le
+    # fichier au lieu de le décoder depuis le début pour jeter ce qui précède.
+    # Sur un clip d'une minute la différence ne se voit pas ; sur un tampon de
+    # plusieurs minutes, si.
+    bornes: list[str] = []
+    if debut is not None:
+        bornes += ["-ss", f"{debut:.3f}"]
+    if fin is not None:
+        bornes += ["-to", f"{fin:.3f}"]
 
     resultat = subprocess.run(
         [
@@ -112,7 +171,7 @@ def convertir(source: str | pathlib.Path,
             # -y : la destination a été choisie libre juste au-dessus, mais
             # entre-temps un autre clip a pu la prendre. Sans -y, ffmpeg
             # attendrait une réponse sur une entrée standard qui n'existe pas.
-            "-y", "-i", str(src),
+            "-y", *bornes, "-i", str(src),
             "-c", "copy",
             # Les flux Twitch portent parfois des pistes de données que le
             # conteneur MP4 refuse : les écarter plutôt que faire échouer

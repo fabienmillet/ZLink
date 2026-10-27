@@ -369,11 +369,21 @@ def _creer_fenetres(
     return fullscreen, panel, grid, shell
 
 
-def _convertir_si_demande(_login: str, chemin: str) -> None:
-    """Ré-emballe le clip en MP4 quand les réglages le demandent.
+#: Fenêtres de découpe ouvertes. Sans référence, Python les ramasserait et
+#: elles se refermeraient aussitôt — même piège que les lecteurs de clip.
+_DECOUPES: list = []
+
+
+def _traiter_le_clip(_login: str, chemin: str, parent=None) -> None:
+    """Ce qu'on fait d'un clip une fois le fichier écrit.
+
+    Deux voies, et l'ordre compte : si la découpe est demandée, elle prend la
+    main et produit elle-même le MP4 — la lancer APRÈS une conversion
+    reviendrait à convertir deux fois, et à découper une copie plutôt que
+    l'original.
 
     La configuration est relue à CHAQUE clip, pas mémorisée au démarrage :
-    cocher la case en cours de soirée doit prendre effet sur le clip suivant,
+    cocher une case en cours de soirée doit prendre effet sur le clip suivant,
     et un clip coûte déjà bien plus qu'une lecture de fichier.
     """
     if not chemin or not chemin.lower().endswith(".ts"):
@@ -381,11 +391,58 @@ def _convertir_si_demande(_login: str, chemin: str) -> None:
     from core import config_store
 
     clips = (config_store.load().get("clips") or {})
+    if clips.get("decouper", True) and _ouvrir_la_decoupe(chemin, parent):
+        return
     if not clips.get("convert_mp4"):
         return
     from core import conversion_clip
 
     conversion_clip.convertir_en_arriere_plan(chemin, supprimer_source=True)
+
+
+def _ouvrir_la_decoupe(chemin: str, parent) -> bool:
+    """Propose de rogner le clip. Rend False si ce n'est pas possible.
+
+    Rendre False plutôt que lever, c'est ce qui laisse la conversion ordinaire
+    reprendre la main : sans libmpv ou sans ffmpeg, mieux vaut un clip brut
+    enregistré qu'une fenêtre qui s'ouvre sur du noir.
+    """
+    from windows import decoupe_clip
+
+    possible, raison = decoupe_clip.disponible()
+    if not possible:
+        logger.info("Découpe non proposée : %s", raison)
+        return False
+
+    fenetre = decoupe_clip.FenetreDecoupe(chemin, parent)
+    _DECOUPES.append(fenetre)
+    fenetre.finished.connect(
+        lambda _r, f=fenetre: _DECOUPES.remove(f) if f in _DECOUPES else None)
+    fenetre.enregistre.connect(
+        lambda final, duree, src=chemin: _sur_decoupe_enregistree(src, final))
+    fenetre.show()
+    return True
+
+
+def _sur_decoupe_enregistree(source: str, final: str) -> None:
+    """Le .ts d'origine ne survit que si l'utilisateur tient à ses .ts.
+
+    On réutilise le réglage de conversion plutôt que d'en inventer un second :
+    qui demande des MP4 ne veut pas garder le brut à côté, et qui n'en demande
+    pas garde les deux.
+    """
+    import pathlib as _p
+
+    from core import config_store
+
+    clips = (config_store.load().get("clips") or {})
+    logger.info("Clip découpé : %s", final)
+    if not clips.get("convert_mp4"):
+        return
+    try:
+        _p.Path(source).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug("Clip d'origine non effacé — %s", exc)
 
 
 def _brancher_panel(
@@ -938,12 +995,14 @@ def _brancher_journal_session(app, data_manager, fullscreen, grid) -> None:
     # courant en régie, la touche « C ». Ses clips n'étaient branchés nulle
     # part : ni comptés dans le récapitulatif de fin de soirée, ni convertis.
     fullscreen.clip_saved.connect(_SESSION.add_clip)
-    fullscreen.clip_saved.connect(_convertir_si_demande)
+    fullscreen.clip_saved.connect(
+        lambda lg, ch: _traiter_le_clip(lg, ch, fullscreen))
     if grid is not None:
         grid.hype_alert.connect(
             lambda login, label, score, _c, _e: _SESSION.add_hype(login, label, score))
         grid.grid.clip_saved.connect(_SESSION.add_clip)
-        grid.grid.clip_saved.connect(_convertir_si_demande)
+        grid.grid.clip_saved.connect(
+            lambda lg, ch, g=grid: _traiter_le_clip(lg, ch, g))
 
     # Le récapitulatif est écrit à la fermeture : os._exit court-circuite tout
     # ce qui suit la boucle Qt, aboutToQuit est le dernier moment utile.
